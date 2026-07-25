@@ -26,7 +26,7 @@ use rand_distr::{Distribution, Gumbel};
 /// fixtures and tests (user story 6: "deterministic, reproducible output for
 /// tests and golden fixtures").
 ///
-/// `max_tokens` and `ignore_eos` are honoured by the engine loop (T2), not
+/// `max_tokens` and `ignore_eos` are honoured by the engine loop (#21), not
 /// by [`Sampler`] itself — the sampler is single-step (one token per call)
 /// and stateless across steps. They live here, not in `engine/sequence.rs`,
 /// because nano-vllm's `sampling_params.py` is top-level and `LLM::generate`
@@ -47,13 +47,13 @@ pub struct SamplingParams {
     /// Must be in `(0.0, 1.0]` when `Some`; `Some(1.0)` is a no-op.
     pub top_p: Option<f32>,
 
-    /// Maximum tokens to generate. Enforced by the engine loop (T2), not
+    /// Maximum tokens to generate. Enforced by the engine loop (#21), not
     /// by [`Sampler`]. Lives here because it travels with the per-prompt
     /// sampling config.
     pub max_tokens: usize,
 
     /// If `true`, do not stop generation when the sampler returns an EOS
-    /// token. Enforced by the engine loop (T2).
+    /// token. Enforced by the engine loop (#21).
     pub ignore_eos: bool,
 
     /// Additive presence penalty: subtract this from the logit of any token
@@ -689,7 +689,7 @@ mod tests {
 
         #[test]
         fn sampler_returns_eos_when_eos_is_argmax() {
-            // The engine loop (T2) is what stops generation on EOS. The
+            // The engine loop (#21) is what stops generation on EOS. The
             // sampler-level contract is "if EOS is the argmax of the
             // logits, sampler returns EOS" — the loop above then interprets
             // it. A row whose argmax is at EOS-token-index must sample EOS.
@@ -940,19 +940,19 @@ mod tests {
     // Cross-reference for the 6th T8 invariant (max_tokens boundary). The
     // sampler is single-step (one token per `forward` call) and stateless
     // across steps, so it cannot enforce a token-count boundary itself —
-    // that contract lives in the engine loop (T2 / `engine/mod.rs`), which
-    // counts `step()` returns and stops calling `forward` once a sequence's
-    // sampled-token count reaches `params.max_tokens`. The T2 engine test
-    // `engine::tests::max_tokens_boundary_stops_generation` will pin this
-    // when T2 lands; until then, the field is exercised here only through
-    // `SamplingParams::default().max_tokens == 16`.
+    // that contract lives in EngineCore.step() (#21 / `engine/mod.rs`),
+    // which counts `step()` returns and stops calling `forward` once a
+    // sequence's sampled-token count reaches `params.max_tokens`. The #21
+    // engine test `engine::tests::max_tokens_boundary_stops_generation`
+    // pins this; until #21 lands, the field is exercised here only
+    // through `SamplingParams::default().max_tokens == 16`.
     mod max_tokens_boundary {
         use super::*;
 
         #[test]
         fn default_max_tokens_is_set() {
             // Smoke check: the field travels with SamplingParams and has a
-            // sane default. Boundary enforcement is engine-level (T2) — see
+            // sane default. Boundary enforcement is engine-level (#21) — see
             // module doc comment above.
             assert_eq!(SamplingParams::default().max_tokens, 16);
             assert_eq!(
