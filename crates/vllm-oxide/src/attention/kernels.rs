@@ -43,22 +43,37 @@ struct TensorGuard {
     _storage: RwLockReadGuard<'static, Storage>,
 }
 
+macro_rules! extract_ptr {
+    ($storage:expr, $layout:expr, $ty:ty) => {{
+        let slice = $storage.as_cuda_slice::<$ty>()?;
+        let slice = slice.slice($layout.start_offset()..);
+        let stream = slice.stream();
+        let (ptr, guard) = slice.device_ptr(stream);
+        let guard: SyncOnDrop<'static> = unsafe { std::mem::transmute(guard) };
+        (ptr, guard)
+    }};
+}
+
 fn slice_ptr(tensor: &Tensor) -> Result<(u64, TensorGuard)> {
     let (storage, layout) = tensor.storage_and_layout();
     let cuda_storage = match &*storage {
         Storage::Cuda(s) => s,
         _ => candle_core::bail!("expected CUDA storage"),
     };
-    let slice = cuda_storage.as_cuda_slice::<u8>()?;
-    let slice = slice.slice(layout.start_offset()..);
-    let stream = slice.stream();
-    let (ptr, guard) = slice.device_ptr(stream);
 
-    // SAFETY: Both the SyncOnDrop guard and the RwLockReadGuard borrow from the
-    // tensor's internal storage. We keep both alive in TensorGuard, ensuring
-    // the device handle, memory, and read-lock remain valid for the guard's
-    // lifetime. The caller must drop TensorGuard before the source Tensor.
-    let guard: SyncOnDrop<'static> = unsafe { std::mem::transmute(guard) };
+    let (ptr, guard): (u64, SyncOnDrop<'static>) = match tensor.dtype() {
+        DType::BF16 => extract_ptr!(cuda_storage, layout, half::bf16),
+        DType::F16 => extract_ptr!(cuda_storage, layout, half::f16),
+        DType::F32 => extract_ptr!(cuda_storage, layout, f32),
+        DType::I64 => extract_ptr!(cuda_storage, layout, i64),
+        DType::U8 => extract_ptr!(cuda_storage, layout, u8),
+        DType::U32 => extract_ptr!(cuda_storage, layout, u32),
+        other => candle_core::bail!("unsupported tensor dtype for FFI: {other:?}"),
+    };
+
+    // SAFETY: SyncOnDrop borrows from the CudaSlice, which is owned by storage.
+    // We keep the RwLockReadGuard alive in TensorGuard, so the device handle and
+    // memory remain valid. Caller must drop TensorGuard before the source Tensor.
     let storage: RwLockReadGuard<'static, Storage> =
         unsafe { std::mem::transmute(storage) };
 
@@ -100,7 +115,6 @@ pub fn reshape_and_cache(
     let (kc_ptr, _g3) = slice_ptr(key_cache)?;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let (vc_ptr, _g4) = slice_ptr(value_cache)?;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let (sm_ptr, _g5) = slice_ptr(slot_mapping)?;
 
     let stream = get_stream(key)?;

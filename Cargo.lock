@@ -1727,6 +1727,7 @@ dependencies = [
  "candle-core",
  "candle-flash-attn",
  "cudaforge",
+ "half",
  "rand 0.8.7",
  "rand_distr 0.4.3",
 ]
