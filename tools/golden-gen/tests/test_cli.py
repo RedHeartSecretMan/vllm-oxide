@@ -69,10 +69,10 @@ class TestCLI:
         assert result.returncode == 0
 
         safetensors_files = list((tmp_path / "output").glob("*.safetensors"))
-        # 5 canonical + 20 regression = 25 prompts x 3 fake oracles = 75 fixtures
-        # However the FakeOracle always generates all categories
-        assert len(safetensors_files) == 75, (
-            f"Expected 75 .safetensors files, got {len(safetensors_files)}"
+        # 4 canonical singles + 4 canonical_05 sub-prompts + 20 regression = 28 prompt-ids
+        # 28 x 3 fake oracles = 84 fixtures
+        assert len(safetensors_files) == 84, (
+            f"Expected 84 .safetensors files, got {len(safetensors_files)}"
         )
 
         # Verify safetensors content
@@ -119,9 +119,10 @@ class TestCLI:
         assert result.returncode == 0
 
         safetensors_files = list((tmp_path / "output").glob("*.safetensors"))
-        # 5 canonical prompts x 3 fake oracles = 15 fixtures
-        assert len(safetensors_files) == 15, (
-            f"Expected 15 .safetensors files for canonical-only, got {len(safetensors_files)}"
+        # canonical_01-04 (4 singles) + canonical_05 (4 sub-prompts) = 8 prompt-ids
+        # 8 x 3 fake oracles = 24 fixtures
+        assert len(safetensors_files) == 24, (
+            f"Expected 24 .safetensors files for canonical-only, got {len(safetensors_files)}"
         )
 
     def test_version_accessible(self):

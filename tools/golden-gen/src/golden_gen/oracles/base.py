@@ -22,12 +22,11 @@ class OracleResult:
     @classmethod
     def for_canonical(
         cls,
-        *,
         token_ids: NDArray[np.int64],
         logits_per_step: NDArray[np.float32],
         n_prompt_tokens: int,
     ) -> OracleResult:
-        """Build a result for a canonical prompt (full logits, no top-5)."""
+        """Create a canonical result (full logits, empty top-5)."""
         return cls(
             token_ids=token_ids,
             logits_per_step=logits_per_step,
@@ -39,13 +38,12 @@ class OracleResult:
     @classmethod
     def for_regression(
         cls,
-        *,
         token_ids: NDArray[np.int64],
         top5_indices: NDArray[np.int64],
         top5_logits: NDArray[np.float32],
         n_prompt_tokens: int,
     ) -> OracleResult:
-        """Build a result for a regression prompt (top-5 only, no full logits)."""
+        """Create a regression result (top-5 only, empty full logits)."""
         return cls(
             token_ids=token_ids,
             logits_per_step=np.empty((0, 0), dtype=np.float32),
@@ -60,8 +58,12 @@ class Oracle(Protocol):
 
     name: str
 
-    def generate(self, prompt: PromptSpec) -> OracleResult:
-        """Run generation on a single prompt and return logits + token IDs."""
+    def generate(self, prompt: PromptSpec) -> list[OracleResult]:
+        """Run generation on a prompt and return results.
+
+        For single prompts: returns a list of 1.
+        For batch prompts (prompt.is_batch): returns a list of N, one per sub-prompt.
+        """
         ...
 
     def close(self) -> None:

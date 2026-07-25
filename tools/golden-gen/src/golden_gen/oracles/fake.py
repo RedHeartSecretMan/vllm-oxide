@@ -20,14 +20,25 @@ class FakeOracle:
 
     name = "fake"
 
-    def generate(self, prompt: PromptSpec) -> OracleResult:
+    def generate(self, prompt: PromptSpec) -> list[OracleResult]:
         """Generate fake deterministic output for a prompt.
 
         Uses base seed from prompt.id (shared across oracles) plus
         a small per-oracle perturbation seeded from (prompt.id, self.name).
+
+        For batch prompts: returns one result per sub-prompt, each with
+        a distinct seed incorporating the sub-prompt index.
         """
-        base_rng = np.random.default_rng(seed=hash(prompt.id) & 0xFFFFFFFF)
-        perturb_rng = np.random.default_rng(seed=hash((prompt.id, self.name)) & 0xFFFFFFFF)
+        if prompt.is_batch:
+            assert prompt.sub_prompts is not None  # is_batch guarantees this
+            return [self._generate_one(prompt, sub_idx=i) for i in range(len(prompt.sub_prompts))]
+        return [self._generate_one(prompt, sub_idx=None)]
+
+    def _generate_one(self, prompt: PromptSpec, sub_idx: int | None = None) -> OracleResult:
+        base_seed = hash(prompt.id) if sub_idx is None else hash((prompt.id, sub_idx))
+        base_rng = np.random.default_rng(seed=base_seed & 0xFFFFFFFF)
+        seed_tuple = (prompt.id, self.name) if sub_idx is None else (prompt.id, self.name, sub_idx)
+        perturb_rng = np.random.default_rng(seed=hash(seed_tuple) & 0xFFFFFFFF)
 
         if prompt.category == "canonical":
             max_tokens = CANONICAL_MAX_TOKENS
@@ -36,9 +47,11 @@ class FakeOracle:
             perturb = perturb_rng.standard_normal((n_tokens, VOCAB_SIZE), dtype=np.float32) * 1e-3
             logits = base_logits + perturb
             token_ids = np.argmax(logits, axis=1).astype(np.int64)
-            return OracleResult.for_canonical(
+            return OracleResult(
                 token_ids=token_ids,
                 logits_per_step=logits,
+                top5_indices=np.empty((0, 5), dtype=np.int64),
+                top5_logits=np.empty((0, 5), dtype=np.float32),
                 n_prompt_tokens=10,
             )
         else:
@@ -50,8 +63,9 @@ class FakeOracle:
             token_ids = np.argmax(logits, axis=1).astype(np.int64)
             top5_indices = np.argsort(-logits, axis=1)[:, :5].astype(np.int64)
             top5_logits = np.take_along_axis(logits, top5_indices, axis=1)
-            return OracleResult.for_regression(
+            return OracleResult(
                 token_ids=token_ids,
+                logits_per_step=np.empty((0, 0), dtype=np.float32),
                 top5_indices=top5_indices,
                 top5_logits=top5_logits,
                 n_prompt_tokens=10,

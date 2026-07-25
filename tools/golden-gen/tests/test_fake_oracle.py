@@ -20,7 +20,9 @@ class TestFakeOracle:
             prompt="Hello",
             description="test",
         )
-        result = self.oracle.generate(prompt)
+        results = self.oracle.generate(prompt)
+        assert len(results) == 1
+        result = results[0]
         assert len(result.token_ids) > 0
         assert result.token_ids.dtype == np.int64
         assert result.logits_per_step.shape[1] == VOCAB_SIZE
@@ -36,7 +38,9 @@ class TestFakeOracle:
             prompt="Write Python",
             description="test",
         )
-        result = self.oracle.generate(prompt)
+        results = self.oracle.generate(prompt)
+        assert len(results) == 1
+        result = results[0]
         assert len(result.token_ids) > 0
         assert result.logits_per_step.shape == (0, 0)
         assert result.top5_indices.shape[1] == 5
@@ -51,8 +55,8 @@ class TestFakeOracle:
             prompt="Hello",
             description="test",
         )
-        r1 = self.oracle.generate(prompt)
-        r2 = self.oracle.generate(prompt)
+        r1 = self.oracle.generate(prompt)[0]
+        r2 = self.oracle.generate(prompt)[0]
         np.testing.assert_array_equal(r1.token_ids, r2.token_ids)
         np.testing.assert_array_equal(r1.logits_per_step, r2.logits_per_step)
 
@@ -66,8 +70,8 @@ class TestFakeOracle:
         )
         o1 = FakeOracle()
         o2 = FakeOracle()
-        r1 = o1.generate(prompt)
-        r2 = o2.generate(prompt)
+        r1 = o1.generate(prompt)[0]
+        r2 = o2.generate(prompt)[0]
         np.testing.assert_array_equal(r1.token_ids, r2.token_ids)
 
     def test_different_names_different_output(self):
@@ -84,9 +88,9 @@ class TestFakeOracle:
         o_t.name = "transformers"
         o_n.name = "nanovllm"
         o_v.name = "vllm_v1"
-        r_t = o_t.generate(prompt)
-        r_n = o_n.generate(prompt)
-        r_v = o_v.generate(prompt)
+        r_t = o_t.generate(prompt)[0]
+        r_n = o_n.generate(prompt)[0]
+        r_v = o_v.generate(prompt)[0]
 
         # Different names -> different logits
         with pytest.raises(AssertionError):
@@ -111,8 +115,8 @@ class TestFakeOracle:
             prompt="World",
             description="test",
         )
-        r1 = self.oracle.generate(p1)
-        r2 = self.oracle.generate(p2)
+        r1 = self.oracle.generate(p1)[0]
+        r2 = self.oracle.generate(p2)[0]
         with pytest.raises(AssertionError):
             np.testing.assert_array_equal(r1.token_ids, r2.token_ids)
 
@@ -123,7 +127,7 @@ class TestFakeOracle:
             prompt="short",
             description="test",
         )
-        result = self.oracle.generate(prompt)
+        result = self.oracle.generate(prompt)[0]
         assert len(result.token_ids) <= 32
 
     def test_close_does_not_raise(self):
@@ -141,10 +145,39 @@ class TestFakeOracle:
         o2 = FakeOracle()
         o1.name = "transformers"
         o2.name = "nanovllm"
-        r1 = o1.generate(prompt)
-        r2 = o2.generate(prompt)
+        r1 = o1.generate(prompt)[0]
+        r2 = o2.generate(prompt)[0]
         per_step_l2 = np.linalg.norm(r1.logits_per_step - r2.logits_per_step, axis=1)
         # L2 should be non-zero (different oracle names) and reasonable
         # (~0.55 for 1e-3 perturbation across 151936 vocab, bounded by 10 for sanity)
         assert per_step_l2.max() > 0, "Expected non-zero L2 for different oracle names"
         assert per_step_l2.max() < 10.0, f"L2 too large: {per_step_l2.max()}"
+
+    def test_batch_returns_n_results(self):
+        batch_prompt = PromptSpec(
+            id="canonical_05",
+            category="canonical",
+            prompt="batch test",
+            description="test",
+            sub_prompts=["A", "B", "C", "D"],
+        )
+        results = self.oracle.generate(batch_prompt)
+        assert len(results) == 4
+        for r in results:
+            assert len(r.token_ids) > 0
+            assert r.logits_per_step.shape[1] == VOCAB_SIZE
+            assert r.n_prompt_tokens > 0
+
+    def test_batch_results_differ(self):
+        batch_prompt = PromptSpec(
+            id="canonical_05",
+            category="canonical",
+            prompt="batch test",
+            description="test",
+            sub_prompts=["A", "B", "C", "D"],
+        )
+        results = self.oracle.generate(batch_prompt)
+        # Each sub-prompt should produce different output (different seed)
+        for i in range(1, len(results)):
+            with pytest.raises(AssertionError):
+                np.testing.assert_array_equal(results[0].token_ids, results[i].token_ids)

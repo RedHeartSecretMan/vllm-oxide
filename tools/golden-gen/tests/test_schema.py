@@ -67,6 +67,49 @@ class TestPromptSpec:
         with pytest.raises(ValidationError):
             spec.id = "changed"  # type: ignore[misc]
 
+    def test_is_batch_false_by_default(self):
+        spec = PromptSpec(
+            id="canonical_01",
+            category="canonical",
+            prompt="Hello",
+            description="test",
+        )
+        assert spec.is_batch is False
+
+    def test_is_batch_true_with_multiple_sub_prompts(self):
+        spec = PromptSpec(
+            id="canonical_05",
+            category="canonical",
+            prompt="batch test",
+            description="test",
+            sub_prompts=["prompt a", "prompt b", "prompt c", "prompt d"],
+        )
+        assert spec.is_batch is True
+        assert len(spec.sub_prompts) == 4
+
+    def test_is_batch_false_with_single_sub_prompt(self):
+        spec = PromptSpec(
+            id="test",
+            category="canonical",
+            prompt="test",
+            description="test",
+            sub_prompts=["only one"],
+        )
+        assert spec.is_batch is False
+
+    def test_sub_prompts_roundtrip_json(self):
+        spec = PromptSpec(
+            id="canonical_05",
+            category="canonical",
+            prompt="batch test",
+            description="test",
+            sub_prompts=["a", "b", "c", "d"],
+        )
+        data = json.loads(spec.model_dump_json())
+        restored = PromptSpec.model_validate(data)
+        assert restored.sub_prompts == ["a", "b", "c", "d"]
+        assert restored.is_batch is True
+
     def test_roundtrip_json(self):
         spec = PromptSpec(
             id="canonical_01",

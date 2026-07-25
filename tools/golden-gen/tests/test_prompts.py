@@ -44,11 +44,12 @@ class TestLoadPrompts:
             assert len(p.prompt) > 0, f"Prompt {p.id} has empty content"
             assert len(p.description) > 0, f"Prompt {p.id} has empty description"
 
-    def test_canonical_05_has_note(self):
+    def test_canonical_05_is_batch(self):
         prompts = load_canonical(PROMPTS_DIR)
         c05 = next(p for p in prompts if p.id == "canonical_05")
-        assert c05.note is not None
-        assert "expanded" in c05.note
+        assert c05.is_batch
+        assert c05.sub_prompts is not None
+        assert len(c05.sub_prompts) == 4
 
     def test_chat_template_flag(self):
         prompts = load_canonical(PROMPTS_DIR)

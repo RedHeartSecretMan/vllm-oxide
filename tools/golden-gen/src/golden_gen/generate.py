@@ -7,8 +7,53 @@ from numpy.typing import NDArray
 
 from golden_gen.config import VOCAB_SIZE
 from golden_gen.io import save_fixture
-from golden_gen.oracles.base import Oracle
-from golden_gen.schema import FixtureMetadata, PromptCategory, PromptSpec
+from golden_gen.oracles.base import Oracle, OracleResult
+from golden_gen.schema import FixtureMetadata, OracleName, PromptCategory, PromptSpec
+
+
+def _save_fixture(
+    result: OracleResult,
+    prompt_id: str,
+    oracle_name: OracleName,
+    category: PromptCategory,
+    output_dir: Path,
+) -> FixtureMetadata:
+    """Save a single fixture file and return its metadata."""
+    filename = f"{prompt_id}.{oracle_name}.safetensors"
+    filepath = output_dir / filename
+
+    logits: NDArray[np.float32] | None = None
+    top5_indices: NDArray[np.int64] | None = None
+    top5_logits: NDArray[np.float32] | None = None
+
+    if category == "canonical":
+        logits = result.logits_per_step
+    else:
+        top5_indices = result.top5_indices
+        top5_logits = result.top5_logits
+
+    sha256 = save_fixture(
+        path=filepath,
+        token_ids=result.token_ids,
+        logits=logits,
+        top5_indices=top5_indices,
+        top5_logits=top5_logits,
+        n_prompt_tokens=result.n_prompt_tokens,
+    )
+
+    n_tokens = len(result.token_ids)
+    shape: tuple[int, int] = (n_tokens, VOCAB_SIZE) if category == "canonical" else (0, 0)
+
+    return FixtureMetadata(
+        prompt_id=prompt_id,
+        category=category,
+        oracle=oracle_name,
+        num_tokens=n_tokens,
+        logits_dtype="float32",
+        logits_shape=shape,
+        sha256=sha256,
+        filename=filename,
+    )
 
 
 def run_all(
@@ -19,6 +64,9 @@ def run_all(
     only_category: PromptCategory | None = None,
 ) -> list[FixtureMetadata]:
     """For each (oracle, prompt): generate, save .safetensors fixture, return metadata.
+
+    For batch prompts (prompt.is_batch), one fixture per sub-prompt is saved
+    with a suffixed ID (e.g., canonical_05a, canonical_05b, ...).
 
     Args:
         oracles: List of Oracle instances.
@@ -33,53 +81,47 @@ def run_all(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     fixtures: list[FixtureMetadata] = []
-    oracle_names: list[str] = [o.name for o in oracles]
+    oracle_names: list[OracleName] = []
+    for o in oracles:
+        if o.name == "transformers":
+            oracle_names.append("transformers")
+        elif o.name == "nanovllm":
+            oracle_names.append("nanovllm")
+        elif o.name == "vllm_v1":
+            oracle_names.append("vllm_v1")
+        elif o.name == "fake":
+            oracle_names.append("fake")
+        else:
+            oracle_names.append(o.name)  # type: ignore[arg-type]
 
     for prompt in prompts:
         if only_category and prompt.category != only_category:
             continue
 
         for oracle, oname in zip(oracles, oracle_names, strict=True):
-            result = oracle.generate(prompt)
+            results = oracle.generate(prompt)
 
-            filename = f"{prompt.id}.{oname}.safetensors"
-            filepath = output_dir / filename
-
-            logits: NDArray[np.float32] | None = None
-            top5_indices: NDArray[np.int64] | None = None
-            top5_logits: NDArray[np.float32] | None = None
-
-            if prompt.category == "canonical":
-                logits = result.logits_per_step
+            if prompt.is_batch:
+                # Save one fixture per sub-prompt: canonical_05a, canonical_05b, ...
+                for i, result in enumerate(results):
+                    suffix = chr(ord("a") + i)
+                    sub_id = f"{prompt.id}{suffix}"
+                    fixture = _save_fixture(
+                        result,
+                        prompt_id=sub_id,
+                        oracle_name=oname,
+                        category=prompt.category,
+                        output_dir=output_dir,
+                    )
+                    fixtures.append(fixture)
             else:
-                top5_indices = result.top5_indices
-                top5_logits = result.top5_logits
-
-            sha256 = save_fixture(
-                path=filepath,
-                token_ids=result.token_ids,
-                logits=logits,
-                top5_indices=top5_indices,
-                top5_logits=top5_logits,
-                n_prompt_tokens=result.n_prompt_tokens,
-            )
-
-            n_tokens = len(result.token_ids)
-            shape: tuple[int, int] = (
-                (n_tokens, VOCAB_SIZE) if prompt.category == "canonical" else (0, 0)
-            )
-
-            fixtures.append(
-                FixtureMetadata(
+                fixture = _save_fixture(
+                    results[0],
                     prompt_id=prompt.id,
+                    oracle_name=oname,
                     category=prompt.category,
-                    oracle=oname,
-                    num_tokens=n_tokens,
-                    logits_dtype="float32",
-                    logits_shape=shape,
-                    sha256=sha256,
-                    filename=filename,
+                    output_dir=output_dir,
                 )
-            )
+                fixtures.append(fixture)
 
     return fixtures

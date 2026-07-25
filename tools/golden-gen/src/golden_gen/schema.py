@@ -18,10 +18,16 @@ class PromptSpec(BaseModel):
 
     id: str
     category: PromptCategory
-    prompt: str
+    prompt: str  # For batch prompts, this is a description; sub_prompts holds the actual prompts
     description: str
     chat_template: bool = False
     note: str | None = None
+    sub_prompts: list[str] | None = None  # When set, this is a batch prompt
+
+    @property
+    def is_batch(self) -> bool:
+        """Whether this prompt exercises the batch/continuous-batching path."""
+        return self.sub_prompts is not None and len(self.sub_prompts) > 1
 
 
 class OracleVersions(BaseModel):

@@ -12,9 +12,3 @@ TOP_K_REGRESSION = 5
 TOLERANCE_CALIBRATION_FACTOR = 2.0
 NANO_VLLM_TEMPERATURE = 1e-9
 ORACLE_INVESTIGATION_THRESHOLD = 0.1  # Spec T8 Q8.2: divergence > 0.1 means investigate
-DEVIATION_REPORT_THRESHOLD = 1e-6  # Log a KnownDeviation if L2 or argmax mismatch exceeds this
-
-
-def max_tokens_for_category(category: str) -> int:
-    """Max generation tokens for a prompt category."""
-    return CANONICAL_MAX_TOKENS if category == "canonical" else REGRESSION_MAX_TOKENS
