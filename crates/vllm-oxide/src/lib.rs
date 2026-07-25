@@ -16,6 +16,15 @@ pub(crate) mod utils;
 pub use utils::{kv_cache_layout_shape, round_up};
 pub use sampler::{Sampler, SamplingParams};
 
+// T15 — weight loader + config (ADR-0002). Loader is model-agnostic: returns
+// a candle `ShardedVarBuilder`; all fusion (q/k/v, gate/up) lives in
+// `Linear::<P>::from_vb` (T3, lands later).
+pub use config::{
+    default_dtype, default_dtype_from_config_json, is_hf_hub_offline, is_offline_value,
+    HFConfig, HF_HUB_OFFLINE_ENV, Source,
+};
+pub use loader::load_weights;
+
 // Module stubs — working code lands in downstream tickets (T2 engine,
 // T3 layers/loader, T4 attention, T5 model). Dependency DAG per ADR-0004:
 // layers / attention / loader / sampler are leaves; models depends on
