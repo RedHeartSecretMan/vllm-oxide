@@ -20,6 +20,7 @@ path = "src/lib.rs"
 # Sampler only needs CPU tensor ops, so no `features = ["cuda"]` here;
 # attention/ (T4) adds that on its own line.
 candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
+candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
 # Gumbel-max sampling noise source.
 rand = "0.8"
 rand_distr = "0.4"

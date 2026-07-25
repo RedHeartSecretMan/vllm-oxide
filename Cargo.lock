@@ -101,6 +101,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-nn"
+version = "0.11.0"
+source = "git+https://github.com/huggingface/candle.git?rev=27f20fea993c81ea6d32ce44018f42b68466525e#27f20fea993c81ea6d32ce44018f42b68466525e"
+dependencies = [
+ "candle-core",
+ "half",
+ "libc",
+ "num-traits",
+ "rayon",
+ "safetensors",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1272,6 +1287,7 @@ name = "vllm_oxide"
 version = "0.1.0"
 dependencies = [
  "candle-core",
+ "candle-nn",
  "rand 0.8.7",
  "rand_distr 0.4.3",
 ]
