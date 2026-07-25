@@ -1,0 +1,21 @@
+[package]
+name = "vllm_oxide"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "A Rust port of nano-vllm trending toward vLLM's V1 architecture (single-GPU, Qwen3-focused, offline LLM inference)."
+
+[lib]
+name = "vllm_oxide"
+path = "src/lib.rs"
+
+# v0.1 has no external dependencies yet — the scaffold compiles as pure Rust.
+# Downstream tickets (T2–T5) add: candle-core, candle-nn, candle-flash-attn,
+# hf-hub, tokenizers, anyhow, half, bytemuck, etc. Keeping this empty makes
+# the scaffold's build-time near-zero and isolates downstream build breakage.
+
+[lints]
+workspace = true

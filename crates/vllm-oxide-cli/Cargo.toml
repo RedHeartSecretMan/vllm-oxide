@@ -1,0 +1,17 @@
+[package]
+name = "vllm_oxide_cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Thin CLI binary for vllm-oxide — parses argv and calls LLM::generate."
+
+[dependencies]
+# v0.1 scaffold — the CLI is a stub. Downstream tickets wire `vllm_oxide`,
+# `clap`, `anyhow`, and `tokio`. Keeping this empty keeps the scaffold build
+# fast and lets issue #13's acceptance criteria land independently.
+
+[lints]
+workspace = true

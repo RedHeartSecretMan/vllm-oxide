@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target
+**/target/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agent working state (not project code)
+.sisyphus/

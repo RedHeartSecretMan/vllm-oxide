@@ -1,0 +1,31 @@
+[workspace]
+members = ["crates/vllm-oxide", "crates/vllm-oxide-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/RedHeartSecretMan/vllm-oxide"
+authors = ["vllm-oxide contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# `warn` rather than `deny` so CI surfaces issues without blocking exploration;
+# promote to `deny` post-v0.1 once the lints are observed clean.
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
