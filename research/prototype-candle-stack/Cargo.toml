@@ -1,0 +1,22 @@
+# ⚠️ THROWAWAY PROTOTYPE — vllm-oxide T10 (#11)
+# Not the vllm-oxide crate layout (T9 undecided). Validates T3's "Stack A"
+# assumptions: (a) candle→cudarc→extern "C" seam, (b) candle-flash-attn paged API.
+# See README.md.
+[package]
+name = "prototype-candle-stack"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Pinned to the SAME git rev mistral.rs uses (known-good for the cudarc seam).
+# R1 from librarian findings: published 0.11.0 may not expose CudaStorageSlice etc.
+candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e", features = ["cuda"] }
+# Phase B: paged flash-attn kernel (PR #3655). Same rev — workspace consistency.
+candle-flash-attn = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
+anyhow = "1"
+half = "2.7"
+
+[build-dependencies]
+cudaforge = "0.1.2"
+anyhow = "1"
