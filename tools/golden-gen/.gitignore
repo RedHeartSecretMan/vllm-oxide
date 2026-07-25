@@ -1,0 +1,8 @@
+output/
+.venv/
+__pycache__/
+*.pyc
+*.safetensors
+.mypy_cache/
+.ruff_cache/
+*.egg-info/

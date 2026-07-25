@@ -1,0 +1,61 @@
+[project]
+name = "golden-gen"
+version = "0.1.0"
+description = "Golden fixture generator for vllm-oxide oracle triangle"
+requires-python = ">=3.11,<3.13"
+classifiers = [
+    "Private :: Do Not Upload",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "numpy>=1.26",
+    "safetensors>=0.4.0",
+    "pydantic>=2.5",
+    "huggingface-hub>=0.20",
+]
+
+[project.scripts]
+golden-gen = "golden_gen.cli:main"
+
+[project.optional-dependencies]
+gpu = [
+    "transformers>=4.43.0,<5.0",
+    "vllm>=0.10.0",
+    "torch>=2.4.0",
+]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+nano-vllm = { path = "/tmp/opencode/nano-vllm", editable = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["nanovllm.*", "vllm.*", "transformers.*", "torch.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
