@@ -14,6 +14,7 @@ pub(crate) mod utils;
 // Public API surface: per ADR-0004 R4, `lib.rs` is the ONLY module that issues
 // top-level `pub use`. Internal modules stay at `pub(crate)` or stricter.
 pub use utils::{kv_cache_layout_shape, round_up};
+pub use sampler::{Sampler, SamplingParams};
 
 // Module stubs — working code lands in downstream tickets (T2 engine,
 // T3 layers/loader, T4 attention, T5 model). Dependency DAG per ADR-0004:

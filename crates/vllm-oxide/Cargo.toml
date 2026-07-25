@@ -12,10 +12,17 @@ description = "A Rust port of nano-vllm trending toward vLLM's V1 architecture (
 name = "vllm_oxide"
 path = "src/lib.rs"
 
-# v0.1 has no external dependencies yet — the scaffold compiles as pure Rust.
-# Downstream tickets (T2–T5) add: candle-core, candle-nn, candle-flash-attn,
-# hf-hub, tokenizers, anyhow, half, bytemuck, etc. Keeping this empty makes
-# the scaffold's build-time near-zero and isolates downstream build breakage.
+[dependencies]
+# Pinned to rev `27f20fea` per the parent spec #12 cross-cutting risk note
+# ("candle-flash-attn paged API depends on PR #3655; prototype validated at
+# 27f20fea on sm_89 + CUDA 13.2 — T10"). That rev includes the paged
+# windowed-attn PR so the attention/ module lands later without a rev bump.
+# Sampler only needs CPU tensor ops, so no `features = ["cuda"]` here;
+# attention/ (T4) adds that on its own line.
+candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
+# Gumbel-max sampling noise source.
+rand = "0.8"
+rand_distr = "0.4"
 
 [lints]
 workspace = true
