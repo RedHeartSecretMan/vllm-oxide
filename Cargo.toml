@@ -11,11 +11,11 @@ repository = "https://github.com/RedHeartSecretMan/vllm-oxide"
 authors = ["vllm-oxide contributors"]
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so audited FFI seams (attention/kernels.rs — ticket #18)
+# can scope-allow `unsafe` via `#[allow(unsafe_code)]` on that module alone.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
-# `warn` rather than `deny` so CI surfaces issues without blocking exploration;
-# promote to `deny` post-v0.1 once the lints are observed clean.
 cast_possible_truncation = "warn"
 cast_precision_loss = "warn"
 cast_sign_loss = "warn"
