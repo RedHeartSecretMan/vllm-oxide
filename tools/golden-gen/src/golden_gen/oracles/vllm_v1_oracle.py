@@ -11,12 +11,11 @@ from typing import Any
 import numpy as np
 
 from golden_gen.config import (
-    CANONICAL_MAX_TOKENS,
     MODEL_ID,
     MODEL_REVISION,
-    REGRESSION_MAX_TOKENS,
     TOP_K_REGRESSION,
     VOCAB_SIZE,
+    max_tokens_for_category,
 )
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
@@ -49,7 +48,7 @@ class VllmV1Oracle:
 
         sp = SamplingParams(
             temperature=0,
-            max_tokens=CANONICAL_MAX_TOKENS,
+            max_tokens=max_tokens_for_category(prompt.category),
             logprobs=-1,
         )
         out = self.llm.generate([prompt.prompt], sp)[0]
@@ -71,11 +70,9 @@ class VllmV1Oracle:
             for tok_id, logprob_obj in step_dict.items():
                 logits[t, tok_id] = logprob_obj.logprob
 
-        return OracleResult(
+        return OracleResult.for_canonical(
             token_ids=token_ids,
             logits_per_step=logits,
-            top5_indices=np.empty((0, 5), dtype=np.int64),
-            top5_logits=np.empty((0, 5), dtype=np.float32),
             n_prompt_tokens=n_prompt_tokens,
         )
 
@@ -100,9 +97,8 @@ class VllmV1Oracle:
                     top5_logits[t, k] = logprob_obj.logprob
 
             results.append(
-                OracleResult(
+                OracleResult.for_regression(
                     token_ids=token_ids,
-                    logits_per_step=np.empty((0, 0), dtype=np.float32),
                     top5_indices=top5_indices,
                     top5_logits=top5_logits,
                     n_prompt_tokens=n_prompt_tokens,
@@ -118,7 +114,7 @@ class VllmV1Oracle:
 
             sp = SamplingParams(
                 temperature=0,
-                max_tokens=REGRESSION_MAX_TOKENS,
+                max_tokens=max_tokens_for_category(prompt.category),
                 logprobs=TOP_K_REGRESSION,
             )
             return self._generate_regression([prompt.prompt], sp)[0]

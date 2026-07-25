@@ -26,12 +26,11 @@ from typing import Any
 import numpy as np
 
 from golden_gen.config import (
-    CANONICAL_MAX_TOKENS,
     MODEL_ID,
     MODEL_REVISION,
     NANO_VLLM_TEMPERATURE,
-    REGRESSION_MAX_TOKENS,
     TOP_K_REGRESSION,
+    max_tokens_for_category,
 )
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
@@ -176,9 +175,7 @@ class NanovllmOracle:
         return results
 
     def generate(self, prompt: PromptSpec) -> OracleResult:
-        max_tokens = (
-            CANONICAL_MAX_TOKENS if prompt.category == "canonical" else REGRESSION_MAX_TOKENS
-        )
+        max_tokens = max_tokens_for_category(prompt.category)
         return self._run([prompt.prompt], max_tokens)[0]
 
     def close(self) -> None:

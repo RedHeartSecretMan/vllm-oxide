@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from golden_gen.config import VOCAB_SIZE
 from golden_gen.io import save_fixture
 from golden_gen.oracles.base import Oracle
-from golden_gen.schema import FixtureMetadata, OracleName, PromptCategory, PromptSpec
+from golden_gen.schema import FixtureMetadata, PromptCategory, PromptSpec
 
 
 def run_all(
@@ -33,18 +33,7 @@ def run_all(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     fixtures: list[FixtureMetadata] = []
-    oracle_names: list[OracleName] = []
-    for o in oracles:
-        if o.name == "transformers":
-            oracle_names.append("transformers")
-        elif o.name == "nanovllm":
-            oracle_names.append("nanovllm")
-        elif o.name == "vllm_v1":
-            oracle_names.append("vllm_v1")
-        elif o.name == "fake":
-            oracle_names.append("fake")
-        else:
-            oracle_names.append(o.name)  # type: ignore[arg-type]
+    oracle_names: list[str] = [o.name for o in oracles]
 
     for prompt in prompts:
         if only_category and prompt.category != only_category:

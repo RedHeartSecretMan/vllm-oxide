@@ -2,23 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 
 from golden_gen.config import (
     ATTN_IMPLEMENTATION,
-    CANONICAL_MAX_TOKENS,
     MODEL_ID,
     MODEL_REVISION,
-    REGRESSION_MAX_TOKENS,
     TOP_K_REGRESSION,
+    max_tokens_for_category,
 )
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
-
-if TYPE_CHECKING:
-    pass
 
 
 class TransformersOracle:
@@ -55,9 +49,7 @@ class TransformersOracle:
     def generate(self, prompt: PromptSpec) -> OracleResult:
         import torch
 
-        max_tokens = (
-            CANONICAL_MAX_TOKENS if prompt.category == "canonical" else REGRESSION_MAX_TOKENS
-        )
+        max_tokens = max_tokens_for_category(prompt.category)
 
         inputs = self.tokenizer(
             prompt.prompt,
@@ -86,20 +78,17 @@ class TransformersOracle:
         if prompt.category == "canonical":
             logits_list = [logit[0].cpu().numpy().astype(np.float32) for logit in out.logits]
             logits = np.stack(logits_list, axis=0)  # [n, vocab_size]
-            return OracleResult(
+            return OracleResult.for_canonical(
                 token_ids=token_ids,
                 logits_per_step=logits,
-                top5_indices=np.empty((0, 5), dtype=np.int64),
-                top5_logits=np.empty((0, 5), dtype=np.float32),
                 n_prompt_tokens=n_prompt_tokens,
             )
         else:
             logits_list = [logit[0].cpu().numpy().astype(np.float32) for logit in out.logits]
             logits = np.stack(logits_list, axis=0)
             topk = torch.topk(torch.from_numpy(logits), k=TOP_K_REGRESSION, dim=-1)
-            return OracleResult(
+            return OracleResult.for_regression(
                 token_ids=token_ids,
-                logits_per_step=np.empty((0, 0), dtype=np.float32),
                 top5_indices=topk.indices.numpy().astype(np.int64),
                 top5_logits=topk.values.numpy().astype(np.float32),
                 n_prompt_tokens=n_prompt_tokens,

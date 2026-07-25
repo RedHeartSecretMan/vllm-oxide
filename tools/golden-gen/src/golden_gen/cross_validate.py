@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 from numpy.typing import NDArray
 
-from golden_gen.config import ORACLE_INVESTIGATION_THRESHOLD, TOLERANCE_CALIBRATION_FACTOR
+from golden_gen.config import (
+    DEVIATION_REPORT_THRESHOLD,
+    ORACLE_INVESTIGATION_THRESHOLD,
+    TOLERANCE_CALIBRATION_FACTOR,
+)
 from golden_gen.schema import KnownDeviation, OracleName, ToleranceCalibration
 
 
@@ -74,7 +76,7 @@ def calibrate_tolerance(
 
 
 def cross_validate_all(
-    results: dict[tuple[OracleName, str], tuple[NDArray[Any], NDArray[Any]]],
+    results: dict[tuple[OracleName, str], tuple[NDArray[np.int64], NDArray[np.float32]]],
 ) -> tuple[list[KnownDeviation], dict[str, float]]:
     """Run all pairwise cross-validations for canonical prompts.
 
@@ -115,7 +117,7 @@ def cross_validate_all(
 
             prompt_max_l2 = max(prompt_max_l2, max_l2)
 
-            if mismatches > 0 or max_l2 > 1e-6:
+            if mismatches > 0 or max_l2 > DEVIATION_REPORT_THRESHOLD:
                 note = f"L2={max_l2:.6f}, argmax_mismatches={mismatches} between {oa} and {ob}"
                 known_deviations.append(
                     KnownDeviation(

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
 
 from golden_gen.cross_validate import (
     calibrate_tolerance,
@@ -14,9 +13,10 @@ from golden_gen.cross_validate import (
 )
 from golden_gen.generate import run_all
 from golden_gen.manifest import build_manifest, write_manifest
+from golden_gen.oracles.base import Oracle
 from golden_gen.oracles.fake import FakeOracle
 from golden_gen.prompts import load_prompts
-from golden_gen.schema import PromptCategory
+from golden_gen.schema import KnownDeviation, PromptCategory
 
 
 def _resolve_prompts_dir() -> Path:
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Initialize oracles
-    oracles: list[Any] = []
+    oracles: list[Oracle] = []
 
     if args.dry_run:
         oracles = [FakeOracle(), FakeOracle(), FakeOracle()]
@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Generated {len(fixtures)} fixtures in {output_dir}")
 
         # Cross-validate
-        cross_validation: list[Any] = []
+        cross_validation: list[KnownDeviation] = []
         tolerance = calibrate_tolerance({})
 
         if not args.no_cross_validate:

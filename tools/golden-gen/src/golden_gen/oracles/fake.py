@@ -36,11 +36,9 @@ class FakeOracle:
             perturb = perturb_rng.standard_normal((n_tokens, VOCAB_SIZE), dtype=np.float32) * 1e-3
             logits = base_logits + perturb
             token_ids = np.argmax(logits, axis=1).astype(np.int64)
-            return OracleResult(
+            return OracleResult.for_canonical(
                 token_ids=token_ids,
                 logits_per_step=logits,
-                top5_indices=np.empty((0, 5), dtype=np.int64),
-                top5_logits=np.empty((0, 5), dtype=np.float32),
                 n_prompt_tokens=10,
             )
         else:
@@ -52,9 +50,8 @@ class FakeOracle:
             token_ids = np.argmax(logits, axis=1).astype(np.int64)
             top5_indices = np.argsort(-logits, axis=1)[:, :5].astype(np.int64)
             top5_logits = np.take_along_axis(logits, top5_indices, axis=1)
-            return OracleResult(
+            return OracleResult.for_regression(
                 token_ids=token_ids,
-                logits_per_step=np.empty((0, 0), dtype=np.float32),
                 top5_indices=top5_indices,
                 top5_logits=top5_logits,
                 n_prompt_tokens=10,
