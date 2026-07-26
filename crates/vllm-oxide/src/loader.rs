@@ -45,8 +45,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{DType, Device};
-use candle_nn::var_builder::{ShardedSafeTensors, ShardedVarBuilder};
+use candle_nn::var_builder::{ShardedSafeTensors, ShardedVarBuilder, SimpleBackend, VarBuilder, VarBuilderArgs};
 use serde::Deserialize;
 
 use crate::config::{is_hf_hub_offline, Source};
@@ -90,6 +91,25 @@ pub fn load_weights(
     // upstream candle, mistral.rs, and HF tooling.
     let vb = unsafe { ShardedSafeTensors::var_builder(&paths, dtype, device)? };
     Ok(vb)
+}
+
+pub(crate) fn resolve_paths(source: &Source) -> Result<Vec<PathBuf>> {
+    match source {
+        Source::Local(dir) => resolve_local_shards(dir)
+            .with_context(|| format!("resolving local shards under {}", dir.display())),
+        Source::Hub { repo, revision } => resolve_hub_shards(repo, revision.as_deref())
+            .with_context(|| format!("resolving Hub shards for {repo}")),
+    }
+}
+
+pub fn load_weights_vb(source: Source, dtype: DType, device: &Device) -> Result<VarBuilder<'static>> {
+    let paths = resolve_paths(&source)?;
+    if paths.is_empty() {
+        return Err(anyhow!("resolved zero safetensors shards from the requested source"));
+    }
+    let tensors = unsafe { MmapedSafetensors::multi(&paths)? };
+    let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
+    Ok(VarBuilderArgs::new_with_args(backend, dtype, device))
 }
 
 /// Local-dir fallback chain: `model.safetensors.index.json` → single

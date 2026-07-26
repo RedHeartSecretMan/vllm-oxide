@@ -31,7 +31,9 @@ pub use config::{
     default_dtype, default_dtype_from_config_json, is_hf_hub_offline, is_offline_value,
     HFConfig, HF_HUB_OFFLINE_ENV, Source,
 };
-pub use loader::load_weights;
+pub use loader::{load_weights, load_weights_vb};
+
+pub use models::{CausalLM, registry::{BuiltModel, ModelEntry, build as build_model}};
 
 // Module stubs — working code lands in downstream tickets (T2 engine,
 // T3 layers/loader, T4 attention, T5 model). Dependency DAG per ADR-0004:

@@ -54,6 +54,8 @@ tracing = "0.1"
 # Pure-Rust, no unsafe surfaced; workspace `unsafe_code = "deny"` respected.
 twox-hash = "2"
 
+inventory = "0.3"
+
 [dev-dependencies]
 # Used by loader tests to materialise throwaway safetensors fixtures.
 tempfile = "3"

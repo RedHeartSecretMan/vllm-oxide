@@ -8,3 +8,12 @@
 
 pub mod qwen3;
 pub mod registry;
+
+use candle_core::{Device, Result, Tensor};
+
+pub trait CausalLM: Send + Sync {
+    fn forward(&mut self, input_ids: &Tensor, positions: &Tensor) -> Result<Tensor>;
+    fn compute_logits(&self, hidden_states: &Tensor) -> Result<Tensor>;
+    fn vocab_size(&self) -> usize;
+    fn device(&self) -> &Device;
+}

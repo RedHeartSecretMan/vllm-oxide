@@ -65,8 +65,10 @@ impl<P: ParallelStyle + StyleBuilder> Linear<P> {
 }
 
 impl<P: ParallelStyle> Linear<P> {
+    pub fn from_parts(weight: Tensor, bias: Option<Tensor>) -> Self {
+        Self { weight, bias, _marker: PhantomData }
+    }
 
-    /// `x @ W^T + b`. Broadcasts the bias over leading dims when present.
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let out = x.matmul(&self.weight.t()?)?;
         match &self.bias {
@@ -144,6 +146,12 @@ impl StyleBuilder for Row {
             return Ok(None);
         }
         Ok(Some(vb.get(spec.out_features_per_shard, "bias")?))
+    }
+}
+
+impl Linear<Row> {
+    pub fn from_weight(weight: Tensor) -> Self {
+        Self { weight, bias: None, _marker: PhantomData }
     }
 }
 
