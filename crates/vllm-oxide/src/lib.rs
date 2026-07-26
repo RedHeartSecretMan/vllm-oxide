@@ -13,8 +13,10 @@ pub(crate) mod utils;
 
 // Public API surface: per ADR-0004 R4, `lib.rs` is the ONLY module that issues
 // top-level `pub use`. Internal modules stay at `pub(crate)` or stricter.
-pub use utils::{kv_cache_layout_shape, round_up};
 pub use sampler::{Sampler, SamplingParams};
+pub use utils::{kv_cache_layout_shape, round_up};
+
+pub use attention::{AttnMetadata, PagedKVCache, build_decode_metadata, build_prefill_metadata};
 
 // T15 — weight loader + config (ADR-0002). Loader is model-agnostic: returns
 // a candle `ShardedVarBuilder`; all fusion (q/k/v, gate/up) lives in

@@ -16,9 +16,10 @@ path = "src/lib.rs"
 # Default = CPU-only. Tests and dev iteration run without CUDA. Production
 # callers (the CLI, the engine in T2) enable `cuda` to get the real backend.
 default = []
-# Enables `candle-core/cuda`. Off by default so `cargo test` runs on CI
+# Enables `candle-core/cuda` + pulls in the optional `candle-flash-attn`
+# dependency (#18 attention). Off by default so `cargo test` runs on CI
 # without a GPU. Production callers pass `--features cuda`.
-cuda = ["candle-core/cuda"]
+cuda = ["dep:candle-flash-attn", "candle-core/cuda"]
 
 [dependencies]
 # Pinned to rev `27f20fea` per the parent spec #12 cross-cutting risk note
@@ -29,6 +30,7 @@ cuda = ["candle-core/cuda"]
 # a deliberate act, not a casual one.
 candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
 candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
+candle-flash-attn = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e", optional = true }
 
 # Sync API only. hf-hub 1.0 introduced an async rewrite with no proven candle
 # integration at this pinned rev; we explicitly want the 0.5 sync `Api`.
@@ -41,6 +43,8 @@ hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 rand = "0.8"
 rand_distr = "0.4"
 
+half = "2"
+
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,6 +56,10 @@ tempfile = "3"
 # Test-only writes of safetensors files; matches candle's pinned rev so the
 # on-disk format is identical to what candle reads back.
 safetensors = "0.4"
+
+[build-dependencies]
+cudaforge = "0.1"
+anyhow = "1"
 
 [lints]
 workspace = true
