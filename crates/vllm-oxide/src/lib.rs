@@ -18,6 +18,12 @@ pub use utils::{kv_cache_layout_shape, round_up};
 
 pub use attention::{AttnMetadata, PagedKVCache, build_decode_metadata, build_prefill_metadata};
 
+// T2/#20 — engine data model: Sequence/SequenceGroup, BlockPool, KVCacheManager.
+// The scheduler (#21) imports only KvCacheManager (and Sequence) — never
+// BlockPool or PagedKVCache directly (ADR-0004 seam contract). BlockPoolError
+// is visible because it appears in KvCacheManager's public Result signatures.
+pub use engine::{BlockPoolError, KvCacheManager, Sequence, SequenceGroup, SequenceStatus};
+
 // T15 — weight loader + config (ADR-0002). Loader is model-agnostic: returns
 // a candle `ShardedVarBuilder`; all fusion (q/k/v, gate/up) lives in
 // `Linear::<P>::from_vb` (T3, lands later).

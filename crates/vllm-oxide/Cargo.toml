@@ -50,6 +50,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 
+# XXH64 for BlockPool's chained prefix-cache hash (nano-vllm parity).
+# Pure-Rust, no unsafe surfaced; workspace `unsafe_code = "deny"` respected.
+twox-hash = "2"
+
 [dev-dependencies]
 # Used by loader tests to materialise throwaway safetensors fixtures.
 tempfile = "3"
