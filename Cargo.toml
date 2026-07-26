@@ -11,7 +11,16 @@ repository = "https://github.com/RedHeartSecretMan/vllm-oxide"
 authors = ["vllm-oxide contributors"]
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so narrowly-scoped modules can opt back in via
+# `#![allow(unsafe_code)]` where genuinely unavoidable. Known sites:
+#   - `vllm_oxide::loader` — candle's `ShardedSafeTensors::var_builder` is
+#     `unsafe` (inherited from `memmap2::MmapOptions`).
+#   - `vllm_oxide::attention::flash_attn` (T4) — `extern "C"` FFI to CUDA
+#     kernels via candle's re-exported cudarc.
+# Each opt-in module MUST document its unsafe boundary at the top of the file.
+# `forbid` was the scaffold's conservative default; T15 is the first ticket
+# to actually need the override.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 # `warn` rather than `deny` so CI surfaces issues without blocking exploration;

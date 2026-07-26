@@ -12,18 +12,46 @@ description = "A Rust port of nano-vllm trending toward vLLM's V1 architecture (
 name = "vllm_oxide"
 path = "src/lib.rs"
 
+[features]
+# Default = CPU-only. Tests and dev iteration run without CUDA. Production
+# callers (the CLI, the engine in T2) enable `cuda` to get the real backend.
+default = []
+# Enables `candle-core/cuda`. Off by default so `cargo test` runs on CI
+# without a GPU. Production callers pass `--features cuda`.
+cuda = ["candle-core/cuda"]
+
 [dependencies]
 # Pinned to rev `27f20fea` per the parent spec #12 cross-cutting risk note
 # ("candle-flash-attn paged API depends on PR #3655; prototype validated at
 # 27f20fea on sm_89 + CUDA 13.2 — T10"). That rev includes the paged
 # windowed-attn PR so the attention/ module lands later without a rev bump.
-# Sampler only needs CPU tensor ops, so no `features = ["cuda"]` here;
-# attention/ (T4) adds that on its own line.
+# Coordinating bump across candle-core / candle-nn / candle-flash-attn is
+# a deliberate act, not a casual one.
 candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
 candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
-# Gumbel-max sampling noise source.
+
+# Sync API only. hf-hub 1.0 introduced an async rewrite with no proven candle
+# integration at this pinned rev; we explicitly want the 0.5 sync `Api`.
+# `default-features = false` + `ureq` avoids the default `native-tls` (openssl)
+# dependency — ureq 3.x uses rustls by default, which has no system-library
+# requirement and lets `cargo check` run on a bare CI runner.
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
+
+# Gumbel-max sampling noise source (T17).
 rand = "0.8"
 rand_distr = "0.4"
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+# Used by loader tests to materialise throwaway safetensors fixtures.
+tempfile = "3"
+# Test-only writes of safetensors files; matches candle's pinned rev so the
+# on-disk format is identical to what candle reads back.
+safetensors = "0.4"
 
 [lints]
 workspace = true
