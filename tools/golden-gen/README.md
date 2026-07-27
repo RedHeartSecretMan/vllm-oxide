@@ -17,22 +17,7 @@ This harness generates **golden fixture files** for the vllm-oxide project by ru
 
 ```bash
 cd tools/golden-gen
-uv sync
-```
-
-### nano-vllm dependency
-
-nano-vllm is loaded from a local path. By default the harness expects it at `/tmp/opencode/nano-vllm`:
-
-```bash
-git clone https://github.com/RedHeartSecretMan/nano-vllm /tmp/opencode/nano-vllm
-```
-
-To override the path, edit `pyproject.toml` under `[tool.uv.sources]`:
-
-```toml
-[tool.uv.sources]
-nano-vllm = { path = "/your/path/to/nano-vllm", editable = true }
+uv sync --extra gpu
 ```
 
 ## Usage

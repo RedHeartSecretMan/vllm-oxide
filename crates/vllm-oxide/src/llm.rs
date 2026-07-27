@@ -421,6 +421,7 @@ fn load_tokenizer(source: &Source) -> Result<HFTokenizer> {
 /// or Ada Lovelace (sm_89) or newer. Older GPUs will hit opaque kernel launch
 /// failures — this check gives a clear error before loading weights.
 #[cfg(feature = "cuda")]
+#[allow(unsafe_code)]
 fn validate_sm_version(_device: &Device) -> Result<()> {
     use candle_core::cuda::cudarc::driver::sys;
 
@@ -541,6 +542,7 @@ fn warmup_and_size_kv_pool(
 
 /// Query CUDA free and total memory (in bytes) via the CUDA driver API.
 #[cfg(feature = "cuda")]
+#[allow(unsafe_code)]
 fn cuda_mem_info() -> Result<(usize, usize)> {
     use candle_core::cuda::cudarc::driver::sys;
     let mut free: usize = 0;

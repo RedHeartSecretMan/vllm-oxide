@@ -17,6 +17,10 @@ authors = ["vllm-oxide contributors"]
 #     `unsafe` (inherited from `memmap2::MmapOptions`).
 #   - `vllm_oxide::attention` (T4/#18 — `attention/kernels.rs` + flash_attn
 #     FFI) — `extern "C"` to CUDA kernels via candle's re-exported cudarc.
+#   - `vllm_oxide::llm::validate_sm_version` — `cuDeviceGet` + `cuDeviceComputeCapability`
+#     CUDA driver API calls (sm_89 check).
+#   - `vllm_oxide::llm::cuda_mem_info` — `cuMemGetInfo_v2` CUDA driver API call
+#     (KV pool sizing).
 # Each opt-in module MUST document its unsafe boundary at the top of the file.
 unsafe_code = "deny"
 
