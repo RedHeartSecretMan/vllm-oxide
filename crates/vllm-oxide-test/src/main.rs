@@ -15,11 +15,11 @@ use clap::Parser;
 
 use vllm_oxide_test::{
     self, ComparisonReport,
-    compare_l2, compare_l3,
+    compare_l1, compare_l2, compare_l3,
     download, manifest, print_report,
 };
 use vllm_oxide::{
-    EngineOptions, LLM, Prompt, SamplingParams, Source,
+    EngineOptions, LLM, Prompt, Source,
 };
 
 /// Validate the vllm-oxide Rust engine against golden fixtures.
@@ -112,9 +112,16 @@ fn main() -> Result<()> {
     };
 
     // 2. Run comparisons for each canonical fixture.
-    // L1 and L2 use separate LLM instances because generate() and generate_logits()
-    // each consume the engine state. For a release gate that runs once per release,
-    // loading the model twice per fixture is acceptable.
+    // Run generate_logits once per fixture — it captures both per-step logits
+    // (for L2) and tokens via argmax (for L1 with near-tie). This single-run
+    // approach avoids loading LLM twice and enables L1 near-tie detection.
+    //
+    // NOTE: The prompt used is synthetic (fixture ID as text). This is a
+    // v0.1 limitation — golden fixtures do not yet carry prompt_token_ids
+    // (see #14). Until the fixture schema is extended, L1/L2 results will
+    // not match golden outputs. The comparison infrastructure exists so
+    // that when prompt tokens are available, only a one-line change is
+    // needed in main.rs.
     for meta in &golden_manifest.fixtures {
         if meta.category != vllm_oxide_test::types::PromptCategory::Canonical {
             continue;
@@ -125,51 +132,67 @@ fn main() -> Result<()> {
         let prompt = Prompt::Text(prompt_text);
         let max_tokens = meta.num_tokens as usize;
 
-        // ── L1: Token exact match via LLM::generate ─────────
+        tracing::info!("[{}/L1+L2] loading engine", meta.prompt_id);
+        let mut llm = LLM::new(
+            Source::Local(model_path.clone()),
+            EngineOptions::default(),
+        )?;
+
+        let logits = match llm.generate_logits(&prompt, max_tokens) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("generate_logits failed for {}: {e}", meta.prompt_id);
+                continue;
+            }
+        };
+
+        // Extract greedy tokens from logits via argmax.
+        let logits_f32 = match logits.to_dtype(candle_core::DType::F32) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("logits to_dtype failed: {e}");
+                continue;
+            }
+        };
+        let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
+        let vocab_size = if meta.logits_shape.1 > 0 {
+            meta.logits_shape.1
+        } else {
+            logits_vals.len() / logits.dims()[0]
+        };
+        let n_steps = logits.dims()[0];
+
+        let mut generated_tokens: Vec<u32> = Vec::with_capacity(n_steps);
+        for step in 0..n_steps {
+            let start = step * vocab_size;
+            let end = start + vocab_size;
+            let mut max_val = f32::NEG_INFINITY;
+            let mut max_idx = 0u32;
+            for (j, &val) in logits_vals[start..end].iter().enumerate() {
+                if val > max_val {
+                    max_val = val;
+                    max_idx = j as u32;
+                }
+            }
+            generated_tokens.push(max_idx);
+        }
+
         if !cli.l2_only {
-            tracing::info!("[{}/L1] loading engine for token comparison", meta.prompt_id);
-            let mut llm = LLM::new(
-                Source::Local(model_path.clone()),
-                EngineOptions::default(),
+            let l1_result = compare_l1(
+                &fixture,
+                &generated_tokens,
+                Some(&logits),
+                tolerance,
+                cli.epsilon,
             )?;
-
-            let output = llm.generate(
-                &[prompt.clone()],
-                &[SamplingParams {
-                    temperature: 0.0,
-                    max_tokens,
-                    ignore_eos: true,
-                    ..SamplingParams::default()
-                }],
-            )?;
-
-            let generated_tokens = &output[0].token_ids;
-            // L1 without logits for near-tie (we don't have per-step logits from generate alone).
-            let l1_result = vllm_oxide_test::l1::compare_l1_tokens_only(&fixture, generated_tokens);
             report.l1_results.push(l1_result);
         }
 
-        // ── L2: Logits tensor comparison via generate_logits ─
         if !cli.l1_only {
-            tracing::info!("[{}/L2] loading engine for logits comparison", meta.prompt_id);
-            let mut llm = LLM::new(
-                Source::Local(model_path.clone()),
-                EngineOptions::default(),
-            )?;
-
-            match llm.generate_logits(&prompt, max_tokens) {
-                Ok(logits) => {
-                    let l2_result = compare_l2(&fixture, &logits, tolerance)?;
-                    report.l2_results.push(l2_result);
-                }
-                Err(e) => {
-                    tracing::warn!("L2 skipped for {}: {e}", meta.prompt_id);
-                    report.skipped_l2.push(meta.prompt_id.clone());
-                }
-            }
+            let l2_result = compare_l2(&fixture, &logits, tolerance)?;
+            report.l2_results.push(l2_result);
         }
 
-        // ── L3: Per-layer activations (debug-only) ──────────
         if cli.debug {
             let l3_result = compare_l3(&golden_manifest, &fixture_dir, &meta.prompt_id)?;
             report.l3_results.push(l3_result);

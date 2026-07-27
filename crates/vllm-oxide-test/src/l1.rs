@@ -160,9 +160,8 @@ fn top2_logit_gap(logits: &Tensor, position: usize, expected_token: usize) -> Re
 
     if top1_idx == expected_token {
         Ok((top1 - top2) as f64)
-    } else if top2 > f32::NEG_INFINITY {
-        Ok((top1 - top2) as f64)
     } else {
+        // Expected token not in top-2 — hard mismatch, no near-tie.
         Ok(f64::INFINITY)
     }
 }
@@ -222,6 +221,7 @@ pub fn compare_l1_tokens_only(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

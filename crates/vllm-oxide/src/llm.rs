@@ -268,9 +268,6 @@ impl LLM {
     ///
     /// Used for L2 golden comparison (#23). The caller controls `max_tokens`
     /// to match the fixture's `num_tokens`.
-    ///
-    /// Only compiled in debug builds (`#[cfg(debug_assertions)]`).
-    #[cfg(debug_assertions)]
     pub fn generate_logits(
         &mut self,
         prompt: &Prompt,
@@ -301,11 +298,6 @@ impl LLM {
 
         let refs: Vec<&candle_core::Tensor> = logits_list.iter().collect();
         Ok(candle_core::Tensor::cat(&refs, 0)?)
-    }
-
-    #[cfg(not(debug_assertions))]
-    pub fn generate_logits(&mut self, _prompt: &Prompt, _max_tokens: usize) -> Result<candle_core::Tensor> {
-        bail!("generate_logits is only available in debug builds")
     }
 }
 
