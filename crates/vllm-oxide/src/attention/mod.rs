@@ -73,6 +73,11 @@ impl PagedKVCache {
         kernels::reshape_and_cache(key, value, &k_cache, &v_cache, slot_mapping)
     }
 
+    /// Return the full buffer shape `[2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]`.
+    pub fn buffer_shape(&self) -> Vec<usize> {
+        self.buffer.shape().dims().to_vec()
+    }
+
     pub fn num_blocks(&self) -> usize { self.num_blocks }
     pub fn block_size(&self) -> usize { self.block_size }
 }
