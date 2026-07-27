@@ -42,6 +42,7 @@ class VllmV1Oracle:
             enforce_eager=True,
             logprobs_mode="raw_logits",
             max_logprobs=-1,
+            gpu_memory_utilization=0.65,
         )
 
     def _generate_canonical(self, prompt: PromptSpec) -> OracleResult:

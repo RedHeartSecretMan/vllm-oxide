@@ -43,7 +43,16 @@ def _apply_patch() -> None:
     The patched method tracks ALL sequences it sees on the model_runner
     instance via _golden_tracked_seqs, so callers can retrieve them
     after generation completes.
+
+    Also disables torch.compile globally — nano-vllm uses @torch.compile on
+    RMSNorm/Silu/RoPE/Sampler for speed, but Triton JIT needs Python dev
+    headers (Python.h) which may not be installed. Disabling compile runs
+    in eager mode — numerically identical, slightly slower.
     """
+    import torch._dynamo
+
+    torch._dynamo.config.disable = True
+
     from nanovllm.engine.model_runner import ModelRunner
     from nanovllm.engine.sequence import Sequence
 
@@ -109,6 +118,10 @@ class NanovllmOracle:
             temperature=NANO_VLLM_TEMPERATURE,
             max_tokens=max_tokens,
         )
+        # Clear warmup sequences tracked before actual generation
+        if hasattr(self.llm.model_runner, "_golden_tracked_seqs"):
+            self.llm.model_runner._golden_tracked_seqs = []
+
         outputs = self.llm.generate(prompts, sp, use_tqdm=False)
 
         # Retrieve tracked sequences from the model_runner (populated by the patched run)

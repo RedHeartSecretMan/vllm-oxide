@@ -97,107 +97,106 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: No prompts loaded.", file=sys.stderr)
         return 1
 
-    # Initialize oracles
-    oracles: list[Any] = []
+    oracle_specs: list[tuple[str, type[Any] | type[FakeOracle]]] = []
 
     if args.dry_run:
-        oracles = [FakeOracle(), FakeOracle(), FakeOracle()]
-        oracles[0].name = "transformers"
-        oracles[1].name = "nanovllm"
-        oracles[2].name = "vllm_v1"
+        oracle_specs = [
+            ("transformers", FakeOracle),
+            ("nanovllm", FakeOracle),
+            ("vllm_v1", FakeOracle),
+        ]
     elif args.only_oracles:
         for name in args.only_oracles:
             if name == "transformers":
                 from golden_gen.oracles.transformers_oracle import TransformersOracle
-
-                oracles.append(TransformersOracle())
+                oracle_specs.append((name, TransformersOracle))
             elif name == "nanovllm":
                 from golden_gen.oracles.nanovllm_oracle import NanovllmOracle
-
-                oracles.append(NanovllmOracle())
+                oracle_specs.append((name, NanovllmOracle))
             elif name == "vllm_v1":
                 from golden_gen.oracles.vllm_v1_oracle import VllmV1Oracle
-
-                oracles.append(VllmV1Oracle())
+                oracle_specs.append((name, VllmV1Oracle))
     else:
         from golden_gen.oracles.nanovllm_oracle import NanovllmOracle
         from golden_gen.oracles.transformers_oracle import TransformersOracle
         from golden_gen.oracles.vllm_v1_oracle import VllmV1Oracle
 
-        oracles = [
-            TransformersOracle(),
-            NanovllmOracle(),
-            VllmV1Oracle(),
+        oracle_specs = [
+            ("vllm_v1", VllmV1Oracle),
+            ("nanovllm", NanovllmOracle),
+            ("transformers", TransformersOracle),
         ]
+
+    # Run oracles one at a time to avoid GPU memory exhaustion
+    all_fixtures: list[Any] = []
+    for name, oracle_cls in oracle_specs:
+        oracle = oracle_cls()
+        if args.dry_run:
+            oracle.name = name
+        try:
+            fixtures = run_all(
+                [oracle], all_prompts, output_dir, only_category=only_category,
+            )
+            all_fixtures.extend(fixtures)
+        except Exception as e:
+            print(f"ERROR: oracle {name} failed: {e}", file=sys.stderr)
+        finally:
+            oracle.close()
+
+    print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
 
     suspect_prompt_ids: list[str] = []
 
-    try:
-        # Generate fixtures
-        fixtures = run_all(
-            oracles,
-            all_prompts,
-            output_dir,
-            only_category=only_category,
-        )
+    # Cross-validate
+    cross_validation: list[Any] = []
+    tolerance = calibrate_tolerance({})
 
-        print(f"Generated {len(fixtures)} fixtures in {output_dir}")
+    if not args.no_cross_validate:
+        canonical_prompts = [p for p in all_prompts if p.category == "canonical"]
+        if canonical_prompts:
+            results = {}
+            for f in all_fixtures:
+                if f.category == "canonical":
+                    from golden_gen.io import load_fixture
 
-        # Cross-validate
-        cross_validation: list[Any] = []
-        tolerance = calibrate_tolerance({})
+                    data = load_fixture(output_dir / f.filename)
+                    if "logits" in data:
+                        results[(f.oracle, f.prompt_id)] = (
+                            data["token_ids"],
+                            data["logits"],
+                        )
+            if results:
+                deviations, per_prompt_l2 = cross_validate_all(results)
+                cross_validation = deviations
+                tolerance = calibrate_tolerance(per_prompt_l2)
+                print(
+                    f"Cross-validation: {len(deviations)} deviations, "
+                    f"tolerance calibrated to atol={tolerance.atol:.6f}"
+                )
 
-        if not args.no_cross_validate:
-            canonical_prompts = [p for p in all_prompts if p.category == "canonical"]
-            if canonical_prompts:
-                results = {}
-                for f in fixtures:
-                    if f.category == "canonical":
-                        from golden_gen.io import load_fixture
-
-                        data = load_fixture(output_dir / f.filename)
-                        if "logits" in data:
-                            results[(f.oracle, f.prompt_id)] = (
-                                data["token_ids"],
-                                data["logits"],
-                            )
-                if results:
-                    deviations, per_prompt_l2 = cross_validate_all(results)
-                    cross_validation = deviations
-                    tolerance = calibrate_tolerance(per_prompt_l2)
+                suspect_prompt_ids = flag_suspicious_divergence(per_prompt_l2)
+                if suspect_prompt_ids:
                     print(
-                        f"Cross-validation: {len(deviations)} deviations, "
-                        f"tolerance calibrated to atol={tolerance.atol:.6f}"
+                        f"WARNING: oracle divergence > 0.1 on prompts {suspect_prompt_ids}.",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "Per spec T8 Q8.2, these fixtures are SUSPECT -- "
+                        "investigate the oracle before trusting these goldens. "
+                        "Recorded as 'suspect' in manifest.",
+                        file=sys.stderr,
                     )
 
-                    # Check for suspicious divergence
-                    suspect_prompt_ids = flag_suspicious_divergence(per_prompt_l2)
-                    if suspect_prompt_ids:
-                        print(
-                            f"WARNING: oracle divergence > 0.1 on prompts {suspect_prompt_ids}.",
-                            file=sys.stderr,
-                        )
-                        print(
-                            "Per spec T8 Q8.2, these fixtures are SUSPECT -- "
-                            "investigate the oracle before trusting these goldens. "
-                            "Recorded as 'suspect' in manifest.",
-                            file=sys.stderr,
-                        )
-
-        # Build and write manifest
-        manifest = build_manifest(
-            fixtures=fixtures,
-            tolerance=tolerance,
-            cross_validation=cross_validation,
-            suspect_prompt_ids=suspect_prompt_ids,
-        )
-        manifest_path = output_dir / "manifest.json"
-        write_manifest(manifest, manifest_path)
-        print(f"Manifest written to {manifest_path}")
-
-    finally:
-        for o in oracles:
-            o.close()
+    # Build and write manifest
+    manifest = build_manifest(
+        fixtures=all_fixtures,
+        tolerance=tolerance,
+        cross_validation=cross_validation,
+        suspect_prompt_ids=suspect_prompt_ids,
+    )
+    manifest_path = output_dir / "manifest.json"
+    write_manifest(manifest, manifest_path)
+    print(f"Manifest written to {manifest_path}")
 
     return 0
 

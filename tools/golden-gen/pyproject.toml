@@ -2,12 +2,12 @@
 name = "golden-gen"
 version = "0.1.0"
 description = "Golden fixture generator for vllm-oxide oracle triangle"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.12,<3.13"
 classifiers = [
     "Private :: Do Not Upload",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     "numpy>=1.26",
@@ -21,9 +21,12 @@ golden-gen = "golden_gen.cli:main"
 
 [project.optional-dependencies]
 gpu = [
-    "transformers>=4.43.0,<5.0",
-    "vllm>=0.10.0",
-    "torch>=2.4.0",
+    "transformers>=4.56.0,<6.0",
+    "vllm>=0.18.0,<0.19.0",
+    "torch>=2.10.0,<2.11.0",
+    "xgrammar>=0.1.32,<0.2.4",
+    "nano-vllm",
+    "flash-attn",
 ]
 dev = [
     "pytest>=8",
@@ -36,11 +39,12 @@ dev = [
 package = true
 
 [tool.uv.sources]
-nano-vllm = { path = "/tmp/opencode/nano-vllm", editable = true }
+nano-vllm = { path = "/home/wanghao/Projects/Codes/VibeCodings/nano-vllm", editable = true }
+flash-attn = { path = "/home/wanghao/Projects/Codes/VibeCodings/flash_attn-2.8.3+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "SIM"]
@@ -53,7 +57,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["nanovllm.*", "vllm.*", "transformers.*", "torch.*"]
+module = ["nanovllm.*", "vllm.*", "transformers.*", "torch.*", "flash_attn.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
