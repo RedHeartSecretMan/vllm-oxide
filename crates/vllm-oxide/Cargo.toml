@@ -56,6 +56,10 @@ twox-hash = "2"
 
 inventory = "0.3"
 
+# Rust-side tokenizer (no Python AutoTokenizer dep). Contract: "round-trips
+# Qwen3's BPE". Loads tokenizer.json from the model directory.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
 [dev-dependencies]
 # Used by loader tests to materialise throwaway safetensors fixtures.
 tempfile = "3"

@@ -189,6 +189,7 @@ impl Scheduler {
                 outputs.push(RequestOutput {
                     seq_id: seq.seq_id,
                     token_ids: seq.completion_token_ids().to_vec(),
+                    text: String::new(),
                     finished: true,
                 });
             } else {
@@ -415,10 +416,14 @@ impl Scheduler {
 
 /// Per-step return value containing the completion tokens for a finished
 /// sequence. Accumulated by `LLM::generate` until `is_finished()`.
+///
+/// The `text` field is populated by the composition root (`llm.rs`) during
+/// detokenization — the scheduler does not have access to a tokenizer.
 #[derive(Debug, Clone)]
 pub struct RequestOutput {
     pub seq_id: usize,
     pub token_ids: Vec<u32>,
+    pub text: String,
     pub finished: bool,
 }
 

@@ -9,9 +9,10 @@ authors.workspace = true
 description = "Thin CLI binary for vllm-oxide — parses argv and calls LLM::generate."
 
 [dependencies]
-# v0.1 scaffold — the CLI is a stub. Downstream tickets wire `vllm_oxide`,
-# `clap`, `anyhow`, and `tokio`. Keeping this empty keeps the scaffold build
-# fast and lets issue #13's acceptance criteria land independently.
+# Issue #24 — thin CLI over LLM::generate. No tokio; LLM::generate is sync.
+vllm_oxide = { path = "../vllm-oxide" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
 
 [lints]
 workspace = true

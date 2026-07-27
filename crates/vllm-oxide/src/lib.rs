@@ -38,6 +38,8 @@ pub use loader::{load_weights, load_weights_vb};
 
 pub use models::{CausalLM, registry::{BuiltModel, ModelEntry, build as build_model}};
 
+pub use llm::{EngineOptions, LLM, Prompt};
+
 // Module stubs — working code lands in downstream tickets (T2 engine,
 // T3 layers/loader, T4 attention, T5 model). Dependency DAG per ADR-0004:
 // layers / attention / loader / sampler are leaves; models depends on
