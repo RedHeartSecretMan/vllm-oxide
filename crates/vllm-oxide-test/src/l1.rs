@@ -43,11 +43,64 @@ pub fn compare_l1(
     tolerance: &ToleranceCalibration,
     epsilon: Option<f64>,
 ) -> Result<L1Result> {
-    let eps = epsilon.unwrap_or_else(|| {
-        // Use 2× the calibrated atol as near-tie epsilon (T8 Q8.2 guidance).
-        tolerance.atol * 2.0
-    });
+    let eps = epsilon.unwrap_or(tolerance.atol * 2.0);
 
+    compare_tokens_loop(fixture, generated_tokens, eps, |i, expected, actual| {
+        if expected == actual {
+            return Ok(None);
+        }
+        let logits = match generated_logits {
+            Some(l) => l,
+            None => return Ok(Some(MismatchKind::Hard)),
+        };
+        let gap = top2_logit_gap(logits, i, expected as usize)?;
+        if gap < eps {
+            Ok(Some(MismatchKind::NearTie(gap)))
+        } else {
+            Ok(Some(MismatchKind::Hard))
+        }
+    })
+}
+
+/// Run L1 comparison without logits (no near-tie detection).
+pub fn compare_l1_tokens_only(
+    fixture: &FixtureData,
+    generated_tokens: &[u32],
+) -> L1Result {
+    compare_tokens_loop(fixture, generated_tokens, 0.0, |_, expected, actual| {
+        if expected == actual {
+            Ok(None)
+        } else {
+            Ok(Some(MismatchKind::Hard))
+        }
+    })
+    .unwrap_or_else(|_| L1Result {
+        prompt_id: fixture.prompt_id.clone(),
+        passed: false,
+        total_positions: 0,
+        exact_matches: 0,
+        near_tie_skips: 0,
+        mismatches: 1,
+        first_mismatch: Some(0),
+        epsilon: 0.0,
+        details: vec![],
+    })
+}
+
+enum MismatchKind {
+    Hard,
+    NearTie(f64),
+}
+
+fn compare_tokens_loop<F>(
+    fixture: &FixtureData,
+    generated_tokens: &[u32],
+    eps: f64,
+    classify: F,
+) -> Result<L1Result>
+where
+    F: Fn(usize, i64, i64) -> Result<Option<MismatchKind>>,
+{
     let n = fixture.token_ids.len().min(generated_tokens.len());
     let mut details = Vec::with_capacity(n);
     let mut exact_matches = 0usize;
@@ -59,64 +112,27 @@ pub fn compare_l1(
         let expected = fixture.token_ids[i];
         let actual = generated_tokens[i] as i64;
 
-        if expected == actual {
-            exact_matches += 1;
-            details.push(L1PositionDetail::Match {
-                position: i,
-                token_id: expected,
-            });
-        } else if let Some(ref logits) = generated_logits {
-            // Check near-tie: if top-2 gap < ε, skip.
-            let gap = top2_logit_gap(logits, i, expected as usize)?;
-            if gap < eps {
+        match classify(i, expected, actual)? {
+            None => {
+                exact_matches += 1;
+                details.push(L1PositionDetail::Match { position: i, token_id: expected });
+            }
+            Some(MismatchKind::NearTie(gap)) => {
                 near_tie_skips += 1;
-                details.push(L1PositionDetail::NearTieSkip {
-                    position: i,
-                    token_id: expected,
-                    gap,
-                });
-            } else {
+                details.push(L1PositionDetail::NearTieSkip { position: i, token_id: expected, gap });
+            }
+            Some(MismatchKind::Hard) => {
                 mismatches += 1;
                 if first_mismatch.is_none() {
                     first_mismatch = Some(i);
                 }
-                details.push(L1PositionDetail::Mismatch {
-                    position: i,
-                    expected,
-                    actual,
-                });
+                details.push(L1PositionDetail::Mismatch { position: i, expected, actual });
             }
-        } else {
-            // No logits available — treat as hard mismatch.
-            mismatches += 1;
-            if first_mismatch.is_none() {
-                first_mismatch = Some(i);
-            }
-            details.push(L1PositionDetail::Mismatch {
-                position: i,
-                expected,
-                actual,
-            });
         }
     }
 
-    // Positions beyond min(n, generated.len()) are also mismatches.
-    if generated_tokens.len() > n {
-        for i in n..generated_tokens.len() {
-            mismatches += 1;
-            if first_mismatch.is_none() {
-                first_mismatch = Some(i);
-            }
-        }
-    }
-    if n < fixture.token_ids.len() {
-        for i in n..fixture.token_ids.len() {
-            mismatches += 1;
-            if first_mismatch.is_none() {
-                first_mismatch = Some(i);
-            }
-        }
-    }
+    mismatches += (generated_tokens.len().saturating_sub(n))
+        + (fixture.token_ids.len().saturating_sub(n));
 
     Ok(L1Result {
         prompt_id: fixture.prompt_id.clone(),
@@ -163,60 +179,6 @@ fn top2_logit_gap(logits: &Tensor, position: usize, expected_token: usize) -> Re
     } else {
         // Expected token not in top-2 — hard mismatch, no near-tie.
         Ok(f64::INFINITY)
-    }
-}
-
-/// Run L1 comparison without logits (no near-tie detection).
-///
-/// This is for regression fixtures where full logits aren't stored.
-pub fn compare_l1_tokens_only(
-    fixture: &FixtureData,
-    generated_tokens: &[u32],
-) -> L1Result {
-    let n = fixture.token_ids.len().min(generated_tokens.len());
-    let mut details = Vec::with_capacity(n);
-    let mut exact_matches = 0usize;
-    let mut mismatches = 0usize;
-    let mut first_mismatch: Option<usize> = None;
-
-    for i in 0..n {
-        let expected = fixture.token_ids[i];
-        let actual = generated_tokens[i] as i64;
-
-        if expected == actual {
-            exact_matches += 1;
-            details.push(L1PositionDetail::Match {
-                position: i,
-                token_id: expected,
-            });
-        } else {
-            mismatches += 1;
-            if first_mismatch.is_none() {
-                first_mismatch = Some(i);
-            }
-            details.push(L1PositionDetail::Mismatch {
-                position: i,
-                expected,
-                actual,
-            });
-        }
-    }
-
-    // Handle length mismatches.
-    let extra_mismatches = (generated_tokens.len().saturating_sub(n))
-        + (fixture.token_ids.len().saturating_sub(n));
-    mismatches += extra_mismatches;
-
-    L1Result {
-        prompt_id: fixture.prompt_id.clone(),
-        passed: mismatches == 0,
-        total_positions: fixture.token_ids.len().max(generated_tokens.len()),
-        exact_matches,
-        near_tie_skips: 0,
-        mismatches,
-        first_mismatch,
-        epsilon: 0.0,
-        details,
     }
 }
 

@@ -110,9 +110,16 @@ pub fn download_release(
 pub fn load_from_dir(dir: &Path) -> Result<(Manifest, PathBuf)> {
     let manifest_path = dir.join("manifest.json");
     let manifest = manifest::parse_manifest(&manifest_path)?;
+    verify_fixture_hashes(dir, &manifest.fixtures)?;
+    Ok((manifest, dir.to_path_buf()))
+}
 
-    // Verify all fixtures exist and have correct hashes.
-    for fixture in &manifest.fixtures {
+/// Verify all fixture files in a directory match their expected SHA-256.
+fn verify_fixture_hashes(
+    dir: &Path,
+    fixtures: &[crate::types::FixtureMetadata],
+) -> Result<()> {
+    for fixture in fixtures {
         let path = dir.join(&fixture.filename);
         if !path.exists() {
             anyhow::bail!("fixture file not found: {}", path.display());
@@ -129,8 +136,7 @@ pub fn load_from_dir(dir: &Path) -> Result<(Manifest, PathBuf)> {
             );
         }
     }
-
-    Ok((manifest, dir.to_path_buf()))
+    Ok(())
 }
 
 /// Find an asset URL by filename in a GitHub release assets array.
