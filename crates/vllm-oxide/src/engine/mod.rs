@@ -27,7 +27,7 @@ pub mod sequence;
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::{Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 
 use crate::Sampler;
 use crate::SamplingParams;
@@ -86,16 +86,31 @@ impl EngineCore {
     /// Returns `RequestOutput`s for any sequences that finished this step.
     /// When no work remains, returns `Ok(Vec::new())`.
     pub fn step(&mut self) -> Result<Vec<RequestOutput>> {
+        let (outputs, _logits) = self.step_with_logits()?;
+        Ok(outputs)
+    }
+
+    /// Like [`step`], but also returns the pre-sampling logits tensor.
+    ///
+    /// The returned tensor has shape `[batch, vocab_size]` and dtype FP32.
+    /// Used by `LLM::generate_logits` (T12/#23) for L2 golden comparison.
+    ///
+    /// When no work remains, returns `Ok((Vec::new(), Tensor::zeros(...)))`.
+    pub fn step_with_logits(&mut self) -> Result<(Vec<RequestOutput>, Tensor)> {
         let output = self.scheduler.schedule(&mut self.kv_cache_manager);
 
         if self.scheduler.num_running() == 0 {
-            return Ok(Vec::new());
+            let empty = Tensor::zeros((0, 0), DType::F32, &self.device)?;
+            return Ok((Vec::new(), empty));
         }
 
-        match output.mode {
-            ScheduleMode::Prefill => self.step_prefill(),
-            ScheduleMode::Decode => self.step_decode(),
-        }
+        let logits = match output.mode {
+            ScheduleMode::Prefill => self.forward_prefill()?,
+            ScheduleMode::Decode => self.forward_decode()?,
+        };
+
+        let (outputs, logits_clone) = self.sample_and_postprocess_with_logits(&logits)?;
+        Ok((outputs, logits_clone))
     }
 
     /// Whether there are any pending or running sequences.
@@ -103,10 +118,13 @@ impl EngineCore {
         self.scheduler.is_running()
     }
 
-    fn sample_and_postprocess(
+    /// Sample from logits, postprocess sequences, and return both the
+    /// finished outputs and a clone of the pre-sampling logits (FP32,
+    /// shape `[batch, vocab_size]`).
+    fn sample_and_postprocess_with_logits(
         &mut self,
         logits: &Tensor,
-    ) -> Result<Vec<RequestOutput>> {
+    ) -> Result<(Vec<RequestOutput>, Tensor)> {
         let params: Vec<SamplingParams> = self
             .scheduler
             .running_seqs()
@@ -130,15 +148,23 @@ impl EngineCore {
         let sampled = self.sampler.forward(logits, &params, &token_histories)?;
         let sampled_ids = sampled.to_vec1::<u32>()?;
 
-        Ok(self
+        let outputs = self
             .scheduler
-            .postprocess(&sampled_ids, &mut self.kv_cache_manager))
+            .postprocess(&sampled_ids, &mut self.kv_cache_manager);
+
+        // Convert to FP32 for numerical comparison (matches oracle format).
+        let logits_fp32 = logits.to_dtype(DType::F32)?;
+
+        Ok((outputs, logits_fp32))
     }
 
-    fn step_prefill(&mut self) -> Result<Vec<RequestOutput>> {
+    /// Run the prefill forward pass and return pre-sampling logits
+    /// (shape `[batch, vocab_size]`). Does NOT sample — the caller
+    /// is responsible for calling `sample_and_postprocess_with_logits`.
+    fn forward_prefill(&mut self) -> Result<Tensor> {
         let batch = self.scheduler.num_running();
         if batch == 0 {
-            return Ok(Vec::new());
+            return Tensor::zeros((0, 0), DType::F32, &self.device);
         }
 
         let mut all_input_ids: Vec<u32> = Vec::new();
@@ -198,14 +224,16 @@ impl EngineCore {
         }
 
         let logits_hidden = Tensor::stack(&last_hiddens.iter().collect::<Vec<&Tensor>>(), 0)?;
-        let logits = self.model.compute_logits(&logits_hidden)?;
-        self.sample_and_postprocess(&logits)
+        self.model.compute_logits(&logits_hidden)
     }
 
-    fn step_decode(&mut self) -> Result<Vec<RequestOutput>> {
+    /// Run the decode forward pass and return pre-sampling logits
+    /// (shape `[batch, vocab_size]`). Does NOT sample — the caller
+    /// is responsible for calling `sample_and_postprocess_with_logits`.
+    fn forward_decode(&mut self) -> Result<Tensor> {
         let batch = self.scheduler.num_running();
         if batch == 0 {
-            return Ok(Vec::new());
+            return Tensor::zeros((0, 0), DType::F32, &self.device);
         }
 
         let mut last_tokens: Vec<u32> = Vec::new();
@@ -239,8 +267,7 @@ impl EngineCore {
         }
 
         let hidden = self.model.forward(&input_ids, &pos_tensor)?;
-        let logits = self.model.compute_logits(&hidden)?;
-        self.sample_and_postprocess(&logits)
+        self.model.compute_logits(&hidden)
     }
 }
 

@@ -259,31 +259,45 @@ impl LLM {
         Ok(results)
     }
 
-    /// Debug-only entrypoint: run one forward pass and return the pre-sampling
-    /// logits tensor. Used for L2 golden comparison (T12). This skips the
-    /// sampler — the caller gets raw logits for numerical validation.
+    /// Run greedy generation and return the pre-sampling logits at every step.
     ///
-    /// Only compiled in debug builds (`#[cfg(debug_assertions)]`).
-    #[cfg(debug_assertions)]
+    /// This runs the full generation loop (prefill + `max_tokens` decode steps)
+    /// with greedy sampling (temperature=0), collecting the raw logits tensor
+    /// `[batch, vocab_size]` before each sampling step. The logits are stacked
+    /// into a single tensor of shape `[total_steps, vocab_size]` (FP32).
+    ///
+    /// Used for L2 golden comparison (#23). The caller controls `max_tokens`
+    /// to match the fixture's `num_tokens`.
     pub fn generate_logits(
         &mut self,
         prompt: &Prompt,
+        max_tokens: usize,
     ) -> Result<candle_core::Tensor> {
         let token_ids = tokenize_prompt(prompt, &self.tokenizer)?;
         let params = SamplingParams {
-            max_tokens: 1,
+            temperature: 0.0,
+            max_tokens,
+            ignore_eos: true,
             ..SamplingParams::default()
         };
         self.engine.add_request(token_ids, params);
 
-        self.engine.step()?;
+        let mut logits_list: Vec<candle_core::Tensor> = Vec::new();
 
-        bail!("generate_logits: not yet implemented (T12)")
-    }
+        while self.engine.is_running() {
+            let (_outputs, step_logits) = self.engine.step_with_logits()?;
+            if step_logits.dims().iter().all(|&d| d == 0) {
+                continue;
+            }
+            logits_list.push(step_logits);
+        }
 
-    #[cfg(not(debug_assertions))]
-    pub fn generate_logits(&mut self, _prompt: &Prompt) -> Result<candle_core::Tensor> {
-        bail!("generate_logits is only available in debug builds")
+        if logits_list.is_empty() {
+            return Ok(candle_core::Tensor::zeros((0, 0), DType::F32, &self.device)?);
+        }
+
+        let refs: Vec<&candle_core::Tensor> = logits_list.iter().collect();
+        Ok(candle_core::Tensor::cat(&refs, 0)?)
     }
 }
 
