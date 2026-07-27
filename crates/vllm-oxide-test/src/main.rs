@@ -16,7 +16,7 @@ use clap::Parser;
 use vllm_oxide_test::{
     self, ComparisonReport,
     compare_l1, compare_l2, compare_l3,
-    download, manifest, print_report,
+    download, manifest, print_report, prompts,
 };
 use vllm_oxide::{
     EngineOptions, LLM, Prompt, Source,
@@ -68,6 +68,10 @@ struct Cli {
     /// Only run L2 comparison (skip L1).
     #[arg(long)]
     l2_only: bool,
+
+    /// Path to the golden-gen prompts directory (canonical.jsonl).
+    #[arg(long, default_value = "tools/golden-gen/prompts")]
+    prompts_dir: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -101,6 +105,8 @@ fn main() -> Result<()> {
     let tolerance = &golden_manifest.tolerance;
     let model_path = cli.model_path.clone();
 
+    let canonical_prompts = prompts::load_canonical_prompts(&cli.prompts_dir)?;
+
     let mut report = ComparisonReport {
         manifest_path: cli
             .manifest
@@ -113,23 +119,34 @@ fn main() -> Result<()> {
 
     // 2. Run comparisons for each canonical fixture.
     // Run generate_logits once per fixture — it captures both per-step logits
-    // (for L2) and tokens via argmax (for L1 with near-tie). This single-run
-    // approach avoids loading LLM twice and enables L1 near-tie detection.
-    //
-    // NOTE: The prompt used is synthetic (fixture ID as text). This is a
-    // v0.1 limitation — golden fixtures do not yet carry prompt_token_ids
-    // (see #14). Until the fixture schema is extended, L1/L2 results will
-    // not match golden outputs. The comparison infrastructure exists so
-    // that when prompt tokens are available, only a one-line change is
-    // needed in main.rs.
+    // (for L2) and tokens via argmax (for L1 with near-tie).
     for meta in &golden_manifest.fixtures {
         if meta.category != vllm_oxide_test::types::PromptCategory::Canonical {
             continue;
         }
 
+        let prompt_entry = match canonical_prompts.get(&meta.prompt_id) {
+            Some(e) => e,
+            None => {
+                tracing::warn!(
+                    "prompt_id '{}' not found in canonical.jsonl — skipping",
+                    meta.prompt_id
+                );
+                continue;
+            }
+        };
+
+        // Batch prompts (canonical_05) have sub_prompts — skip in v0.1.
+        if prompt_entry.sub_prompts.is_some() {
+            tracing::info!(
+                "[{}] skipping batch prompt (not supported in v0.1 generate_logits)",
+                meta.prompt_id
+            );
+            continue;
+        }
+
         let fixture = manifest::load_fixture(&fixture_dir.join(&meta.filename), meta)?;
-        let prompt_text = format!("vllm_oxide_test fixture {}", meta.prompt_id);
-        let prompt = Prompt::Text(prompt_text);
+        let prompt = Prompt::Text(prompt_entry.prompt.clone());
         let max_tokens = meta.num_tokens as usize;
 
         tracing::info!("[{}/L1+L2] loading engine", meta.prompt_id);

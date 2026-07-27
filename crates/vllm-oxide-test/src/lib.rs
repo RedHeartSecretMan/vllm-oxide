@@ -14,6 +14,7 @@
 pub mod types;
 pub mod manifest;
 pub mod download;
+pub mod prompts;
 pub mod l1;
 pub mod l2;
 pub mod l3;
