@@ -123,3 +123,13 @@ pub struct FixtureData {
     /// Top-5 logits, shape `[n, 5]` (regression only, None for canonical).
     pub top5_logits: Option<Vec<f32>>,
 }
+
+impl FixtureData {
+    pub fn model_vocab_size(&self) -> usize {
+        if self.logits_shape.1 > 0 {
+            self.logits_shape.1
+        } else {
+            0
+        }
+    }
+}

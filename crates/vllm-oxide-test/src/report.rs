@@ -43,6 +43,12 @@ pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration)
     println!("  Manifest:  {}", report.manifest_path);
     println!("  Model:     {}", report.model_path);
     println!("  Tolerance: atol={:.2e}, rtol={:.2e}", tolerance.atol, tolerance.rtol);
+    if tolerance.observed_max_l2 > 1e-1 {
+        println!(
+            "  ⚠ WARNING: observed_max_l2 ({:.2e}) > 1e-1 — investigate oracle first (T8 Q8.2)",
+            tolerance.observed_max_l2,
+        );
+    }
     println!();
 
     // ── L1 ──────────────────────────────────────────────

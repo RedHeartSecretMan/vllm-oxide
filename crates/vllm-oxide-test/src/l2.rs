@@ -138,22 +138,6 @@ pub fn compare_l2(
     })
 }
 
-/// Extension to FixtureData for computing shapes.
-trait FixtureDataExt {
-    fn model_vocab_size(&self) -> usize;
-}
-
-impl FixtureDataExt for FixtureData {
-    fn model_vocab_size(&self) -> usize {
-        // vocab_size = logits_shape[1] or infer from top5 shape
-        if self.logits_shape.1 > 0 {
-            return self.logits_shape.1;
-        }
-        // Fallback for regression fixtures (shouldn't be used for L2).
-        0
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
