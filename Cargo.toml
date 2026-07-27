@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vllm-oxide", "crates/vllm-oxide-cli"]
+members = ["crates/vllm-oxide", "crates/vllm-oxide-cli", "crates/vllm-oxide-test"]
 resolver = "2"
 
 [workspace.package]

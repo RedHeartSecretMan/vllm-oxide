@@ -1,0 +1,34 @@
+[package]
+name = "vllm_oxide_test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Golden comparison crate — release gate that validates the Rust engine against golden fixtures (NOT a CI gate)."
+publish = false
+
+[[bin]]
+name = "vllm-oxide-test"
+path = "src/main.rs"
+
+[dependencies]
+vllm_oxide = { path = "../vllm-oxide" }
+candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+bytemuck = "1"
+safetensors = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
