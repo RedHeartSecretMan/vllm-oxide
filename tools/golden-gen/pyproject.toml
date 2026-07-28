@@ -37,10 +37,10 @@ dev = [
 package = true
 
 [tool.uv.sources]
-# nano-vllm requires flash-attn which has no pre-built wheel for CUDA 13.x.
-# Run with --only-oracle transformers,vllm_v1 instead, or add back when
-# a CUDA 13-compatible flash-attn wheel is available.
-# nano-vllm = { git = "https://github.com/GeeeekExplorer/nano-vllm" }
+# nano-vllm requires a separate venv (torch 2.9 + python3.12-dev for Triton).
+# Use the pre-built flash-attn cu13 wheel for torch 2.9:
+#   https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.3.post1
+# Then run with --only-oracle nanovllm to append its fixtures.
 
 [tool.ruff]
 line-length = 100
