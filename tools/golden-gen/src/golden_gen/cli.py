@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip cross-validation step.",
     )
+    parser.add_argument(
+        "--cross-validate-only",
+        action="store_true",
+        help="Only run cross-validation on existing fixtures (skip oracle generation).",
+    )
     return parser
 
 
@@ -139,25 +144,27 @@ def main(argv: list[str] | None = None) -> int:
         existing = read_manifest(existing_manifest_path)
         all_fixtures = list(existing.fixtures)
 
-    for name, oracle_cls in oracle_specs:
-        oracle = oracle_cls()
-        if args.dry_run:
-            oracle.name = name
-        try:
-            fixtures = run_all(
-                [oracle], all_prompts, output_dir, only_category=only_category,
-            )
-            # Replace any existing fixtures for this oracle+prompt combo
-            # to avoid duplicates when re-running the same oracle.
-            new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
-            all_fixtures = [f for f in all_fixtures if (f.oracle, f.prompt_id) not in new_keys]
-            all_fixtures.extend(fixtures)
-        except Exception as e:
-            print(f"ERROR: oracle {name} failed: {e}", file=sys.stderr)
-        finally:
-            oracle.close()
+    if not args.cross_validate_only:
+        for name, oracle_cls in oracle_specs:
+            oracle = oracle_cls()
+            if args.dry_run:
+                oracle.name = name
+            try:
+                fixtures = run_all(
+                    [oracle], all_prompts, output_dir, only_category=only_category,
+                )
+                # Replace any existing fixtures for this oracle+prompt combo
+                # to avoid duplicates when re-running the same oracle.
+                new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
+                all_fixtures = [f for f in all_fixtures if (f.oracle, f.prompt_id) not in new_keys]
+                all_fixtures.extend(fixtures)
+            except Exception as e:
+                print(f"ERROR: oracle {name} failed: {e}", file=sys.stderr)
+            finally:
+                oracle.close()
 
-    print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
+    if not args.cross_validate_only:
+        print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
 
     suspect_prompt_ids: list[str] = []
 
