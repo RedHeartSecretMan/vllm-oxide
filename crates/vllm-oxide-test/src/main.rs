@@ -15,7 +15,7 @@ use clap::Parser;
 
 use vllm_oxide_test::{
     self, ComparisonReport,
-    compare_l1, compare_l2, compare_l3,
+    compare_l1, compare_l2, compare_l2_same_prefix, compare_l3,
     download, manifest, print_report, prompts,
 };
 use vllm_oxide::{
@@ -208,6 +208,9 @@ fn main() -> Result<()> {
         if !cli.l1_only {
             let l2_result = compare_l2(&fixture, &logits, tolerance)?;
             report.l2_results.push(l2_result);
+
+            let l2_sp = compare_l2_same_prefix(&fixture, &logits, &generated_tokens, tolerance)?;
+            report.l2_same_prefix_results.push(l2_sp);
         }
 
         if cli.debug {

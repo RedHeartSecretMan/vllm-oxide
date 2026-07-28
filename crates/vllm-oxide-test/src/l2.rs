@@ -138,6 +138,94 @@ pub fn compare_l2(
     })
 }
 
+/// Result of L2 comparison over shared-prefix steps only.
+///
+/// Unlike [`compare_l2`] which compares logits at every step (including
+/// steps after token divergence), this only compares steps where the
+/// generated token matches the golden token. This eliminates chain
+/// divergence and gives a tighter numerical accuracy signal.
+#[derive(Debug)]
+pub struct L2SamePrefixResult {
+    pub prompt_id: String,
+    pub passed: bool,
+    pub same_token_steps: usize,
+    pub diff_token_steps: usize,
+    pub total_elements: usize,
+    pub max_abs_diff: f64,
+    pub elements_exceeding_tol: usize,
+}
+
+/// Compare logits only on steps where generated tokens match golden tokens.
+///
+/// Chain divergence occurs when a small BF16 difference flips argmax at step N,
+/// causing all subsequent hidden states to differ. This function isolates the
+/// clean numerical comparison by only analyzing steps where the prefix is shared.
+pub fn compare_l2_same_prefix(
+    fixture: &FixtureData,
+    generated_logits: &Tensor,
+    generated_tokens: &[u32],
+    tolerance: &ToleranceCalibration,
+) -> Result<L2SamePrefixResult> {
+    let logits_flat = match &fixture.logits {
+        Some(l) => l,
+        None => anyhow::bail!(
+            "L2 comparison requires canonical fixture with logits tensor."
+        ),
+    };
+
+    let n_steps = fixture.num_tokens as usize;
+    let vocab_size = fixture.model_vocab_size();
+
+    let gen_f32 = generated_logits.to_dtype(DType::F32)?.flatten_all()?;
+    let gen_vals = gen_f32.to_vec1::<f32>()?;
+
+    let min_steps = n_steps.min(generated_tokens.len()).min(fixture.token_ids.len());
+    let mut same_token_steps = 0usize;
+    let mut diff_token_steps = 0usize;
+    let mut total_exceeding = 0usize;
+    let mut max_abs_diff = 0.0f64;
+
+    for step in 0..min_steps {
+        let expected_token = fixture.token_ids[step];
+        let actual_token = generated_tokens[step] as i64;
+
+        if expected_token != actual_token {
+            diff_token_steps += 1;
+            continue;
+        }
+        same_token_steps += 1;
+
+        let start = step * vocab_size;
+        let end = start + vocab_size;
+        let expected_slice = &logits_flat[start..end];
+
+        for (j, &expected) in expected_slice.iter().enumerate() {
+            let actual = gen_vals[start + j] as f64;
+            let expected_f = expected as f64;
+            let abs_diff = (actual - expected_f).abs();
+
+            if abs_diff > max_abs_diff {
+                max_abs_diff = abs_diff;
+            }
+
+            let threshold = tolerance.atol + tolerance.rtol * expected_f.abs();
+            if abs_diff > threshold {
+                total_exceeding += 1;
+            }
+        }
+    }
+
+    Ok(L2SamePrefixResult {
+        prompt_id: fixture.prompt_id.clone(),
+        passed: total_exceeding == 0,
+        same_token_steps,
+        diff_token_steps,
+        total_elements: same_token_steps * vocab_size,
+        max_abs_diff,
+        elements_exceeding_tol: total_exceeding,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {

@@ -3,6 +3,7 @@
 
 use crate::l1::L1Result;
 use crate::l2::L2Result;
+use crate::l2::L2SamePrefixResult;
 use crate::l3::L3Result;
 use crate::types::{
     KnownDeviation, ToleranceCalibration,
@@ -15,6 +16,7 @@ pub struct ComparisonReport {
     pub model_path: String,
     pub l1_results: Vec<L1Result>,
     pub l2_results: Vec<L2Result>,
+    pub l2_same_prefix_results: Vec<L2SamePrefixResult>,
     pub l3_results: Vec<L3Result>,
     /// Fixtures that were skipped (e.g., no engine logits for regression).
     pub skipped_l2: Vec<String>,
@@ -57,6 +59,9 @@ pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration)
     // ── L2 ──────────────────────────────────────────────
     print_l2_section(report);
 
+    // ── L2 same-prefix ──────────────────────────────────
+    print_l2_same_prefix_section(report);
+
     // ── L3 ──────────────────────────────────────────────
     if !report.l3_results.is_empty() {
         println!("── L3 (per-layer activations, debug-only) ──");
@@ -83,9 +88,18 @@ pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration)
     println!("══════════════════════════════════════════════════");
     let l1_status = if report.l1_passed() { "PASS" } else { "FAIL" };
     let l2_status = if report.l2_passed() { "PASS" } else { "FAIL" };
+    let l2_sp = report.l2_same_prefix_results.iter().all(|r| r.passed);
+    let l2_sp_status = if report.l2_same_prefix_results.is_empty() {
+        "N/A"
+    } else if l2_sp {
+        "PASS"
+    } else {
+        "FAIL"
+    };
     let overall = if report.overall_passed() { "PASS" } else { "FAIL" };
     println!("  L1 (token match):   {}", l1_status);
     println!("  L2 (logits):        {}", l2_status);
+    println!("  L2 (same-prefix):   {}", l2_sp_status);
     if !report.skipped_l2.is_empty() {
         println!("  L2 skipped:         {}", report.skipped_l2.join(", "));
     }
@@ -132,6 +146,33 @@ fn print_l2_section(report: &ComparisonReport) {
         );
         if let Some(step) = r.max_abs_step {
             println!("    max abs diff at step {}", step);
+        }
+    }
+    println!();
+}
+
+fn print_l2_same_prefix_section(report: &ComparisonReport) {
+    if report.l2_same_prefix_results.is_empty() {
+        return;
+    }
+
+    println!("── L2 same-prefix (no chain divergence) ──");
+    for r in &report.l2_same_prefix_results {
+        let status = if r.passed { "✓" } else { "✗" };
+        println!(
+            "  {} {}: same-token steps={}, max_abs_diff={:.2e}, exceeding={}/{} elements",
+            status,
+            r.prompt_id,
+            r.same_token_steps,
+            r.max_abs_diff,
+            r.elements_exceeding_tol,
+            r.total_elements,
+        );
+        if r.diff_token_steps > 0 {
+            println!(
+                "    {} steps skipped (token mismatch)",
+                r.diff_token_steps,
+            );
         }
     }
     println!();

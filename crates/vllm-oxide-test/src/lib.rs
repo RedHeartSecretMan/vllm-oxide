@@ -24,6 +24,6 @@ pub use types::{FixtureData, FixtureMetadata, Manifest, ToleranceCalibration};
 pub use manifest::{load_fixture, parse_manifest};
 pub use download::{download_release, load_from_dir};
 pub use l1::{compare_l1, L1Result};
-pub use l2::{compare_l2, L2Result};
+pub use l2::{compare_l2, compare_l2_same_prefix, L2Result, L2SamePrefixResult};
 pub use l3::{compare_l3, L3Result};
 pub use report::{ComparisonReport, print_report};
