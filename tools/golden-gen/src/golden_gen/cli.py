@@ -129,6 +129,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Run oracles one at a time to avoid GPU memory exhaustion
     all_fixtures: list[Any] = []
+
+    # If manifest.json already exists (e.g. from a previous --only-oracle run),
+    # merge its fixtures so cross-validation sees the full oracle triangle.
+    existing_manifest_path = output_dir / "manifest.json"
+    if existing_manifest_path.exists():
+        from golden_gen.manifest import read_manifest
+
+        existing = read_manifest(existing_manifest_path)
+        all_fixtures = list(existing.fixtures)
+
     for name, oracle_cls in oracle_specs:
         oracle = oracle_cls()
         if args.dry_run:
@@ -137,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
             fixtures = run_all(
                 [oracle], all_prompts, output_dir, only_category=only_category,
             )
+            # Replace any existing fixtures for this oracle+prompt combo
+            # to avoid duplicates when re-running the same oracle.
+            new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
+            all_fixtures = [f for f in all_fixtures if (f.oracle, f.prompt_id) not in new_keys]
             all_fixtures.extend(fixtures)
         except Exception as e:
             print(f"ERROR: oracle {name} failed: {e}", file=sys.stderr)
