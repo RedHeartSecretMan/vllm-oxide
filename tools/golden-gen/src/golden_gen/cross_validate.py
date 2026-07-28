@@ -28,6 +28,26 @@ def pairwise_l2(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
     return float(per_step_l2.max())
 
 
+def pairwise_max_abs_diff(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
+    """Compute per-element max absolute difference between a and b.
+
+    Unlike pairwise_l2 which aggregates over vocab_size dimensions,
+    this returns the single largest element-wise difference across all
+    steps and vocabulary positions.
+
+    Args:
+        a: Logits array of shape [n, vocab_size].
+        b: Logits array of shape [m, vocab_size].
+
+    Returns:
+        Maximum |a[i,j] - b[i,j]| across all shared positions.
+    """
+    min_len = min(a.shape[0], b.shape[0])
+    a = a[:min_len]
+    b = b[:min_len]
+    return float(np.abs(a - b).max())
+
+
 def count_argmax_mismatches(
     token_ids_a: NDArray[np.int64],
     token_ids_b: NDArray[np.int64],
@@ -47,29 +67,44 @@ def count_argmax_mismatches(
 
 def calibrate_tolerance(
     per_prompt_max_l2: dict[str, float],
+    per_prompt_max_abs: dict[str, float] | None = None,
 ) -> ToleranceCalibration:
-    """Calibrate atol and rtol from per-prompt max L2 distances.
+    """Calibrate atol and rtol from oracle-vs-oracle divergence.
+
+    Uses per-element max absolute difference (infinity norm) for atol,
+    and per-step L2 for observed_max_l2 (informational only, T8 Q8.2).
 
     Args:
-        per_prompt_max_l2: Mapping from prompt_id -> max L2 distance
-            observed across all oracle pairs for that prompt.
+        per_prompt_max_l2: Mapping from prompt_id -> max per-step L2 distance.
+        per_prompt_max_abs: Mapping from prompt_id -> max per-element
+            absolute difference. If None, falls back to L2-based calibration
+            (legacy, less accurate).
 
     Returns:
-        ToleranceCalibration with atol = rtol = factor * max(per_prompt_max_l2).
+        ToleranceCalibration with atol = rtol = factor × max pairwise abs diff.
     """
-    observed_max = 0.0 if not per_prompt_max_l2 else max(per_prompt_max_l2.values())
+    observed_l2 = 0.0 if not per_prompt_max_l2 else max(per_prompt_max_l2.values())
 
-    tol = TOLERANCE_CALIBRATION_FACTOR * observed_max
+    if per_prompt_max_abs:
+        observed_max_abs = max(per_prompt_max_abs.values())
+        tol = TOLERANCE_CALIBRATION_FACTOR * observed_max_abs
+        method = (
+            f"{TOLERANCE_CALIBRATION_FACTOR}x max pairwise per-element |diff| "
+            f"across oracle triangle on canonical prompts"
+        )
+    else:
+        tol = TOLERANCE_CALIBRATION_FACTOR * observed_l2
+        method = (
+            f"{TOLERANCE_CALIBRATION_FACTOR}x max pairwise L2 across "
+            f"oracle triangle on canonical prompts (legacy L2 calibration)"
+        )
 
     return ToleranceCalibration(
         atol=tol,
         rtol=tol,
-        observed_max_l2=observed_max,
+        observed_max_l2=observed_l2,
         calibration_factor=TOLERANCE_CALIBRATION_FACTOR,
-        method=(
-            f"{TOLERANCE_CALIBRATION_FACTOR}x max pairwise L2 across "
-            f"oracle triangle on canonical prompts"
-        ),
+        method=method,
     )
 
 
@@ -98,9 +133,11 @@ def cross_validate_all(
 
     known_deviations: list[KnownDeviation] = []
     per_prompt_max_l2: dict[str, float] = {}
+    per_prompt_max_abs: dict[str, float] = {}
 
     for pid in sorted(prompt_ids):
         prompt_max_l2 = 0.0
+        prompt_max_abs = 0.0
         for oa, ob in pairs:
             key_a = (oa, pid)
             key_b = (ob, pid)
@@ -111,9 +148,11 @@ def cross_validate_all(
             tok_b, logits_b = results[key_b]
 
             max_l2 = pairwise_l2(logits_a, logits_b)
+            max_abs = pairwise_max_abs_diff(logits_a, logits_b)
             mismatches = count_argmax_mismatches(tok_a, tok_b)
 
             prompt_max_l2 = max(prompt_max_l2, max_l2)
+            prompt_max_abs = max(prompt_max_abs, max_abs)
 
             if mismatches > 0 or max_l2 > 1e-6:
                 note = f"L2={max_l2:.6f}, argmax_mismatches={mismatches} between {oa} and {ob}"
@@ -128,8 +167,9 @@ def cross_validate_all(
                 )
 
         per_prompt_max_l2[pid] = prompt_max_l2
+        per_prompt_max_abs[pid] = prompt_max_abs
 
-    return known_deviations, per_prompt_max_l2
+    return known_deviations, per_prompt_max_l2, per_prompt_max_abs
 
 
 def flag_suspicious_divergence(

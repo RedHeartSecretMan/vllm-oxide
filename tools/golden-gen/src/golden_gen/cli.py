@@ -187,9 +187,9 @@ def main(argv: list[str] | None = None) -> int:
                             data["logits"],
                         )
             if results:
-                deviations, per_prompt_l2 = cross_validate_all(results)
+                deviations, per_prompt_l2, per_prompt_max_abs = cross_validate_all(results)
                 cross_validation = deviations
-                tolerance = calibrate_tolerance(per_prompt_l2)
+                tolerance = calibrate_tolerance(per_prompt_l2, per_prompt_max_abs)
                 print(
                     f"Cross-validation: {len(deviations)} deviations, "
                     f"tolerance calibrated to atol={tolerance.atol:.6f}"
