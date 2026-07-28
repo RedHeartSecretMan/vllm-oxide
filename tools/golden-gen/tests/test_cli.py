@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class TestCLI:
-    """Test CLI via subprocess (--help, --dry-run)."""
+    """Test CLI via subprocess (--help, generate --dry-run)."""
 
     def test_help(self):
         result = subprocess.run(
@@ -17,19 +17,39 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert "Generate golden fixtures" in result.stdout
+        assert "generate" in result.stdout
+        assert "calibrate" in result.stdout
+
+    def test_generate_help(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "golden_gen", "generate", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        assert result.returncode == 0
         assert "--dry-run" in result.stdout
         assert "--output-dir" in result.stdout
-        assert "--only-oracle" in result.stdout
         assert "--only-category" in result.stdout
-        assert "--no-cross-validate" in result.stdout
+
+    def test_calibrate_help(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "golden_gen", "calibrate", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        assert result.returncode == 0
+        assert "--manifest-dir" in result.stdout
 
     def test_dry_run_produces_manifest(self, tmp_path):
-        """--dry-run should produce a fake manifest + fixtures."""
+        """generate --dry-run should produce a fake manifest + fixtures."""
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "golden_gen",
+                "generate",
                 "--dry-run",
                 "--output-dir",
                 str(tmp_path / "output"),
@@ -52,12 +72,13 @@ class TestCLI:
         assert manifest["model"]["id"] == "Qwen/Qwen3-0.6B"
 
     def test_dry_run_produces_safetensors(self, tmp_path):
-        """--dry-run should produce fake .safetensors fixture files."""
+        """generate --dry-run should produce fake .safetensors fixture files."""
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "golden_gen",
+                "generate",
                 "--dry-run",
                 "--output-dir",
                 str(tmp_path / "output"),
@@ -70,9 +91,9 @@ class TestCLI:
 
         safetensors_files = list((tmp_path / "output").glob("*.safetensors"))
         # 4 canonical singles + 4 canonical_05 sub-prompts + 20 regression = 28 prompt-ids
-        # 28 x 3 fake oracles = 84 fixtures
-        assert len(safetensors_files) == 84, (
-            f"Expected 84 .safetensors files, got {len(safetensors_files)}"
+        # 28 x 2 oracles = 56 fixtures
+        assert len(safetensors_files) == 56, (
+            f"Expected 56 .safetensors files, got {len(safetensors_files)}"
         )
 
         # Verify safetensors content
@@ -81,15 +102,15 @@ class TestCLI:
         sample = load_file(str(safetensors_files[0]))
         assert "token_ids" in sample
 
-    def test_dry_run_cross_validate(self, tmp_path):
-        """--dry-run cross-validation should produce tolerance values."""
+    def test_dry_run_produces_output(self, tmp_path):
+        """generate --dry-run should still produce output."""
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "golden_gen",
+                "generate",
                 "--dry-run",
-                "--no-cross-validate",
                 "--output-dir",
                 str(tmp_path / "output"),
             ],
@@ -106,6 +127,7 @@ class TestCLI:
                 sys.executable,
                 "-m",
                 "golden_gen",
+                "generate",
                 "--dry-run",
                 "--only-category",
                 "canonical",
@@ -120,9 +142,9 @@ class TestCLI:
 
         safetensors_files = list((tmp_path / "output").glob("*.safetensors"))
         # canonical_01-04 (4 singles) + canonical_05 (4 sub-prompts) = 8 prompt-ids
-        # 8 x 3 fake oracles = 24 fixtures
-        assert len(safetensors_files) == 24, (
-            f"Expected 24 .safetensors files for canonical-only, got {len(safetensors_files)}"
+        # 8 x 2 oracles = 16 fixtures
+        assert len(safetensors_files) == 16, (
+            f"Expected 16 .safetensors files for canonical-only, got {len(safetensors_files)}"
         )
 
     def test_version_accessible(self):

@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 PromptCategory = Literal["canonical", "regression"]
-OracleName = Literal["transformers", "nanovllm", "vllm_v1", "fake"]
+OracleName = Literal["transformers", "vllm", "fake"]
 
 
 class PromptSpec(BaseModel):
@@ -35,7 +35,6 @@ class OracleVersions(BaseModel):
 
     transformers: str
     vllm: str
-    nanovllm: str
 
 
 class FixtureMetadata(BaseModel):
@@ -51,22 +50,11 @@ class FixtureMetadata(BaseModel):
     filename: str
 
 
-class KnownDeviation(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    pair: tuple[OracleName, OracleName]
-    prompt_id: str
-    max_l2: float
-    argmax_mismatches: int
-    note: str
-
-
 class ToleranceCalibration(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     atol: float
-    rtol: float
-    observed_max_l2: float
+    observed_max_abs_diff: float
     calibration_factor: float
     method: str
 
@@ -118,9 +106,8 @@ class Manifest(BaseModel):
     oracle_versions: OracleVersions
     generation: GenerationConfig
     tolerance: ToleranceCalibration
-    cross_validation: list[KnownDeviation]
     fixtures: list[FixtureMetadata]
-    suspect_prompt_ids: list[str] = []
+    regression_skip_map: dict[str, list[int]] = {}
 
     def to_json(self, path: str | Path) -> None:
         """Serialize to JSON file."""

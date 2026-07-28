@@ -1,8 +1,7 @@
-"""Golden fixture generator for vllm-oxide oracle triangle."""
+"""Golden fixture generator for vllm-oxide oracle comparison."""
 
 from golden_gen.schema import (
     FixtureMetadata,
-    KnownDeviation,
     Manifest,
     ManifestEntry,
     OracleName,
@@ -15,7 +14,6 @@ from golden_gen.schema import (
 __version__ = "0.1.0"
 __all__ = [
     "FixtureMetadata",
-    "KnownDeviation",
     "Manifest",
     "ManifestEntry",
     "OracleName",

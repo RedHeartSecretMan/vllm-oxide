@@ -12,14 +12,12 @@ from golden_gen.config import (
     MODEL_DTYPE,
     MODEL_ID,
     MODEL_REVISION,
-    NANO_VLLM_TEMPERATURE,
     REGRESSION_MAX_TOKENS,
     VOCAB_SIZE,
 )
 from golden_gen.schema import (
     FixtureMetadata,
     GenerationConfig,
-    KnownDeviation,
     Manifest,
     ModelInfo,
     OracleVersions,
@@ -41,34 +39,26 @@ def get_oracle_versions() -> OracleVersions:
     except importlib.metadata.PackageNotFoundError:
         vllm_ver = "unknown"
 
-    try:
-        nanovllm_ver = importlib.metadata.version("nanovllm")
-    except importlib.metadata.PackageNotFoundError:
-        nanovllm_ver = "unknown"
-
     return OracleVersions(
         transformers=transformers_ver,
         vllm=vllm_ver,
-        nanovllm=nanovllm_ver,
     )
 
 
 def build_manifest(
     fixtures: list[FixtureMetadata],
     tolerance: ToleranceCalibration,
-    cross_validation: list[KnownDeviation],
     *,
     generated_at: datetime | None = None,
-    suspect_prompt_ids: list[str] | None = None,
+    regression_skip_map: dict[str, list[int]] | None = None,
 ) -> Manifest:
-    """Build a Manifest from fixture metadata and cross-validation results.
+    """Build a Manifest from fixture metadata and tolerance calibration.
 
     Args:
         fixtures: List of FixtureMetadata for all generated fixtures.
         tolerance: Calibrated tolerance values.
-        cross_validation: List of known oracle deviations.
         generated_at: Timestamp (defaults to now UTC).
-        suspect_prompt_ids: Prompt IDs whose divergence exceeds threshold.
+        regression_skip_map: Positions to skip per regression prompt.
 
     Returns:
         A fully populated Manifest.
@@ -90,13 +80,12 @@ def build_manifest(
         generation=GenerationConfig(
             canonical_max_tokens=CANONICAL_MAX_TOKENS,
             regression_max_tokens=REGRESSION_MAX_TOKENS,
-            temperature=NANO_VLLM_TEMPERATURE,
+            temperature=0.0,
             attn_implementation=ATTN_IMPLEMENTATION,
         ),
         tolerance=tolerance,
-        cross_validation=cross_validation,
         fixtures=fixtures,
-        suspect_prompt_ids=suspect_prompt_ids or [],
+        regression_skip_map=regression_skip_map or {},
     )
 
 

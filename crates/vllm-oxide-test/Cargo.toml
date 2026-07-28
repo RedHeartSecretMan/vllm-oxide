@@ -13,6 +13,9 @@ publish = false
 name = "vllm-oxide-test"
 path = "src/main.rs"
 
+[features]
+cuda = ["vllm_oxide/cuda"]
+
 [dependencies]
 vllm_oxide = { path = "../vllm-oxide" }
 candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }

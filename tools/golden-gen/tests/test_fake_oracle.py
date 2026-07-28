@@ -83,24 +83,19 @@ class TestFakeOracle:
             description="test",
         )
         o_t = FakeOracle()
-        o_n = FakeOracle()
         o_v = FakeOracle()
         o_t.name = "transformers"
-        o_n.name = "nanovllm"
-        o_v.name = "vllm_v1"
+        o_v.name = "vllm"
         r_t = o_t.generate(prompt)[0]
-        r_n = o_n.generate(prompt)[0]
         r_v = o_v.generate(prompt)[0]
 
         # Different names -> different logits
         with pytest.raises(AssertionError):
-            np.testing.assert_array_equal(r_t.logits_per_step, r_n.logits_per_step)
-        with pytest.raises(AssertionError):
             np.testing.assert_array_equal(r_t.logits_per_step, r_v.logits_per_step)
 
         # L2 distance should be non-zero (different oracle names produce different outputs)
-        l2_tn = float(np.linalg.norm(r_t.logits_per_step - r_n.logits_per_step))
-        assert l2_tn > 0, "Expected non-zero L2 for different oracle names"
+        l2_tv = float(np.linalg.norm(r_t.logits_per_step - r_v.logits_per_step))
+        assert l2_tv > 0, "Expected non-zero L2 for different oracle names"
 
     def test_different_prompts_different_output(self):
         p1 = PromptSpec(
@@ -133,7 +128,7 @@ class TestFakeOracle:
     def test_close_does_not_raise(self):
         self.oracle.close()  # should not raise
 
-    def test_cross_validation_nonzero_tolerance(self):
+    def test_different_oracle_names_produce_different_logits(self):
         """Verify two differently-named FakeOracles produce non-zero L2."""
         prompt = PromptSpec(
             id="canonical_01",
@@ -144,12 +139,10 @@ class TestFakeOracle:
         o1 = FakeOracle()
         o2 = FakeOracle()
         o1.name = "transformers"
-        o2.name = "nanovllm"
+        o2.name = "vllm"
         r1 = o1.generate(prompt)[0]
         r2 = o2.generate(prompt)[0]
         per_step_l2 = np.linalg.norm(r1.logits_per_step - r2.logits_per_step, axis=1)
-        # L2 should be non-zero (different oracle names) and reasonable
-        # (~0.55 for 1e-3 perturbation across 151936 vocab, bounded by 10 for sanity)
         assert per_step_l2.max() > 0, "Expected non-zero L2 for different oracle names"
         assert per_step_l2.max() < 10.0, f"L2 too large: {per_step_l2.max()}"
 
@@ -177,7 +170,6 @@ class TestFakeOracle:
             sub_prompts=["A", "B", "C", "D"],
         )
         results = self.oracle.generate(batch_prompt)
-        # Each sub-prompt should produce different output (different seed)
         for i in range(1, len(results)):
             with pytest.raises(AssertionError):
                 np.testing.assert_array_equal(results[0].token_ids, results[i].token_ids)

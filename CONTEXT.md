@@ -91,12 +91,32 @@ _Avoid_: engine config, runtime options.
 ## Correctness
 
 **Golden fixture**:
-A content-addressed `.safetensors` file produced by the Python harness (`tools/golden-gen/`) running the oracle triangle (HF Transformers / nano-vllm / vLLM V1) on fixed prompts. Used as ground truth for L1 (token-sequence exact match) and L2 (logits tensor comparison) validation of the Rust engine. Stored as GitHub Release assets, NOT in git mainline.
+A content-addressed `.safetensors` file produced by the Python harness (`tools/golden-gen/`) running two oracle engines (transformers + vLLM) on fixed prompts. Used for L1 (token-sequence exact match) and L2 (logits tensor comparison) validation of the Rust engine. Stored as GitHub Release assets, NOT in git mainline.
 _Avoid_: reference output, expected output, snapshot, oracle output.
 
-**Oracle triangle**:
-The three reference implementations cross-validated to produce golden fixtures and calibrate numerical tolerances. If two oracles disagree beyond the calibrated threshold, the disagreement is recorded as a known deviation rather than trusting one blindly.
-_Avoid_: reference models, ground-truth engines.
+**Reference oracle**:
+The oracle used as the correctness target — `transformers` with `output_logits=True` and `attn_implementation=flash_attention_2`. vllm-oxide's L1 and L2 comparisons run against this oracle's output. It is not a "ground truth" (Qwen3-0.6B weights are BF16; BF16 computation is non-associative), but it is the single consistent reference point we measure against.
+_Avoid_: ground truth, canonical engine, expected engine.
+
+**Baseline oracle**:
+The oracle used to calibrate numerical tolerances — `vLLM` (BF16, same dtype path as vllm-oxide). The maximum per-element |transformers - vLLM| across all canonical prompts × 2.0 gives the `atol` for L2 comparison. vLLM's token output is also used to determine which L1 positions are inherently non-deterministic under BF16 (skip map).
+_Avoid_: secondary oracle, calibration oracle.
+
+**atol calibration**:
+The process of measuring `max(|transformers_logits - vllm_logits| per-element)` across all 5 canonical prompts, then multiplying by 2.0 to produce a global `atol` for L2 comparison. Runs as a separate `golden-gen calibrate` step after fixture generation. No rtol is used — the logit values of interest are large (top-k candidates), and rtol is unstable for near-zero tail logits.
+_Avoid_: tolerance derivation, threshold computation.
+
+**Near-tie skip (L1)**:
+When vllm-oxide's argmax token differs from the reference oracle's, the raw logits are checked: if the reference token is in the top-2 and the gap between it and the next candidate < ε (ε = atol × 2.0), the position is skipped. These are BF16 precision artifacts, not bugs. Used for canonical prompts (full logits available).
+_Avoid_: epsilon skip, close-call skip.
+
+**Skip map (L1 regression)**:
+For regression prompts (no full logits), positions where vLLM's token also differs from the reference are recorded in a skip map during calibration. vllm-oxide's L1 comparison skips these positions — they represent inherent BF16 non-determinism, not implementation bugs. No tunable hyperparameter.
+_Avoid_: exclusion set, known-mismatch list.
+
+**Same-prefix comparison (L2)**:
+L2 logits comparison only runs on steps where vllm-oxide's token matches the reference oracle's token. Once the token sequence diverges, subsequent steps are in different computational contexts — comparing their logits produces false positives. This replaces the old `compare_l2` which compared all steps regardless of divergence.
+_Avoid_: prefix-aware L2, context-aware comparison.
 
 **Release gate vs CI gate**:
 CI (every push, CPU-only) runs property tests → "CI green". Release gate (pre-release, manual, GPU) runs golden comparison → "numerically validated". These are explicitly different — the repo README must document that CI green ≠ validated.

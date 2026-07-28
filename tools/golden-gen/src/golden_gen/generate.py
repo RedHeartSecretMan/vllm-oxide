@@ -85,10 +85,8 @@ def run_all(
     for o in oracles:
         if o.name == "transformers":
             oracle_names.append("transformers")
-        elif o.name == "nanovllm":
-            oracle_names.append("nanovllm")
-        elif o.name == "vllm_v1":
-            oracle_names.append("vllm_v1")
+        elif o.name == "vllm":
+            oracle_names.append("vllm")
         elif o.name == "fake":
             oracle_names.append("fake")
         else:

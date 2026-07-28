@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from golden_gen.config import (
     CANONICAL_MAX_TOKENS,
@@ -22,7 +23,35 @@ from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
 
 
-class VllmV1Oracle:
+def _extract_full_logits(
+    completion: Any, n: int, vocab_size: int
+) -> NDArray[np.float32]:
+    """Extract full logits from a vLLM completion's logprobs.
+
+    Args:
+        completion: vLLM Completion object with ``logprobs`` attribute.
+        n: Number of generated tokens (steps).
+        vocab_size: Vocabulary size.
+
+    Returns:
+        Array of shape ``(n, vocab_size)`` in float32.
+    """
+    logits = np.zeros((n, vocab_size), dtype=np.float32)
+    for t, step_dict in enumerate(completion.logprobs):
+        if len(step_dict) != vocab_size:
+            raise RuntimeError(
+                f"vLLM V1 raw_logits mode returned {len(step_dict)} entries "
+                f"at step {t}, expected full vocab ({vocab_size}). Check that "
+                f"logprobs=-1 and max_logprobs=-1 are both set. Sparse logits "
+                f"would produce mostly-zero ground truth -- aborting to prevent "
+                f"silent corruption."
+            )
+        for tok_id, logprob_obj in step_dict.items():
+            logits[t, tok_id] = logprob_obj.logprob
+    return logits
+
+
+class VllmOracle:
     """Oracle using vLLM V1 engine.
 
     Uses logprobs_mode='raw_logits' and logprobs=-1 to capture
@@ -30,7 +59,7 @@ class VllmV1Oracle:
     For regression, uses logprobs=5 for top-5 only.
     """
 
-    name = "vllm_v1"
+    name = "vllm"
 
     def __init__(self) -> None:
         from vllm import LLM
@@ -59,18 +88,7 @@ class VllmV1Oracle:
         n_prompt_tokens = len(out.prompt_token_ids)
 
         n = len(token_ids)
-        logits = np.zeros((n, VOCAB_SIZE), dtype=np.float32)
-        for t, step_dict in enumerate(completion.logprobs):
-            if len(step_dict) != VOCAB_SIZE:
-                raise RuntimeError(
-                    f"vLLM V1 raw_logits mode returned {len(step_dict)} entries "
-                    f"at step {t}, expected full vocab ({VOCAB_SIZE}). Check that "
-                    f"logprobs=-1 and max_logprobs=-1 are both set. Sparse logits "
-                    f"would produce mostly-zero ground truth -- aborting to prevent "
-                    f"silent corruption."
-                )
-            for tok_id, logprob_obj in step_dict.items():
-                logits[t, tok_id] = logprob_obj.logprob
+        logits = _extract_full_logits(completion, n, VOCAB_SIZE)
 
         return OracleResult.for_canonical(
             token_ids=token_ids,
@@ -124,18 +142,7 @@ class VllmV1Oracle:
             token_ids = np.fromiter(completion.token_ids, dtype=np.int64)
             n_prompt_tokens = len(out.prompt_token_ids)
             n = len(token_ids)
-            logits = np.zeros((n, VOCAB_SIZE), dtype=np.float32)
-            for t, step_dict in enumerate(completion.logprobs):
-                if len(step_dict) != VOCAB_SIZE:
-                    raise RuntimeError(
-                        f"vLLM V1 raw_logits mode returned {len(step_dict)} entries "
-                        f"at step {t}, expected full vocab ({VOCAB_SIZE}). Check that "
-                        f"logprobs=-1 and max_logprobs=-1 are both set. Sparse logits "
-                        f"would produce mostly-zero ground truth -- aborting to prevent "
-                        f"silent corruption."
-                    )
-                for tok_id, logprob_obj in step_dict.items():
-                    logits[t, tok_id] = logprob_obj.logprob
+            logits = _extract_full_logits(completion, n, VOCAB_SIZE)
             results.append(
                 OracleResult.for_canonical(
                     token_ids=token_ids,

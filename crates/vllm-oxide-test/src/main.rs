@@ -15,7 +15,7 @@ use clap::Parser;
 
 use vllm_oxide_test::{
     self, ComparisonReport,
-    compare_l1, compare_l2, compare_l2_same_prefix, compare_l3,
+    compare_l1, compare_l1_regression, compare_l2, compare_l3,
     download, manifest, print_report, prompts,
 };
 use vllm_oxide::{
@@ -113,7 +113,6 @@ fn main() -> Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| cli.release_tag.unwrap_or_default()),
         model_path: model_path.display().to_string(),
-        known_deviations: golden_manifest.cross_validation.clone(),
         ..Default::default()
     };
 
@@ -206,17 +205,95 @@ fn main() -> Result<()> {
         }
 
         if !cli.l1_only {
-            let l2_result = compare_l2(&fixture, &logits, tolerance)?;
+            // ADR-0005: L2 uses same-prefix comparison (skips divergent steps)
+            let l2_result = compare_l2(&fixture, &logits, &generated_tokens, tolerance)?;
             report.l2_results.push(l2_result);
-
-            let l2_sp = compare_l2_same_prefix(&fixture, &logits, &generated_tokens, tolerance)?;
-            report.l2_same_prefix_results.push(l2_sp);
         }
 
         if cli.debug {
             let l3_result = compare_l3(&golden_manifest, &fixture_dir, &meta.prompt_id)?;
             report.l3_results.push(l3_result);
         }
+    }
+
+    // 2b. Run L1 comparison for regression fixtures (no logits available).
+    for meta in &golden_manifest.fixtures {
+        if meta.category != vllm_oxide_test::types::PromptCategory::Regression {
+            continue;
+        }
+        if cli.l2_only {
+            continue;
+        }
+
+        let prompt_entry = match canonical_prompts.get(&meta.prompt_id) {
+            Some(e) => e,
+            None => {
+                tracing::warn!(
+                    "prompt_id '{}' not found in canonical.jsonl — skipping",
+                    meta.prompt_id
+                );
+                continue;
+            }
+        };
+
+        if prompt_entry.sub_prompts.is_some() {
+            continue;
+        }
+
+        let fixture = manifest::load_fixture(&fixture_dir.join(&meta.filename), meta)?;
+        let prompt = Prompt::Text(prompt_entry.prompt.clone());
+        let max_tokens = meta.num_tokens as usize;
+
+        tracing::info!("[{}/L1] loading engine for regression", meta.prompt_id);
+        let mut llm = LLM::new(
+            Source::Local(model_path.clone()),
+            EngineOptions::default(),
+        )?;
+
+        let logits = match llm.generate_logits(&prompt, max_tokens) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("generate_logits failed for {}: {e}", meta.prompt_id);
+                continue;
+            }
+        };
+
+        let logits_f32 = match logits.to_dtype(candle_core::DType::F32) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("logits to_dtype failed: {e}");
+                continue;
+            }
+        };
+        let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
+        let vocab_size = if meta.logits_shape.1 > 0 {
+            meta.logits_shape.1
+        } else {
+            logits_vals.len() / logits.dims()[0]
+        };
+        let n_steps = logits.dims()[0];
+
+        let mut generated_tokens: Vec<u32> = Vec::with_capacity(n_steps);
+        for step in 0..n_steps {
+            let start = step * vocab_size;
+            let end = start + vocab_size;
+            let mut max_val = f32::NEG_INFINITY;
+            let mut max_idx = 0u32;
+            for (j, &val) in logits_vals[start..end].iter().enumerate() {
+                if val > max_val {
+                    max_val = val;
+                    max_idx = j as u32;
+                }
+            }
+            generated_tokens.push(max_idx);
+        }
+
+        let l1_result = compare_l1_regression(
+            &fixture,
+            &generated_tokens,
+            &golden_manifest.regression_skip_map,
+        )?;
+        report.l1_results.push(l1_result);
     }
 
     // 3. Print report.

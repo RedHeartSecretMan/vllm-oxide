@@ -7,7 +7,6 @@ from pydantic import ValidationError
 from golden_gen.schema import (
     FixtureMetadata,
     GenerationConfig,
-    KnownDeviation,
     Manifest,
     ModelInfo,
     OracleVersions,
@@ -128,16 +127,14 @@ class TestOracleVersions:
     def test_valid(self):
         versions = OracleVersions(
             transformers="4.43.0",
-            vllm="0.10.0",
-            nanovllm="0.1.0",
+            vllm="0.26.0",
         )
         assert versions.transformers == "4.43.0"
 
     def test_frozen(self):
         versions = OracleVersions(
             transformers="4.43.0",
-            vllm="0.10.0",
-            nanovllm="0.1.0",
+            vllm="0.26.0",
         )
         with pytest.raises(ValidationError):
             versions.transformers = "5.0.0"  # type: ignore[misc]
@@ -171,49 +168,26 @@ class TestFixtureMetadata:
             )
 
 
-class TestKnownDeviation:
-    def test_valid(self):
-        dev = KnownDeviation(
-            pair=("transformers", "nanovllm"),
-            prompt_id="canonical_01",
-            max_l2=0.001,
-            argmax_mismatches=2,
-            note="Minor deviation",
-        )
-        assert dev.argmax_mismatches == 2
-
-    def test_zero_mismatches(self):
-        dev = KnownDeviation(
-            pair=("transformers", "vllm_v1"),
-            prompt_id="canonical_01",
-            max_l2=0.0,
-            argmax_mismatches=0,
-            note="No deviation",
-        )
-        assert dev.max_l2 == 0.0
-
-
 class TestToleranceCalibration:
     def test_valid(self):
         tol = ToleranceCalibration(
             atol=0.01,
-            rtol=0.01,
-            observed_max_l2=0.005,
+            observed_max_abs_diff=0.005,
             calibration_factor=2.0,
-            method="2x max pairwise L2",
+            method="2x max pairwise abs diff",
         )
         assert tol.atol == 0.01
         assert tol.calibration_factor == 2.0
+        assert tol.observed_max_abs_diff == 0.005
 
 
 class TestManifest:
     def test_build_and_roundtrip(self, tmp_path):
         tolerance = ToleranceCalibration(
             atol=0.01,
-            rtol=0.01,
-            observed_max_l2=0.005,
+            observed_max_abs_diff=0.005,
             calibration_factor=2.0,
-            method="2x max pairwise L2",
+            method="2x max pairwise abs diff",
         )
         fixture = FixtureMetadata(
             prompt_id="canonical_01",
@@ -235,7 +209,7 @@ class TestManifest:
                 dtype="bfloat16",
                 vocab_size=151936,
             ),
-            oracle_versions=OracleVersions(transformers="4.43.0", vllm="0.10.0", nanovllm="0.1.0"),
+            oracle_versions=OracleVersions(transformers="4.43.0", vllm="0.26.0"),
             generation=GenerationConfig(
                 canonical_max_tokens=64,
                 regression_max_tokens=32,
@@ -243,7 +217,6 @@ class TestManifest:
                 attn_implementation="eager",
             ),
             tolerance=tolerance,
-            cross_validation=[],
             fixtures=[fixture],
         )
         path = tmp_path / "manifest.json"

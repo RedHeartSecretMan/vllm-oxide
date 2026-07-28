@@ -1,7 +1,7 @@
 [project]
 name = "golden-gen"
 version = "0.1.0"
-description = "Golden fixture generator for vllm-oxide oracle triangle"
+description = "Golden fixture generator for vllm-oxide oracle comparison"
 requires-python = ">=3.12,<3.13"
 classifiers = [
     "Private :: Do Not Upload",
@@ -22,7 +22,7 @@ golden-gen = "golden_gen.cli:main"
 [project.optional-dependencies]
 gpu = [
     "transformers>=4.56.0,<6.0",
-    "vllm>=0.18.0,<0.19.0",
+    "vllm>=0.18.0,<0.27.0",
     "torch>=2.10.0,<2.11.0",
     "xgrammar>=0.1.32,<0.2.4",
 ]
@@ -35,12 +35,6 @@ dev = [
 
 [tool.uv]
 package = true
-
-[tool.uv.sources]
-# nano-vllm requires a separate venv (torch 2.9 + python3.12-dev for Triton).
-# Use the pre-built flash-attn cu13 wheel for torch 2.9:
-#   https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.3.post1
-# Then run with --only-oracle nanovllm to append its fixtures.
 
 [tool.ruff]
 line-length = 100
@@ -57,7 +51,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["nanovllm.*", "vllm.*", "transformers.*", "torch.*", "xgrammar.*"]
+module = ["vllm.*", "transformers.*", "torch.*", "xgrammar.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -22,31 +22,36 @@ echo "  Release:    $RELEASE_TAG"
 echo "  Goldens:    $GOLDEN_OUTPUT"
 echo ""
 
-# Step 1: Generate golden fixtures
+# Step 1: Generate golden fixtures (both oracles)
 echo "── Step 1: Generating golden fixtures ──"
 cd "$SCRIPT_DIR/tools/golden-gen"
 uv sync
-uv run python -m golden_gen \
-    --output-dir "$GOLDEN_OUTPUT" \
-    --only-oracle nanovllm
+uv run python -m golden_gen generate \
+    --output-dir "$GOLDEN_OUTPUT"
 echo ""
 
-# Step 2: Build the comparison crate (release mode)
-echo "── Step 2: Building comparison crate ──"
+# Step 2: Calibrate tolerance + regression skip map
+echo "── Step 2: Calibrating tolerance ──"
+uv run python -m golden_gen calibrate \
+    --manifest-dir "$GOLDEN_OUTPUT"
+echo ""
+
+# Step 3: Build the comparison crate (release mode)
+echo "── Step 3: Building comparison crate ──"
 cd "$SCRIPT_DIR"
 cargo build --release -p vllm_oxide_test
 echo ""
 
-# Step 3: Run the comparison
-echo "── Step 3: Running golden comparison ──"
+# Step 4: Run the comparison
+echo "── Step 4: Running golden comparison ──"
 cargo run --release -p vllm_oxide_test -- \
     --model-path "$MODEL_PATH" \
     --manifest "$GOLDEN_OUTPUT/manifest.json" \
     --prompts-dir "$SCRIPT_DIR/tools/golden-gen/prompts"
 echo ""
 
-# Step 4: Upload to GitHub Release (if PASS)
-echo "── Step 4: Uploading Release asset ──"
+# Step 5: Upload to GitHub Release (if PASS)
+echo "── Step 5: Uploading Release asset ──"
 gh release create "$RELEASE_TAG" \
     --repo RedHeartSecretMan/vllm-oxide \
     --title "Golden fixtures — $RELEASE_TAG" \

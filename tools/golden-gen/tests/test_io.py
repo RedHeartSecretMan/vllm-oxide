@@ -35,7 +35,7 @@ class TestSaveLoadFixture:
         top5_indices = np.array([[i] * 5 for i in range(n_tokens)], dtype=np.int64)
         top5_logits = np.ones((n_tokens, 5), dtype=np.float32)
 
-        path = tmp_output_dir / "regression_01.nanovllm.safetensors"
+        path = tmp_output_dir / "regression_01.vllm.safetensors"
         sha256 = save_fixture(
             path=path,
             token_ids=token_ids,
@@ -97,7 +97,6 @@ class TestSaveLoadFixture:
 
     def test_type_enforcement(self, tmp_output_dir, fake_token_ids):
         logits = np.zeros((8, VOCAB_SIZE), dtype=np.float64)
-        # safetensors accepts float64; the save function will handle it
         sha256 = save_fixture(
             path=tmp_output_dir / "float64_logits.safetensors",
             token_ids=fake_token_ids,

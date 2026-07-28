@@ -3,6 +3,8 @@
 //! These types are the Rust-side parse targets for `manifest.json` and the
 //! `.safetensors` fixture files produced by the Python golden generator.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Top-level manifest describing a set of golden fixtures.
@@ -14,11 +16,12 @@ pub struct Manifest {
     pub oracle_versions: OracleVersions,
     pub generation: GenerationConfig,
     pub tolerance: ToleranceCalibration,
-    #[serde(default)]
-    pub cross_validation: Vec<KnownDeviation>,
     pub fixtures: Vec<FixtureMetadata>,
+    /// Mapping from prompt_id to a list of token positions where vLLM (the
+    /// reference BF16 engine) disagrees with transformers. These positions are
+    /// skipped during L1 regression comparison.
     #[serde(default)]
-    pub suspect_prompt_ids: Vec<String>,
+    pub regression_skip_map: HashMap<String, Vec<usize>>,
 }
 
 /// Provenance of the model used to generate goldens.
@@ -36,7 +39,6 @@ pub struct ModelInfo {
 pub struct OracleVersions {
     pub transformers: String,
     pub vllm: String,
-    pub nanovllm: String,
 }
 
 /// Parameters used during golden generation.
@@ -52,20 +54,9 @@ pub struct GenerationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToleranceCalibration {
     pub atol: f64,
-    pub rtol: f64,
-    pub observed_max_l2: f64,
+    pub observed_max_abs_diff: f64,
     pub calibration_factor: f64,
     pub method: String,
-}
-
-/// A known disagreement between two oracles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnownDeviation {
-    pub pair: (String, String),
-    pub prompt_id: String,
-    pub max_l2: f64,
-    pub argmax_mismatches: u32,
-    pub note: String,
 }
 
 /// Metadata for a single fixture file.
@@ -92,9 +83,7 @@ pub enum PromptCategory {
 #[serde(rename_all = "lowercase")]
 pub enum OracleName {
     Transformers,
-    Nanovllm,
-    #[serde(rename = "vllm_v1")]
-    VllmV1,
+    Vllm,
     Fake,
 }
 

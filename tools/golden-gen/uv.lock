@@ -709,7 +709,7 @@ requires-dist = [
     { name = "safetensors", specifier = ">=0.4.0" },
     { name = "torch", marker = "extra == 'gpu'", specifier = ">=2.10.0,<2.11.0" },
     { name = "transformers", marker = "extra == 'gpu'", specifier = ">=4.56.0,<6.0" },
-    { name = "vllm", marker = "extra == 'gpu'", specifier = ">=0.18.0,<0.19.0" },
+    { name = "vllm", marker = "extra == 'gpu'", specifier = ">=0.18.0,<0.27.0" },
     { name = "xgrammar", marker = "extra == 'gpu'", specifier = ">=0.1.32,<0.2.4" },
 ]
 provides-extras = ["gpu", "dev"]
