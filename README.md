@@ -1,23 +1,54 @@
 # vllm-oxide
 
-A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture: a single-GPU, Qwen3-focused, offline LLM inference engine for v0.1.
+**English** | [简体中文](README.zh-CN.md)
 
-[![CI](https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![CI][ci-badge]][ci-url]
+[![License: Apache-2.0][license-badge]][license-url]
+
+[ci-badge]: https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml/badge.svg
+[ci-url]: https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
+[license-url]: LICENSE
+
+A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture.
+
+- **Single-GPU, offline inference** — no server, no async. Continuous batching, prefix caching, paged KV cache, and recompute-only preemption in a synchronous engine.
+- **Architecture-agnostic model registry** — Qwen3-first today; adding a new architecture is one file plus one `mod` declaration, zero changes to existing code.
+- **Two-tier correctness** — CI property tests catch regressions fast; a GPU release gate with golden fixtures validates numerical output against a transformers oracle.
+
+[Architecture](#architecture-overview) | [Quick Start](#quick-start) | [Testing](#testing) | [Contributing](#contributing)
+
+## Table of Contents
+
+- [What is this?](#what-is-this)
+- [Architecture overview](#architecture-overview)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Library usage](#library-usage)
+- [Build features](#build-features)
+- [Testing](#testing)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Minimum Supported Rust Version (MSRV)](#minimum-supported-rust-version-msrv)
+- [Security](#security)
+- [License](#license)
 
 ---
 
 ## What is this?
 
-vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https://github.com/huggingface/candle) (CUDA kernels, safe tensor ops) and flash-attention (paged attention kernels), it provides a sync, in-process engine with continuous batching, prefix caching, paged KV cache, and recompute-only preemption.
+vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https://github.com/huggingface/candle) (CUDA kernels, safe tensor ops) and flash-attention (paged attention kernels), it provides a synchronous, in-process engine with:
+
+- Continuous batching and prefix caching
+- Paged KV cache (`block_size = 256`)
+- Recompute-only preemption
 
 v0.1 targets **single-GPU, offline inference** (no server, no async). The engine is Qwen3-first but the model registry is architecture-agnostic: adding a new architecture means adding one file plus one `mod` declaration, with zero changes to existing code.
 
 ### Project goals
 
-- A correct, performant Rust inference engine that can serve as a drop-in replacement for Python engines in production.
+- A drop-in replacement for Python inference engines in production — correct first, then fast.
 - Architecture decisions recorded as ADRs (`docs/adr/`), domain vocabulary documented in `CONTEXT.md`.
-- Two-tier correctness: CI property tests catch regressions fast; a GPU release gate with golden fixtures validates numerical correctness against a transformers oracle.
 
 ## Architecture overview
 
@@ -43,7 +74,7 @@ Key design decisions (see `CONTEXT.md` for the full vocabulary):
 
 - **Paged attention**: K/V cache stored in fixed-size blocks (`block_size = 256`). Prefill uses unpaged `flash_attn_varlen`; decode uses paged `flash_attn_varlen_paged_windowed`.
 - **Prefix caching**: Chained XXH64 hash table in `BlockPool` deduplicates common prompt prefixes across requests (CoW semantics).
-- **TP seam**: The `ParallelStyle` trait + `TpConfig` enum make future tensor-parallelism wiring additive (v0.2 contract). v0.1 uses `TpConfig::Single` exclusively.
+- **TP seam**: The `ParallelStyle` trait + `TpConfig` enum make future tensor-parallelism wiring additive. v0.1 uses `TpConfig::Single` exclusively.
 - **CausalLM trait**: Engine-facing model contract — `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits`. A model registry (inventory-based) maps HF architecture strings to factory functions producing `Box<dyn CausalLM>`.
 
 ## Requirements
@@ -101,8 +132,6 @@ echo "The meaning of life is" | \
 | `--top-k` | Top-k sampling: keep only the `k` highest-logit tokens. | `None` (disabled) |
 | `--top-p` | Top-p (nucleus) sampling: keep smallest token set with cumulative probability >= `p`. | `None` (disabled) |
 | `--max-tokens` | Maximum tokens to generate. | `16` |
-
-The model source is automatically classified: if the `--model` value is an existing directory on disk, it is treated as a local checkpoint (`Source::Local`). Otherwise it is treated as a HuggingFace Hub repo id (`Source::Hub { repo, revision: None }`).
 
 ### Running examples
 
@@ -189,11 +218,7 @@ default = []        # CPU-only — tests and dev iteration run without CUDA.
 cuda = ["dep:candle-flash-attn", "candle-core/cuda"]  # Production backend.
 ```
 
-From the `Cargo.toml` comment:
-
-> Default = CPU-only. Tests and dev iteration run without CUDA. Production callers (the CLI, the engine in T2) enable `cuda` to get the real backend.
->
-> Off by default so `cargo test` runs on CI without a GPU. Production callers pass `--features cuda`.
+Default is CPU-only so `cargo test` runs on CI without a GPU. Production callers (the CLI, the engine) pass `--features cuda`.
 
 ## Testing
 
@@ -206,15 +231,7 @@ vllm-oxide has two distinct test tiers with different guarantees:
 cargo test
 ```
 
-This tier covers:
-- `EngineOptions` construction and defaults
-- `Prompt` enum variants
-- `SamplingParams` configuration validation
-- Config parsing (`config.json` `torch_dtype` resolution, `max_position_embeddings` checks)
-- `Source` enum classification
-- CLI argument parsing
-
-CI green means these property tests pass. It does **not** mean numerical correctness.
+Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation, config parsing, `Source` classification, and CLI argument parsing.
 
 ### Tier 2: Release gate (manual, GPU)
 
@@ -235,93 +252,42 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 | **L2** | Per-step logits tensor comparison | Runs `LLM::generate_logits` and compares raw pre-sampling logits against golden logits using calibrated absolute tolerance (`atol`). Only compares steps where the token sequence matches (same-prefix comparison). |
 | **L3** | Per-layer activations (debug) | Skeleton in v0.1. |
 
-Golden fixtures are produced by the Python harness in `tools/golden-gen/`, which runs two oracle engines:
-- **Reference oracle**: transformers (BF16, `output_logits=True`, `attn_implementation=flash_attention_2`).
-- **Baseline oracle**: vLLM (BF16, used to calibrate acceptable BF16 numerical drift tolerance).
+Golden fixtures are produced by `tools/golden-gen/` (Python), which runs two oracle engines:
 
-Tolerance is calibrated as: `atol = max(|transformers - vllm|, across all canonical prompts) x 2.0`.
+- **Reference oracle**: transformers (BF16, `output_logits=True`, `attn_implementation=flash_attention_2`)
+- **Baseline oracle**: vLLM (BF16, calibrates acceptable numerical drift)
 
-Fixtures are stored as **GitHub Release assets** (tag: `goldens-v0.1`), not in the git mainline. See [`docs/adr/0005-golden-generation-correctness-strategy.md`](docs/adr/0005-golden-generation-correctness-strategy.md) for the full strategy.
+Tolerance: `atol = max(|transformers - vllm|, across all canonical prompts) x 2.0`.
 
-## CI green vs validated
+Fixtures are stored as GitHub Release assets (tag: `goldens-v0.1`), not in git. See [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md) for the full strategy.
 
-> **CI green does NOT mean numerically validated.**
-
-This is an explicit design distinction:
+### CI green vs numerically validated
 
 | | CI gate | Release gate |
 |---|---|---|
-| **When** | Every push, any branch | Manual, before tagging a release |
-| **Where** | CPU-only (`cargo test`) | GPU (sm_89+, required) |
-| **What** | Property / unit tests | Golden comparison against transformers oracle |
-| **Result** | "CI green" | "Numerically validated" |
-
-Passing `cargo test` on CI tells you the code compiles, the types are correct, and the property assertions hold. It tells you **nothing** about whether the engine produces the right tokens or logits. Numerical correctness is only established by the manual GPU release gate — passing the golden comparison means the Rust engine's output is within calibrated tolerance of the transformers reference oracle.
-
-## Repository layout
-
-```
-vllm-oxide/
-├── Cargo.toml                   # Workspace root (resolver 2, 3 member crates)
-├── CONTEXT.md                   # Domain vocabulary and ubiquitous language
-│
-├── crates/
-│   ├── vllm-oxide/              # Engine library — the core inference stack
-│   │   ├── Cargo.toml
-│   │   ├── src/
-│   │   │   ├── lib.rs           # Public API surface (curated re-exports)
-│   │   │   ├── llm.rs           # LLM::new, LLM::generate — composition root
-│   │   │   ├── config.rs        # Source enum, dtype resolution
-│   │   │   ├── sampler.rs       # SamplingParams, Sampler (greedy, top-k, top-p, penalties)
-│   │   │   ├── utils.rs         # Shared utility functions
-│   │   │   ├── engine/          # mod.rs, scheduler.rs, block_pool.rs, kv_cache_manager.rs, sequence.rs
-│   │   │   ├── attention/       # mod.rs, kernels.rs, metadata.rs, flash_attn.rs
-│   │   │   ├── layers/          # mod.rs, linear.rs, rmsnorm.rs, rope.rs, activation.rs, parallel.rs
-│   │   │   ├── models/          # mod.rs, registry.rs, qwen3.rs
-│   │   │   └── loader.rs        # Weight loader (HF sharded safetensors)
-│   │   └── examples/
-│   │       ├── forward_qwen3.rs # Forward-pass demo
-│   │       └── load_qwen3.rs    # Weight-loading demo
-│   │
-│   ├── vllm-oxide-cli/           # Thin CLI binary (clap-based)
-│   │   └── src/main.rs           # ~80 lines — parses argv, calls LLM::generate
-│   │
-│   └── vllm-oxide-test/          # Golden comparison release harness
-│       ├── Cargo.toml
-│       └── src/
-│           ├── main.rs           # CLI entry point
-│           ├── lib.rs            # Public API
-│           ├── types.rs          # Manifest schema types
-│           ├── manifest.rs       # Fixture manifest parsing
-│           ├── download.rs       # GitHub Release asset download
-│           ├── prompts.rs        # Canonical + regression prompts
-│           ├── l1.rs             # L1 token-sequence exact match
-│           ├── l2.rs             # L2 logits tensor comparison
-│           ├── l3.rs             # L3 per-layer activations (debug-only)
-│           └── report.rs         # Comparison report generation
-│
-├── tools/
-│   ├── golden-gen/               # Python fixture generator
-│   │   ├── pyproject.toml
-│   │   ├── src/                  # Oracle runners + manifest builder
-│   │   ├── prompts/              # Canonical and regression prompts
-│   │   └── tests/
-│   └── validate-release.sh       # Release validation script
-│
-├── docs/
-│   └── adr/
-│       └── 0005-golden-generation-correctness-strategy.md
-│
-└── research/
-    └── prototype-candle-stack/   # Early candle prototyping
-```
+| **When** | Every push | Manual, before tagging |
+| **Where** | CPU-only | GPU (sm_89+) |
+| **What** | Property tests | Golden comparison vs transformers oracle |
+| **Proves** | Compiles + types correct | Numerically correct within tolerance |
 
 ## Documentation
 
 - **[CONTEXT.md](CONTEXT.md)** — Domain vocabulary and ubiquitous language. Every term used in the codebase (`CausalLM`, `BlockPool`, `PagedKVCache`, `EngineCore`, `Prompt`, `SamplingParams`, etc.) is defined here with "Avoid" notes for synonyms that should not be used.
-- **[docs/adr/](docs/adr/)** — Architecture Decision Records. Currently documents the golden generation correctness strategy (how tolerance is calibrated, why the oracle triangle was rejected, the L1/L2/L3 comparison layers).
+- **[docs/adr/](docs/adr/)** — Architecture Decision Records (5 ADRs): parametric parallel layers, weight loader seam, model registry + RoPE, engine dependency DAG, and golden generation correctness strategy.
 - **Crate source** — Each module carries a doc comment that explains its role and the ADR-0004 dependency DAG. The `lib.rs` doc comment is the best starting point.
+
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for branch conventions, commit format, and the CI pipeline before opening a pull request.
+
+## Minimum Supported Rust Version (MSRV)
+
+The current MSRV is **1.75** (declared in `[workspace.package]`). We follow a rolling policy: the MSRV may increase in a minor release, but only to a Rust version that has been stable for at least 6 months.
+
+## Security
+
+To report a security vulnerability, please use [GitHub Security Advisories](https://github.com/RedHeartSecretMan/vllm-oxide/security/advisories/new). Do **not** open a public issue for security reports.
 
 ## License
 
-Apache-2.0. See `LICENSE` for details.
+Apache-2.0. See [LICENSE](LICENSE) for details.
