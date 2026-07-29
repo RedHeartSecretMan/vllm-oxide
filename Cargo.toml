@@ -33,6 +33,11 @@ expect_used = "warn"
 panic = "warn"
 dbg_macro = "warn"
 todo = "warn"
+# Promoted from clippy::pedantic (2026-07): focused, low-churn quality bar.
+unreadable_literal = "warn"
+manual_let_else = "warn"
+unnecessary_wraps = "warn"
+cloned_instead_of_copied = "warn"
 
 [profile.release]
 opt-level = 3
