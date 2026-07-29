@@ -9,7 +9,7 @@
 //! and the row-parallel down projection (nano-vllm `qwen3.py:147-153`):
 //! `down_proj(SiluAndMul(gate_up_proj(x)))`.
 
-use candle_core::{D::Minus1, Result, Tensor};
+use candle_core::{Result, Tensor, D::Minus1};
 
 /// `silu(x[..., :d/2]) * x[..., d/2:]`. Zero-state; held as a field on the
 /// owning MLP for parity with nano-vllm's `nn.Module` shape.
@@ -29,7 +29,11 @@ impl SiluAndMul {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use candle_core::DType;

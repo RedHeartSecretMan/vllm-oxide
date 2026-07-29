@@ -59,14 +59,26 @@ impl<P: ParallelStyle + StyleBuilder> Linear<P> {
     /// v0.1 ignores it (the `VarBuilder` already carries the device).
     pub fn from_vb(vb: VarBuilder, spec: &LinearSpec, _dev: &Device) -> Result<Self> {
         let weight = P::build_weight(&vb, spec)?;
-        let bias = if spec.bias { P::build_bias(&vb, spec)? } else { None };
-        Ok(Self { weight, bias, _marker: PhantomData })
+        let bias = if spec.bias {
+            P::build_bias(&vb, spec)?
+        } else {
+            None
+        };
+        Ok(Self {
+            weight,
+            bias,
+            _marker: PhantomData,
+        })
     }
 }
 
 impl<P: ParallelStyle> Linear<P> {
     pub fn from_parts(weight: Tensor, bias: Option<Tensor>) -> Self {
-        Self { weight, bias, _marker: PhantomData }
+        Self {
+            weight,
+            bias,
+            _marker: PhantomData,
+        }
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -151,12 +163,20 @@ impl StyleBuilder for Row {
 
 impl Linear<Row> {
     pub fn from_weight(weight: Tensor) -> Self {
-        Self { weight, bias: None, _marker: PhantomData }
+        Self {
+            weight,
+            bias: None,
+            _marker: PhantomData,
+        }
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use candle_core::DType;
@@ -174,7 +194,11 @@ mod tests {
 
         #[test]
         fn spec_is_copy_eq() {
-            let a = LinearSpec { in_features: 4, out_features_per_shard: 8, bias: false };
+            let a = LinearSpec {
+                in_features: 4,
+                out_features_per_shard: 8,
+                bias: false,
+            };
             let b = a;
             assert_eq!(a, b);
         }
@@ -195,7 +219,11 @@ mod tests {
                 ("k_proj.weight".to_string(), k),
                 ("v_proj.weight".to_string(), v),
             ]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 4, bias: false };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 4,
+                bias: false,
+            };
             let lin = Linear::<QkvMerged>::from_vb(vb, &spec, &Device::Cpu).unwrap();
 
             let w = lin.weight();
@@ -226,7 +254,11 @@ mod tests {
                 ("k_proj.bias".to_string(), k_b),
                 ("v_proj.bias".to_string(), v_b),
             ]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 4, bias: true };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 4,
+                bias: true,
+            };
             let lin = Linear::<QkvMerged>::from_vb(vb, &spec, &Device::Cpu).unwrap();
             let b = lin.bias().unwrap();
             assert_eq!(b.shape().dims(), [8]);
@@ -245,7 +277,11 @@ mod tests {
                 ("k_proj.weight".to_string(), k),
                 ("v_proj.weight".to_string(), v),
             ]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 4, bias: false };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 4,
+                bias: false,
+            };
             let lin = Linear::<QkvMerged>::from_vb(vb, &spec, &Device::Cpu).unwrap();
             assert!(lin.bias().is_none());
         }
@@ -253,7 +289,11 @@ mod tests {
         #[test]
         fn missing_qkv_tensor_is_runtime_error() {
             let vb = vb_from(vec![]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 4, bias: false };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 4,
+                bias: false,
+            };
             let err = Linear::<QkvMerged>::from_vb(vb, &spec, &Device::Cpu);
             assert!(err.is_err());
         }
@@ -270,7 +310,11 @@ mod tests {
                 ("gate_proj.weight".to_string(), gate),
                 ("up_proj.weight".to_string(), up),
             ]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 4, bias: false };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 4,
+                bias: false,
+            };
             let lin = Linear::<GateUpMerged>::from_vb(vb, &spec, &Device::Cpu).unwrap();
             let w = lin.weight();
             assert_eq!(w.shape().dims(), [8, 3]);
@@ -289,7 +333,11 @@ mod tests {
         fn weight_is_single_tensor_no_concat() {
             let w = Tensor::full(9.0f32, (5, 3), &Device::Cpu).unwrap();
             let vb = vb_from(vec![("weight".to_string(), w)]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 5, bias: false };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 5,
+                bias: false,
+            };
             let lin = Linear::<Row>::from_vb(vb, &spec, &Device::Cpu).unwrap();
             assert_eq!(lin.weight().shape().dims(), [5, 3]);
             let row_val = |r: usize| lin.weight().get(r).unwrap().to_vec1::<f32>().unwrap()[0];
@@ -302,7 +350,11 @@ mod tests {
             // a Row — the resolved checkpoint name is "o_proj.weight".
             let w = Tensor::full(11.0f32, (5, 3), &Device::Cpu).unwrap();
             let vb = vb_from(vec![("o_proj.weight".to_string(), w)]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 5, bias: false };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 5,
+                bias: false,
+            };
             let lin = Linear::<Row>::from_vb(vb.pp("o_proj"), &spec, &Device::Cpu).unwrap();
             let row_val = |r: usize| lin.weight().get(r).unwrap().to_vec1::<f32>().unwrap()[0];
             assert_eq!(row_val(0), 11.0);
@@ -324,7 +376,11 @@ mod tests {
             }
             let weight = Tensor::from_vec(w, (3, 3), &Device::Cpu).unwrap();
             let vb = vb_from(vec![("weight".to_string(), weight)]);
-            let spec = LinearSpec { in_features: 3, out_features_per_shard: 3, bias: false };
+            let spec = LinearSpec {
+                in_features: 3,
+                out_features_per_shard: 3,
+                bias: false,
+            };
             let lin = Linear::<Row>::from_vb(vb, &spec, &Device::Cpu).unwrap();
             let x = Tensor::from_iter([2.0f32, 3.0, 4.0], &Device::Cpu)
                 .unwrap()
@@ -332,9 +388,33 @@ mod tests {
                 .unwrap();
             let out = lin.forward(&x).unwrap();
             assert_eq!(out.shape().dims(), [1, 3]);
-            assert_eq!(out.get(0).unwrap().get(0).unwrap().to_vec0::<f32>().unwrap(), 2.0);
-            assert_eq!(out.get(0).unwrap().get(1).unwrap().to_vec0::<f32>().unwrap(), 3.0);
-            assert_eq!(out.get(0).unwrap().get(2).unwrap().to_vec0::<f32>().unwrap(), 4.0);
+            assert_eq!(
+                out.get(0)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .to_vec0::<f32>()
+                    .unwrap(),
+                2.0
+            );
+            assert_eq!(
+                out.get(0)
+                    .unwrap()
+                    .get(1)
+                    .unwrap()
+                    .to_vec0::<f32>()
+                    .unwrap(),
+                3.0
+            );
+            assert_eq!(
+                out.get(0)
+                    .unwrap()
+                    .get(2)
+                    .unwrap()
+                    .to_vec0::<f32>()
+                    .unwrap(),
+                4.0
+            );
         }
 
         #[test]
@@ -345,12 +425,32 @@ mod tests {
                 ("weight".to_string(), weight),
                 ("bias".to_string(), bias),
             ]);
-            let spec = LinearSpec { in_features: 2, out_features_per_shard: 2, bias: true };
+            let spec = LinearSpec {
+                in_features: 2,
+                out_features_per_shard: 2,
+                bias: true,
+            };
             let lin = Linear::<Row>::from_vb(vb, &spec, &Device::Cpu).unwrap();
             let x = Tensor::zeros((1, 2), DType::F32, &Device::Cpu).unwrap();
             let out = lin.forward(&x).unwrap();
-            assert_eq!(out.get(0).unwrap().get(0).unwrap().to_vec0::<f32>().unwrap(), 5.0);
-            assert_eq!(out.get(0).unwrap().get(1).unwrap().to_vec0::<f32>().unwrap(), 7.0);
+            assert_eq!(
+                out.get(0)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .to_vec0::<f32>()
+                    .unwrap(),
+                5.0
+            );
+            assert_eq!(
+                out.get(0)
+                    .unwrap()
+                    .get(1)
+                    .unwrap()
+                    .to_vec0::<f32>()
+                    .unwrap(),
+                7.0
+            );
         }
     }
 
@@ -363,7 +463,11 @@ mod tests {
             // crate::models. This is enforced by the ADR-0002 seam — verified
             // here at the type level by confirming `LinearSpec` carries no
             // architecture-specific types (just two `usize` + a `bool`).
-            let spec = LinearSpec { in_features: 1, out_features_per_shard: 1, bias: false };
+            let spec = LinearSpec {
+                in_features: 1,
+                out_features_per_shard: 1,
+                bias: false,
+            };
             // If the seam closes properly, this assertion is trivially true —
             // the goal is to make any future seam break visible at compile time
             // by e.g. adding a non-`usize` field here.

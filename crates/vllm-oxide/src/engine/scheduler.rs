@@ -181,8 +181,7 @@ impl Scheduler {
             let hit_eos = token_id == EOS_TOKEN_ID && !seq.ignore_eos;
 
             if hit_max_tokens || hit_eos {
-                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled)
-                    .min(seq.num_tokens);
+                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled).min(seq.num_tokens);
                 seq.num_scheduled_tokens = 0;
                 seq.status = SequenceStatus::Finished;
                 finished_indices.push(i);
@@ -194,8 +193,7 @@ impl Scheduler {
                 });
             } else {
                 kv_mgr.hash_blocks(seq);
-                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled)
-                    .min(seq.num_tokens);
+                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled).min(seq.num_tokens);
                 seq.num_scheduled_tokens = 0;
             }
         }
@@ -250,6 +248,8 @@ impl Scheduler {
         }
 
         while needs_preemption && !self.running.is_empty() {
+            // running is non-empty (loop guard); pop_back cannot return None
+            #[allow(clippy::unwrap_used)]
             let mut victim = self.running.pop_back().unwrap();
             let _ = kv_mgr.deallocate(victim.seq_mut());
             let vseq = victim.seq_mut();
@@ -283,6 +283,8 @@ impl Scheduler {
         let mut i = 0;
         while i < self.running.len() {
             if self.running[i].seq().num_scheduled_tokens == 0 {
+                // i is a valid index verified by the preceding access self.running[i]
+                #[allow(clippy::unwrap_used)]
                 let mut victim = self.running.remove(i).unwrap();
                 let _ = kv_mgr.deallocate(victim.seq_mut());
                 let vseq = victim.seq_mut();
@@ -387,6 +389,8 @@ impl Scheduler {
         }
 
         for &(idx, n_tokens) in to_schedule.iter().rev() {
+            // idx comes from valid indices into waiting (verified earlier in this fn)
+            #[allow(clippy::unwrap_used)]
             let mut group = self.waiting.remove(idx).unwrap();
             let seq = group.seq_mut();
 
@@ -394,8 +398,7 @@ impl Scheduler {
                 Some(num_cached) => {
                     let _ = kv_mgr.allocate(seq, num_cached);
                     seq.num_scheduled_tokens = n_tokens;
-                    let fully_prefilled =
-                        seq.num_cached_tokens + n_tokens >= seq.num_prompt_tokens;
+                    let fully_prefilled = seq.num_cached_tokens + n_tokens >= seq.num_prompt_tokens;
                     seq.is_prefill = !fully_prefilled;
                     seq.status = SequenceStatus::Running;
                     self.running.push_back(group);
@@ -431,7 +434,7 @@ pub struct RequestOutput {
 /// The actual EOS id depends on the model's tokenizer, but the scheduler
 /// uses this constant for the stop-condition check. The engine loop
 /// verifies against the model-specific value — see `EngineCore::step()`.
-pub const EOS_TOKEN_ID: u32 = 151645; // Qwen3 default EOS = <|im_end|>
+pub const EOS_TOKEN_ID: u32 = 151_645; // Qwen3 default EOS = <|im_end|>
 
 #[cfg(test)]
 #[allow(
@@ -512,17 +515,17 @@ mod tests {
         fn prefills_single_waiting_sequence() {
             let mut s = make_scheduler();
             let mut kv = make_kv_mgr(100);
-            s.add_request(
-                (0..BLOCK_SIZE as u32 + 10).collect(),
-                make_params(16),
-            );
+            s.add_request((0..BLOCK_SIZE as u32 + 10).collect(), make_params(16));
             let output = s.schedule(&mut kv);
             assert_eq!(output.mode, ScheduleMode::Prefill);
             assert_eq!(s.num_running(), 1);
             assert_eq!(s.num_waiting(), 0);
 
             let seq = s.running[0].seq();
-            assert!(!seq.is_prefill, "fully prefilled seq should have is_prefill=false");
+            assert!(
+                !seq.is_prefill,
+                "fully prefilled seq should have is_prefill=false"
+            );
             assert_eq!(seq.status, SequenceStatus::Running);
             assert_eq!(seq.num_scheduled_tokens, BLOCK_SIZE + 10);
         }

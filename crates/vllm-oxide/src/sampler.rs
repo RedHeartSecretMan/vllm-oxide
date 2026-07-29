@@ -265,12 +265,11 @@ impl Sampler {
     fn gumbel_argmax_buf(&mut self, logits: &[f32]) -> usize {
         // Gumbel(0,1) location 0, scale 1. The argmax of (logit + g) over
         // g ~ iid Gumbel(0,1) is a categorical draw with P(i) = softmax(logit)_i.
-        let gumbel = match Gumbel::new(0.0, 1.0) {
-            Ok(d) => d,
+        let Ok(gumbel) = Gumbel::new(0.0, 1.0) else {
             // Gumbel::new only errors on non-positive scale; scale=1 is
             // statically valid. Fallback to plain argmax if construction
             // somehow fails.
-            Err(_) => return argmax_buf(logits),
+            return argmax_buf(logits);
         };
         let mut best = (f32::NEG_INFINITY, 0_usize);
         for (i, &logit) in logits.iter().enumerate() {
@@ -469,9 +468,7 @@ mod tests {
         use super::*;
 
         fn logits(batch: usize, vocab: usize, device: &Device) -> Tensor {
-            let data: Vec<f32> = (0..batch * vocab)
-                .map(|i| (i as f32) * 0.1 - 5.0)
-                .collect();
+            let data: Vec<f32> = (0..batch * vocab).map(|i| (i as f32) * 0.1 - 5.0).collect();
             Tensor::from_vec(data, (batch, vocab), device).unwrap()
         }
 
@@ -535,7 +532,11 @@ mod tests {
 
             let mut s_a = Sampler::new_with_seed(1);
             let p_a = vec![SamplingParams::default(); 2];
-            let a = s_a.forward(&l, &p_a, &history).unwrap().to_vec1::<u32>().unwrap();
+            let a = s_a
+                .forward(&l, &p_a, &history)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap();
 
             let mut s_b = Sampler::new_with_seed(1);
             let p_b = vec![
@@ -546,7 +547,11 @@ mod tests {
                 };
                 2
             ];
-            let b = s_b.forward(&l, &p_b, &history).unwrap().to_vec1::<u32>().unwrap();
+            let b = s_b
+                .forward(&l, &p_b, &history)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap();
 
             assert_eq!(a, b, "temp=0 and top_k=1 must produce identical tokens");
         }
@@ -563,7 +568,13 @@ mod tests {
             let vocab = 32;
             // Top-3 set is {4,3,2} (logits 14,13,12 — the three largest).
             let data: Vec<f32> = (0..vocab)
-                .map(|i| if i < 5 { (i as f32) + 10.0 } else { -(i as f32) })
+                .map(|i| {
+                    if i < 5 {
+                        (i as f32) + 10.0
+                    } else {
+                        -(i as f32)
+                    }
+                })
                 .collect();
             let row_data: Vec<f32> = data.clone();
             let logits = Tensor::from_vec(data, (1, vocab), &device).unwrap();
@@ -586,11 +597,7 @@ mod tests {
             let mut sampler = Sampler::new_with_seed(42);
             for _ in 0..200 {
                 let out = sampler
-                    .forward(
-                        &logits,
-                        std::slice::from_ref(&params),
-                        &[Vec::new()],
-                    )
+                    .forward(&logits, std::slice::from_ref(&params), &[Vec::new()])
                     .unwrap();
                 let tok = out.to_vec1::<u32>().unwrap()[0];
                 assert!(
@@ -610,7 +617,7 @@ mod tests {
             let device = Device::Cpu;
             let vocab = 16;
             let row: Vec<f32> = (0..vocab).map(|i| (i as f32) * 0.5).collect();
-            let both: Vec<f32> = row.iter().cloned().chain(row.iter().cloned()).collect();
+            let both: Vec<f32> = row.iter().copied().chain(row.iter().copied()).collect();
             let logits = Tensor::from_vec(both, (2, vocab), &device).unwrap();
 
             let history = vec![Vec::new(); 2];
@@ -624,7 +631,11 @@ mod tests {
                     ..SamplingParams::default()
                 },
             ];
-            let r1 = s1.forward(&logits, &p1, &history).unwrap().to_vec1::<u32>().unwrap();
+            let r1 = s1
+                .forward(&logits, &p1, &history)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap();
 
             let mut s2 = Sampler::new_with_seed(7);
             let p2 = vec![
@@ -636,9 +647,16 @@ mod tests {
                     ..SamplingParams::default()
                 },
             ];
-            let r2 = s2.forward(&logits, &p2, &history).unwrap().to_vec1::<u32>().unwrap();
+            let r2 = s2
+                .forward(&logits, &p2, &history)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap();
 
-            assert_eq!(r1[0], r2[0], "row 0 (greedy) must not depend on row 1's params");
+            assert_eq!(
+                r1[0], r2[0],
+                "row 0 (greedy) must not depend on row 1's params"
+            );
         }
 
         #[test]

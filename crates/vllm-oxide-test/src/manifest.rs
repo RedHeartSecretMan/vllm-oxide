@@ -15,8 +15,8 @@ pub fn parse_manifest(path: &Path) -> Result<Manifest> {
 
 /// Load a single `.safetensors` fixture file into a `FixtureData`.
 pub fn load_fixture(path: &Path, meta: &FixtureMetadata) -> Result<FixtureData> {
-    let file_bytes = std::fs::read(path)
-        .with_context(|| format!("reading fixture from {}", path.display()))?;
+    let file_bytes =
+        std::fs::read(path).with_context(|| format!("reading fixture from {}", path.display()))?;
 
     let tensors = SafeTensors::deserialize(&file_bytes)
         .with_context(|| format!("deserializing safetensors from {}", path.display()))?;
@@ -68,11 +68,7 @@ fn read_named_tensor_as_i64(tensors: &SafeTensors, name: &str) -> Result<Vec<i64
             let data: &[i64] = bytemuck::cast_slice(view.data());
             Ok(data[..len].to_vec())
         }
-        other => anyhow::bail!(
-            "tensor '{}' has dtype {:?}, expected I64",
-            name,
-            other
-        ),
+        other => anyhow::bail!("tensor '{}' has dtype {:?}, expected I64", name, other),
     }
 }
 
@@ -93,10 +89,6 @@ fn read_named_tensor_as_f32(tensors: &SafeTensors, name: &str) -> Result<Vec<f32
             let data: &[f32] = bytemuck::cast_slice(view.data());
             Ok(data[..len].to_vec())
         }
-        other => anyhow::bail!(
-            "tensor '{}' has dtype {:?}, expected F32",
-            name,
-            other
-        ),
+        other => anyhow::bail!("tensor '{}' has dtype {:?}, expected F32", name, other),
     }
 }

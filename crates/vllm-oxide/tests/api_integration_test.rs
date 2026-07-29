@@ -1,12 +1,13 @@
 use vllm_oxide::{
-    EngineOptions, Prompt, SamplingParams,
-    Sequence, SequenceGroup,
-    Source, default_dtype_from_config_json, is_offline_value,
-    kv_cache_layout_shape, round_up,
+    default_dtype_from_config_json, is_offline_value, kv_cache_layout_shape, round_up,
+    EngineOptions, Prompt, SamplingParams, Sequence, SequenceGroup, Source,
 };
 
 fn greedy_params() -> SamplingParams {
-    SamplingParams { max_tokens: 64, ..SamplingParams::default() }
+    SamplingParams {
+        max_tokens: 64,
+        ..SamplingParams::default()
+    }
 }
 
 #[test]
@@ -23,8 +24,16 @@ fn default_sampling_params_are_deterministic() {
 
 #[test]
 fn temperature_zero_and_top_k_one_both_greedy() {
-    let sp_zero = SamplingParams { temperature: 0.0, top_k: None, ..SamplingParams::default() };
-    let sp_topk1 = SamplingParams { temperature: 1.0, top_k: Some(1), ..SamplingParams::default() };
+    let sp_zero = SamplingParams {
+        temperature: 0.0,
+        top_k: None,
+        ..SamplingParams::default()
+    };
+    let sp_topk1 = SamplingParams {
+        temperature: 1.0,
+        top_k: Some(1),
+        ..SamplingParams::default()
+    };
     assert!(sp_zero.temperature == 0.0);
     assert_eq!(sp_topk1.top_k, Some(1));
 }
@@ -122,6 +131,9 @@ fn hf_hub_offline_unset() {
 }
 
 #[test]
+// The panic is the deliberate wildcard arm of an exhaustive Source match —
+// unreachable unless the variant is mis-constructed.
+#[allow(clippy::panic)]
 fn source_local_carries_path() {
     match Source::Local("/tmp/model".into()) {
         Source::Local(p) => assert_eq!(p, std::path::PathBuf::from("/tmp/model")),
@@ -130,20 +142,33 @@ fn source_local_carries_path() {
 }
 
 #[test]
+// The panic is the deliberate wildcard arm of an exhaustive Source match —
+// unreachable unless the variant is mis-constructed.
+#[allow(clippy::panic)]
 fn source_hub_carries_repo() {
-    match (Source::Hub { repo: "Qwen/Qwen3-0.6B".into(), revision: None }) {
+    match (Source::Hub {
+        repo: "Qwen/Qwen3-0.6B".into(),
+        revision: None,
+    }) {
         Source::Hub { repo, .. } => assert_eq!(repo, "Qwen/Qwen3-0.6B"),
         _ => panic!("expected Hub"),
     }
 }
 
 #[test]
+// The input JSON is a static, well-formed fixture; unwrap asserts the parser
+// accepts "bfloat16".
+#[allow(clippy::unwrap_used)]
 fn default_dtype_parses_bfloat16() {
-    let dtype = default_dtype_from_config_json(r#"{"torch_dtype": "bfloat16"}"#.as_bytes()).unwrap();
+    let dtype =
+        default_dtype_from_config_json(r#"{"torch_dtype": "bfloat16"}"#.as_bytes()).unwrap();
     assert_eq!(format!("{dtype:?}").to_lowercase(), "bf16");
 }
 
 #[test]
+// The input JSON is a static, well-formed fixture; unwrap asserts the parser
+// accepts "float16".
+#[allow(clippy::unwrap_used)]
 fn default_dtype_parses_float16() {
     let dtype = default_dtype_from_config_json(r#"{"torch_dtype": "float16"}"#.as_bytes()).unwrap();
     assert_eq!(format!("{dtype:?}").to_lowercase(), "f16");

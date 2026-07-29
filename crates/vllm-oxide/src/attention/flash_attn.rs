@@ -24,10 +24,15 @@ pub fn prefill_attn(
     let cu_seqlens_k = cu_seqlens_tensor(&meta.cu_seqlens_k, dev)?;
 
     flash_attn_varlen(
-        q, k, v,
-        &cu_seqlens_q, &cu_seqlens_k,
-        meta.max_seqlen_q, meta.max_seqlen_k,
-        softmax_scale, true,
+        q,
+        k,
+        v,
+        &cu_seqlens_q,
+        &cu_seqlens_k,
+        meta.max_seqlen_q,
+        meta.max_seqlen_k,
+        softmax_scale,
+        true,
     )
 }
 
@@ -45,11 +50,15 @@ pub fn decode_attn(
     let block_table = block_table_tensor(&meta.block_table, dev)?;
 
     flash_attn_varlen_paged_windowed(
-        q, k_cache, v_cache,
-        &cu_seqlens_q, &cu_seqlens_k,
+        q,
+        k_cache,
+        v_cache,
+        &cu_seqlens_q,
+        &cu_seqlens_k,
         &block_table,
         None,
-        meta.max_seqlen_q, meta.max_seqlen_k,
+        meta.max_seqlen_q,
+        meta.max_seqlen_k,
         softmax_scale,
         None,
         Some(0),

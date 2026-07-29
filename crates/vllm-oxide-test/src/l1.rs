@@ -28,10 +28,24 @@ pub struct L1Result {
 
 #[derive(Debug)]
 pub enum L1PositionDetail {
-    Match { position: usize, token_id: i64 },
-    NearTieSkip { position: usize, token_id: i64, gap: f64 },
-    Mismatch { position: usize, expected: i64, actual: i64 },
-    RegressionSkip { position: usize, token_id: i64 },
+    Match {
+        position: usize,
+        token_id: i64,
+    },
+    NearTieSkip {
+        position: usize,
+        token_id: i64,
+        gap: f64,
+    },
+    Mismatch {
+        position: usize,
+        expected: i64,
+        actual: i64,
+    },
+    RegressionSkip {
+        position: usize,
+        token_id: i64,
+    },
 }
 
 /// Compare generated token IDs against golden token IDs with near-tie
@@ -57,10 +71,11 @@ pub fn compare_l1(
         if expected == actual {
             return Ok(None);
         }
-        let logits = match generated_logits {
-            Some(l) => l,
-            None => return Ok(Some(MismatchKind::Deterministic)),
+        let Some(logits) = generated_logits else {
+            return Ok(Some(MismatchKind::Deterministic));
         };
+        // expected is a non-negative token id bounded by vocab_size ≪ usize::MAX
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let gap = top2_logit_gap(logits, i, expected as usize)?;
         if gap < eps {
             Ok(Some(MismatchKind::NearTie(gap)))
@@ -71,10 +86,7 @@ pub fn compare_l1(
 }
 
 /// Run L1 comparison without logits (no near-tie detection).
-pub fn compare_l1_tokens_only(
-    fixture: &FixtureData,
-    generated_tokens: &[u32],
-) -> Result<L1Result> {
+pub fn compare_l1_tokens_only(fixture: &FixtureData, generated_tokens: &[u32]) -> Result<L1Result> {
     compare_tokens_loop(fixture, generated_tokens, 0.0, |_, expected, actual| {
         if expected == actual {
             Ok(None)
@@ -144,35 +156,52 @@ where
     let mut mismatches = 0usize;
     let mut first_mismatch: Option<usize> = None;
 
-    for i in 0..n {
-        let expected = fixture.token_ids[i];
-        let actual = generated_tokens[i] as i64;
+    for (i, (&expected, &actual)) in fixture.token_ids[..n]
+        .iter()
+        .zip(generated_tokens[..n].iter())
+        .enumerate()
+    {
+        let actual = actual as i64;
 
         match classify(i, expected, actual)? {
             None => {
                 exact_matches += 1;
-                details.push(L1PositionDetail::Match { position: i, token_id: expected });
+                details.push(L1PositionDetail::Match {
+                    position: i,
+                    token_id: expected,
+                });
             }
             Some(MismatchKind::NearTie(gap)) => {
                 near_tie_skips += 1;
-                details.push(L1PositionDetail::NearTieSkip { position: i, token_id: expected, gap });
+                details.push(L1PositionDetail::NearTieSkip {
+                    position: i,
+                    token_id: expected,
+                    gap,
+                });
             }
             Some(MismatchKind::Deterministic) => {
                 mismatches += 1;
                 if first_mismatch.is_none() {
                     first_mismatch = Some(i);
                 }
-                details.push(L1PositionDetail::Mismatch { position: i, expected, actual });
+                details.push(L1PositionDetail::Mismatch {
+                    position: i,
+                    expected,
+                    actual,
+                });
             }
             Some(MismatchKind::RegressionSkip) => {
                 regression_skips += 1;
-                details.push(L1PositionDetail::RegressionSkip { position: i, token_id: expected });
+                details.push(L1PositionDetail::RegressionSkip {
+                    position: i,
+                    token_id: expected,
+                });
             }
         }
     }
 
-    mismatches += (generated_tokens.len().saturating_sub(n))
-        + (fixture.token_ids.len().saturating_sub(n));
+    mismatches +=
+        (generated_tokens.len().saturating_sub(n)) + (fixture.token_ids.len().saturating_sub(n));
 
     Ok(L1Result {
         prompt_id: fixture.prompt_id.clone(),

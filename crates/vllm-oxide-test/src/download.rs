@@ -26,9 +26,7 @@ pub fn download_release(
     let agent = ureq::Agent::new_with_defaults();
 
     // 1. Fetch the release metadata to get asset URLs.
-    let release_url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
-    );
+    let release_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}");
     tracing::info!("fetching release metadata from {release_url}");
 
     let mut release_resp = agent
@@ -52,8 +50,8 @@ pub fn download_release(
     tracing::info!("downloading manifest.json");
 
     let manifest_bytes = download_bytes(&agent, &manifest_url)?;
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
-        .context("parsing manifest.json")?;
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).context("parsing manifest.json")?;
 
     // 3. Create cache dir and write manifest.
     std::fs::create_dir_all(cache_dir)
@@ -81,7 +79,11 @@ pub fn download_release(
             );
         }
 
-        tracing::info!("downloading {} ({} bytes)", fixture.filename, fixture.num_tokens);
+        tracing::info!(
+            "downloading {} ({} bytes)",
+            fixture.filename,
+            fixture.num_tokens
+        );
         let bytes = download_bytes(&agent, &fixture_url)?;
 
         // Verify SHA-256.
@@ -115,10 +117,7 @@ pub fn load_from_dir(dir: &Path) -> Result<(Manifest, PathBuf)> {
 }
 
 /// Verify all fixture files in a directory match their expected SHA-256.
-fn verify_fixture_hashes(
-    dir: &Path,
-    fixtures: &[crate::types::FixtureMetadata],
-) -> Result<()> {
+fn verify_fixture_hashes(dir: &Path, fixtures: &[crate::types::FixtureMetadata]) -> Result<()> {
     for fixture in fixtures {
         let path = dir.join(&fixture.filename);
         if !path.exists() {
@@ -126,7 +125,7 @@ fn verify_fixture_hashes(
         }
         let bytes = std::fs::read(&path)?;
         let actual = manifest::sha256_hex(&bytes);
-        if &actual != &fixture.sha256 {
+        if actual != fixture.sha256 {
             anyhow::bail!(
                 "SHA-256 mismatch for {} in {}: expected {}, got {}",
                 fixture.filename,

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use vllm_oxide::{LLM, Prompt, SamplingParams, Source};
+use vllm_oxide::{Prompt, SamplingParams, Source, LLM};
 
 /// Thin CLI over vllm-oxide's `LLM::generate`.
 #[derive(Parser)]
@@ -73,10 +73,9 @@ fn main() -> Result<()> {
         ..SamplingParams::default()
     };
 
-    let outputs = llm.generate(
-        &[Prompt::Text(prompt_text)],
-        &[sampling_params],
-    ).context("LLM::generate failed")?;
+    let outputs = llm
+        .generate(&[Prompt::Text(prompt_text)], &[sampling_params])
+        .context("LLM::generate failed")?;
 
     if let Some(output) = outputs.first() {
         print!("{}", output.text);

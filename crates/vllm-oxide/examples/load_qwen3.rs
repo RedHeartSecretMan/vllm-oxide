@@ -14,9 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use candle_core::Device;
-use vllm_oxide::{
-    default_dtype_from_config_json, is_hf_hub_offline, load_weights, Source,
-};
+use vllm_oxide::{default_dtype_from_config_json, is_hf_hub_offline, load_weights, Source};
 
 fn parse_arg(arg: &str) -> Source {
     if let Some(rest) = arg.strip_prefix("hub:") {
@@ -40,9 +38,7 @@ fn read_config_dtype(source: &Source) -> anyhow::Result<candle_core::DType> {
     let bytes = match source {
         Source::Local(dir) => std::fs::read(dir.join("config.json"))?,
         Source::Hub { repo, revision } => {
-            let rev = revision
-                .clone()
-                .unwrap_or_else(|| "main".to_string());
+            let rev = revision.clone().unwrap_or_else(|| "main".to_string());
             let path = hub_get_file(repo, &rev, "config.json")?;
             std::fs::read(path)?
         }
@@ -119,7 +115,7 @@ fn main() -> ExitCode {
     }
     // Qwen3-0.6B's embed is `[vocab_size=151936, hidden_size=1024]`. Other
     // Qwen3 variants have different shapes; adjust if pointing elsewhere.
-    let tensor = match vb.get((151936_usize, 1024), tensor_name) {
+    let tensor = match vb.get((151_936_usize, 1024), tensor_name) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("[demo] retrieving {tensor_name} failed: {e}");

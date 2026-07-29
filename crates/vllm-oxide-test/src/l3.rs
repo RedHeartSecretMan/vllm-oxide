@@ -28,11 +28,7 @@ pub struct L3Result {
 /// 1. Run the Rust model while capturing per-layer hidden states.
 /// 2. Load the per-layer golden activations from disk.
 /// 3. Compare layer-by-layer to localise where divergence occurs.
-pub fn compare_l3(
-    _manifest: &Manifest,
-    _fixture_dir: &Path,
-    _prompt_id: &str,
-) -> Result<L3Result> {
+pub fn compare_l3(_manifest: &Manifest, _fixture_dir: &Path, _prompt_id: &str) -> Result<L3Result> {
     Ok(L3Result {
         prompt_id: _prompt_id.to_string(),
         passed: true,

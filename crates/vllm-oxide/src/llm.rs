@@ -14,11 +14,10 @@ use tokenizers::Tokenizer as HFTokenizer;
 use crate::attention::PagedKVCache;
 use crate::config::{default_dtype_from_config_json, Source};
 use crate::engine::{
-    EngineCore, KvCacheManager, RequestOutput, Scheduler,
     scheduler::{
-        DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS,
-        DEFAULT_GPU_MEMORY_UTILIZATION,
+        DEFAULT_GPU_MEMORY_UTILIZATION, DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS,
     },
+    EngineCore, KvCacheManager, RequestOutput, Scheduler,
 };
 use crate::models::registry::{build as build_model, BuiltModel};
 use crate::sampler::{Sampler, SamplingParams};
@@ -83,8 +82,9 @@ impl LLM {
     pub fn new(model: impl Into<Source>, options: EngineOptions) -> Result<Self> {
         let source: Source = model.into();
 
-        let device = Device::cuda_if_available(0)
-            .map_err(|e| anyhow!("CUDA device unavailable: {e}. vllm-oxide v0.1 requires a GPU."))?;
+        let device = Device::cuda_if_available(0).map_err(|e| {
+            anyhow!("CUDA device unavailable: {e}. vllm-oxide v0.1 requires a GPU.")
+        })?;
         if !device.is_cuda() {
             bail!("vllm-oxide v0.1 requires a CUDA device. CPU-only inference is not supported.");
         }
@@ -117,9 +117,10 @@ impl LLM {
             attn_meta,
         } = build_model(source.clone(), &device, options.max_model_len)?;
 
-        let num_gpu_blocks = warmup_and_size_kv_pool(
-            &device, &dtype, &options, &paged_kv,
-        )?;
+        #[cfg(feature = "cuda")]
+        let num_gpu_blocks = warmup_and_size_kv_pool(&device, &dtype, &options, &paged_kv)?;
+        #[cfg(not(feature = "cuda"))]
+        let num_gpu_blocks = warmup_and_size_kv_pool(&device, &dtype, &options, &paged_kv);
 
         tracing::info!(num_gpu_blocks, "sized KV cache pool after warmup");
 
@@ -131,7 +132,13 @@ impl LLM {
             let num_kv_heads = old_shape[4];
             let head_dim = old_shape[5];
             *lock = PagedKVCache::new(
-                num_layers, num_gpu_blocks, block_size, num_kv_heads, head_dim, dtype, &device,
+                num_layers,
+                num_gpu_blocks,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                dtype,
+                &device,
             )?;
         }
 
@@ -141,11 +148,7 @@ impl LLM {
             options.gpu_memory_utilization,
         );
 
-        let kv_cache_manager = KvCacheManager::new(
-            num_gpu_blocks,
-            256,
-            paged_kv.clone(),
-        );
+        let kv_cache_manager = KvCacheManager::new(num_gpu_blocks, 256, paged_kv.clone());
 
         let sampler = Sampler::new_with_seed(0);
 
@@ -161,7 +164,10 @@ impl LLM {
 
         // Load tokenizer.
         let tokenizer = load_tokenizer(&source)?;
-        tracing::info!(vocab_size = tokenizer.get_vocab_size(true), "tokenizer loaded");
+        tracing::info!(
+            vocab_size = tokenizer.get_vocab_size(true),
+            "tokenizer loaded"
+        );
 
         Ok(Self {
             engine,
@@ -234,6 +240,8 @@ impl LLM {
                 .sum::<usize>();
 
         if total_tokens > 0 {
+            // total_tokens ≤ max_model_len (4096 default) ≪ 2^53 f64 mantissa
+            #[allow(clippy::cast_precision_loss)]
             let tok_per_sec = total_tokens as f64 / elapsed.as_secs_f64();
             tracing::info!(
                 total_tokens,
@@ -293,7 +301,11 @@ impl LLM {
         }
 
         if logits_list.is_empty() {
-            return Ok(candle_core::Tensor::zeros((0, 0), DType::F32, &self.device)?);
+            return Ok(candle_core::Tensor::zeros(
+                (0, 0),
+                DType::F32,
+                &self.device,
+            )?);
         }
 
         let refs: Vec<&candle_core::Tensor> = logits_list.iter().collect();
@@ -393,12 +405,9 @@ fn load_tokenizer(source: &Source) -> Result<HFTokenizer> {
                     hf_hub::RepoType::Model,
                     rev.to_string(),
                 ));
-                rh.get("tokenizer.json")
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "HF_HUB_OFFLINE=1 and tokenizer.json for `{repo}` not cached"
-                        )
-                    })?
+                rh.get("tokenizer.json").ok_or_else(|| {
+                    anyhow!("HF_HUB_OFFLINE=1 and tokenizer.json for `{repo}` not cached")
+                })?
             } else {
                 let api = hf_hub::api::sync::ApiBuilder::new().build()?;
                 let rh = api.repo(hf_hub::Repo::with_revision(
@@ -464,9 +473,7 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
 /// `Device::cuda_if_available(0)`.
 #[cfg(not(feature = "cuda"))]
 #[allow(dead_code)]
-fn validate_sm_version(_device: &Device) -> Result<()> {
-    Ok(())
-}
+fn validate_sm_version(_device: &Device) {}
 
 /// Run a dummy prefill at `max_num_batched_tokens` to allocate peak activation
 /// memory, then measure free GPU memory to compute the KV cache pool size in
@@ -474,6 +481,7 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
 ///
 /// Matches nano-vllm's warmup logic: the warmup forward pass ensures peak
 /// activation memory is included in the memory budget before sizing the KV pool.
+#[cfg(feature = "cuda")]
 fn warmup_and_size_kv_pool(
     device: &Device,
     dtype: &DType,
@@ -483,61 +491,62 @@ fn warmup_and_size_kv_pool(
     let warmup_tokens = options.max_num_batched_tokens.min(16384);
     tracing::info!(warmup_tokens, "running warmup prefill");
 
-    #[cfg(feature = "cuda")]
-    {
-        let _ = (device, dtype, paged_kv);
-        device.synchronize().ok();
-        let (free_bytes, total_bytes) = cuda_mem_info()?;
+    device.synchronize().ok();
+    let (free_bytes, total_bytes) = cuda_mem_info()?;
 
-        let kv_pool_bytes =
-            (free_bytes as f64 * options.gpu_memory_utilization as f64) as usize;
+    let kv_pool_bytes = (free_bytes as f64 * options.gpu_memory_utilization as f64) as usize;
 
-        let dtype_bytes = match dtype {
-            DType::BF16 | DType::F16 => 2usize,
-            DType::F32 => 4usize,
-            DType::F64 => 8usize,
-            _ => 2usize,
-        };
+    let dtype_bytes = match dtype {
+        DType::BF16 | DType::F16 => 2usize,
+        DType::F32 => 4usize,
+        DType::F64 => 8usize,
+        _ => 2usize,
+    };
 
-        let lock = paged_kv.lock().map_err(|e| anyhow!("paged_kv lock: {e}"))?;
-        let shape = lock.buffer_shape();
-        let num_layers = shape[1];
-        let block_size = shape[3];
-        let num_kv_heads = shape[4];
-        let head_dim = shape[5];
-        drop(lock);
+    let lock = paged_kv.lock().map_err(|e| anyhow!("paged_kv lock: {e}"))?;
+    let shape = lock.buffer_shape();
+    let num_layers = shape[1];
+    let block_size = shape[3];
+    let num_kv_heads = shape[4];
+    let head_dim = shape[5];
+    drop(lock);
 
-        let bytes_per_block = 2 * num_layers * block_size * num_kv_heads * head_dim * dtype_bytes;
-        let num_blocks = kv_pool_bytes / bytes_per_block;
+    let bytes_per_block = 2 * num_layers * block_size * num_kv_heads * head_dim * dtype_bytes;
+    let num_blocks = kv_pool_bytes / bytes_per_block;
 
-        tracing::info!(
-            free_mb = free_bytes / (1024 * 1024),
-            total_mb = total_bytes / (1024 * 1024),
-            kv_pool_mb = kv_pool_bytes / (1024 * 1024),
+    tracing::info!(
+        free_mb = free_bytes / (1024 * 1024),
+        total_mb = total_bytes / (1024 * 1024),
+        kv_pool_mb = kv_pool_bytes / (1024 * 1024),
+        bytes_per_block,
+        num_blocks,
+        "KV pool sizing"
+    );
+
+    if num_blocks < 1 {
+        bail!(
+            "Insufficient GPU memory for KV cache pool. Free: {} MB, \
+             estimated bytes per block: {} (total needed for 1 block). \
+             Try reducing `max_model_len` or `gpu_memory_utilization`.",
+            free_bytes / (1024 * 1024),
             bytes_per_block,
-            num_blocks,
-            "KV pool sizing"
         );
-
-        if num_blocks < 1 {
-            bail!(
-                "Insufficient GPU memory for KV cache pool. Free: {} MB, \
-                 estimated bytes per block: {} (total needed for 1 block). \
-                 Try reducing `max_model_len` or `gpu_memory_utilization`.",
-                free_bytes / (1024 * 1024),
-                bytes_per_block,
-            );
-        }
-
-        Ok(num_blocks)
     }
 
-    #[cfg(not(feature = "cuda"))]
-    {
-        let _ = (device, dtype, options, paged_kv);
-        tracing::warn!("CPU-only mode: allocating minimal KV cache pool (100 blocks)");
-        Ok(100)
-    }
+    Ok(num_blocks)
+}
+
+/// CPU-only stub: no GPU memory measurement possible; allocates a minimal
+/// KV cache pool (100 blocks) so the engine can initialize and tests pass.
+#[cfg(not(feature = "cuda"))]
+fn warmup_and_size_kv_pool(
+    _device: &Device,
+    _dtype: &DType,
+    _options: &EngineOptions,
+    _paged_kv: &Arc<Mutex<PagedKVCache>>,
+) -> usize {
+    tracing::warn!("CPU-only mode: allocating minimal KV cache pool (100 blocks)");
+    100
 }
 
 /// Query CUDA free and total memory (in bytes) via the CUDA driver API.
@@ -547,12 +556,7 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
     use candle_core::cuda::cudarc::driver::sys;
     let mut free: usize = 0;
     let mut total: usize = 0;
-    let result = unsafe {
-        sys::cuMemGetInfo_v2(
-            &mut free as *mut usize,
-            &mut total as *mut usize,
-        )
-    };
+    let result = unsafe { sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!("cuMemGetInfo_v2 failed with error code {}", result as i32);
     }
@@ -617,7 +621,7 @@ mod tests {
 
         #[test]
         fn token_ids_path_bypasses_tokenization_entirely() {
-            let ids = vec![42, 99, 151645];
+            let ids = vec![42, 99, 151_645];
             let prompt = Prompt::TokenIds(ids.clone());
             match &prompt {
                 Prompt::TokenIds(existing) => assert_eq!(existing, &ids),

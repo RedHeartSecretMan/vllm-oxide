@@ -11,19 +11,19 @@
 //! This is a **release gate** (manual, GPU). CI green (CPU property tests)
 //! does NOT imply numerical validation — see README.
 
-pub mod types;
-pub mod manifest;
 pub mod download;
-pub mod prompts;
 pub mod l1;
 pub mod l2;
 pub mod l3;
+pub mod manifest;
+pub mod prompts;
 pub mod report;
+pub mod types;
 
-pub use types::{FixtureData, FixtureMetadata, Manifest, ToleranceCalibration};
-pub use manifest::{load_fixture, parse_manifest};
 pub use download::{download_release, load_from_dir};
 pub use l1::{compare_l1, compare_l1_regression, L1Result};
 pub use l2::{compare_l2, L2Result};
 pub use l3::{compare_l3, L3Result};
-pub use report::{ComparisonReport, print_report};
+pub use manifest::{load_fixture, parse_manifest};
+pub use report::{print_report, ComparisonReport};
+pub use types::{FixtureData, FixtureMetadata, Manifest, ToleranceCalibration};

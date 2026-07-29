@@ -13,13 +13,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
+use vllm_oxide::{EngineOptions, Prompt, Source, LLM};
 use vllm_oxide_test::{
-    self, ComparisonReport,
-    compare_l1, compare_l1_regression, compare_l2, compare_l3,
-    download, manifest, print_report, prompts,
-};
-use vllm_oxide::{
-    EngineOptions, LLM, Prompt, Source,
+    self, compare_l1, compare_l1_regression, compare_l2, compare_l3, download, manifest,
+    print_report, prompts, ComparisonReport,
 };
 
 /// Validate the vllm-oxide Rust engine against golden fixtures.
@@ -77,8 +74,7 @@ struct Cli {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -124,15 +120,12 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let prompt_entry = match canonical_prompts.get(&meta.prompt_id) {
-            Some(e) => e,
-            None => {
-                tracing::warn!(
-                    "prompt_id '{}' not found in canonical.jsonl — skipping",
-                    meta.prompt_id
-                );
-                continue;
-            }
+        let Some(prompt_entry) = canonical_prompts.get(&meta.prompt_id) else {
+            tracing::warn!(
+                "prompt_id '{}' not found in canonical.jsonl — skipping",
+                meta.prompt_id
+            );
+            continue;
         };
 
         // Batch prompts (canonical_05) have sub_prompts — skip in v0.1.
@@ -149,10 +142,7 @@ fn main() -> Result<()> {
         let max_tokens = meta.num_tokens as usize;
 
         tracing::info!("[{}/L1+L2] loading engine", meta.prompt_id);
-        let mut llm = LLM::new(
-            Source::Local(model_path.clone()),
-            EngineOptions::default(),
-        )?;
+        let mut llm = LLM::new(Source::Local(model_path.clone()), EngineOptions::default())?;
 
         let logits = match llm.generate_logits(&prompt, max_tokens) {
             Ok(t) => t,
@@ -184,6 +174,8 @@ fn main() -> Result<()> {
             let end = start + vocab_size;
             let mut max_val = f32::NEG_INFINITY;
             let mut max_idx = 0u32;
+            // vocab size ≤ 200k; truncation impossible
+            #[allow(clippy::cast_possible_truncation)]
             for (j, &val) in logits_vals[start..end].iter().enumerate() {
                 if val > max_val {
                     max_val = val;
@@ -225,15 +217,12 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let prompt_entry = match canonical_prompts.get(&meta.prompt_id) {
-            Some(e) => e,
-            None => {
-                tracing::warn!(
-                    "prompt_id '{}' not found in canonical.jsonl — skipping",
-                    meta.prompt_id
-                );
-                continue;
-            }
+        let Some(prompt_entry) = canonical_prompts.get(&meta.prompt_id) else {
+            tracing::warn!(
+                "prompt_id '{}' not found in canonical.jsonl — skipping",
+                meta.prompt_id
+            );
+            continue;
         };
 
         if prompt_entry.sub_prompts.is_some() {
@@ -245,10 +234,7 @@ fn main() -> Result<()> {
         let max_tokens = meta.num_tokens as usize;
 
         tracing::info!("[{}/L1] loading engine for regression", meta.prompt_id);
-        let mut llm = LLM::new(
-            Source::Local(model_path.clone()),
-            EngineOptions::default(),
-        )?;
+        let mut llm = LLM::new(Source::Local(model_path.clone()), EngineOptions::default())?;
 
         let logits = match llm.generate_logits(&prompt, max_tokens) {
             Ok(t) => t,
@@ -279,6 +265,8 @@ fn main() -> Result<()> {
             let end = start + vocab_size;
             let mut max_val = f32::NEG_INFINITY;
             let mut max_idx = 0u32;
+            // vocab size ≤ 200k; truncation impossible
+            #[allow(clippy::cast_possible_truncation)]
             for (j, &val) in logits_vals[start..end].iter().enumerate() {
                 if val > max_val {
                     max_val = val;
@@ -298,7 +286,10 @@ fn main() -> Result<()> {
 
     // 3. Print report.
     if cli.json {
-        println!("{}", vllm_oxide_test::report::json_report(&report, tolerance));
+        println!(
+            "{}",
+            vllm_oxide_test::report::json_report(&report, tolerance)
+        );
     } else {
         print_report(&report, tolerance);
     }

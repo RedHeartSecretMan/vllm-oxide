@@ -32,7 +32,7 @@
 //! candle-nn, or (b) update user story 37 to "implement V1-style RoPE with
 //! position lookup".
 
-use candle_core::{D::Minus1, Device, DType, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D::Minus1};
 
 /// Precomputed RoPE cache + geometry. Stateless after construction — `forward`
 /// only reads `cos_sin_cache` indexed by `positions`.
@@ -89,8 +89,18 @@ impl RotaryEmbedding {
 
     /// Qwen3 default constructor. `rope_theta = 1_000_000`, full-rotary
     /// (`rotary_dim = head_size`), no scaling.
-    pub fn qwen3_default(head_size: usize, max_position_embeddings: usize, dev: &Device) -> Result<Self> {
-        Self::new(head_size, head_size, max_position_embeddings, 1_000_000.0, dev)
+    pub fn qwen3_default(
+        head_size: usize,
+        max_position_embeddings: usize,
+        dev: &Device,
+    ) -> Result<Self> {
+        Self::new(
+            head_size,
+            head_size,
+            max_position_embeddings,
+            1_000_000.0,
+            dev,
+        )
     }
 
     pub fn cos_sin_cache(&self) -> &Tensor {
@@ -138,14 +148,22 @@ fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let chunks = x_fp32.chunk(2, Minus1)?;
     let x1 = &chunks[0];
     let x2 = &chunks[1];
-    let y1 = x1.broadcast_mul(cos)?.broadcast_sub(&x2.broadcast_mul(sin)?)?;
-    let y2 = x2.broadcast_mul(cos)?.broadcast_add(&x1.broadcast_mul(sin)?)?;
+    let y1 = x1
+        .broadcast_mul(cos)?
+        .broadcast_sub(&x2.broadcast_mul(sin)?)?;
+    let y2 = x2
+        .broadcast_mul(cos)?
+        .broadcast_add(&x1.broadcast_mul(sin)?)?;
     let y = Tensor::cat(&[&y1, &y2], Minus1)?;
     y.to_dtype(orig_dtype)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
 
@@ -195,13 +213,10 @@ mod tests {
             let dev = Device::Cpu;
             let rope = RotaryEmbedding::new(8, 8, 4, 10_000.0, &dev).unwrap();
             let positions = Tensor::from_iter([0u32], &dev).unwrap();
-            let q = Tensor::from_iter(
-                [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-                &dev,
-            )
-            .unwrap()
-            .reshape((1, 1, 8))
-            .unwrap();
+            let q = Tensor::from_iter([1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &dev)
+                .unwrap()
+                .reshape((1, 1, 8))
+                .unwrap();
             let k = q.clone();
             let (q_rot, _) = rope.forward(&positions, &q, &k).unwrap();
             let got = q_rot.flatten_all().unwrap().to_vec1::<f32>().unwrap();

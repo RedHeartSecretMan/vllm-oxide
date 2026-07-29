@@ -16,7 +16,7 @@ pub(crate) mod utils;
 pub use sampler::{Sampler, SamplingParams};
 pub use utils::{kv_cache_layout_shape, round_up};
 
-pub use attention::{AttnMetadata, PagedKVCache, build_decode_metadata, build_prefill_metadata};
+pub use attention::{build_decode_metadata, build_prefill_metadata, AttnMetadata, PagedKVCache};
 
 // T2/#20 — engine data model: Sequence/SequenceGroup, BlockPool, KVCacheManager.
 // T2/#21 — Scheduler + EngineCore: the live control loop.
@@ -31,14 +31,17 @@ pub use engine::{
 // a candle `ShardedVarBuilder`; all fusion (q/k/v, gate/up) lives in
 // `Linear::<P>::from_vb` (T3, lands later).
 pub use config::{
-    default_dtype, default_dtype_from_config_json, is_hf_hub_offline, is_offline_value,
-    HFConfig, HF_HUB_OFFLINE_ENV, Source,
+    default_dtype, default_dtype_from_config_json, is_hf_hub_offline, is_offline_value, HFConfig,
+    Source, HF_HUB_OFFLINE_ENV,
 };
 pub use loader::{load_weights, load_weights_vb};
 
-pub use models::{CausalLM, registry::{BuiltModel, ModelEntry, build as build_model}};
+pub use models::{
+    registry::{build as build_model, BuiltModel, ModelEntry},
+    CausalLM,
+};
 
-pub use llm::{EngineOptions, LLM, Prompt};
+pub use llm::{EngineOptions, Prompt, LLM};
 
 // Module stubs — working code lands in downstream tickets (T2 engine,
 // T3 layers/loader, T4 attention, T5 model). Dependency DAG per ADR-0004:

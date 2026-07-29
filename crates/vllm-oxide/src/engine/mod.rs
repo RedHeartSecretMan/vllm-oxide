@@ -29,10 +29,10 @@ use std::sync::{Arc, Mutex};
 
 use candle_core::{DType, Device, Result, Tensor};
 
+use crate::attention::{build_decode_metadata, build_prefill_metadata, AttnMetadata, PagedKVCache};
+use crate::models::CausalLM;
 use crate::Sampler;
 use crate::SamplingParams;
-use crate::attention::{PagedKVCache, AttnMetadata, build_prefill_metadata, build_decode_metadata};
-use crate::models::CausalLM;
 
 pub use block_pool::BlockPoolError;
 pub use kv_cache_manager::KvCacheManager;
@@ -183,8 +183,12 @@ impl EngineCore {
             let tokens = &seq.token_ids[start..start + n];
             all_input_ids.extend_from_slice(tokens);
 
+            // num_cached_tokens ≤ max_model_len ≤ 2^31, fits u32
+            #[allow(clippy::cast_possible_truncation)]
             let pos_base = seq.num_cached_tokens.saturating_sub(n) as u32;
             for k in 0..n {
+                // k < n ≤ max_num_batched_tokens (16384) ≪ u32::MAX
+                #[allow(clippy::cast_possible_truncation)]
                 all_positions.push(pos_base + k as u32);
             }
 
@@ -192,11 +196,11 @@ impl EngineCore {
             cumsum += n;
             seq_lens.push(n);
 
-            let sm = self
-                .kv_cache_manager
-                .compute_slot_mapping(seq, start, n);
+            let sm = self.kv_cache_manager.compute_slot_mapping(seq, start, n);
             slot_mapping.extend(sm);
 
+            // kv_lengths ≤ max_model_len whose default is 4096 ≪ u32::MAX
+            #[allow(clippy::cast_possible_truncation)]
             kv_lengths.push((seq.num_cached_tokens.saturating_sub(n) + n) as u32);
         }
 
@@ -205,10 +209,14 @@ impl EngineCore {
         let input_ids = Tensor::from_vec(all_input_ids, total_tokens, &self.device)?;
         let positions = Tensor::from_vec(all_positions, total_tokens, &self.device)?;
 
+        // seq_lens entries ≤ max_num_batched_tokens (16384) ≪ u32::MAX
+        #[allow(clippy::cast_possible_truncation)]
         let scheduled_tokens: Vec<u32> = seq_lens.iter().map(|&l| l as u32).collect();
 
         let meta = build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping);
         {
+            // Engine is single-threaded (v0.1); Mutex is never poisoned.
+            #[allow(clippy::unwrap_used)]
             let mut lock = self.attn_meta.lock().unwrap();
             *lock = meta;
         }
@@ -246,13 +254,21 @@ impl EngineCore {
             let seq = group.seq();
 
             last_tokens.push(seq.last_token);
+            // decode position ≤ max_model_len ≪ u32::MAX
+            #[allow(clippy::cast_possible_truncation)]
             let pos = seq.num_tokens.saturating_sub(1) as u32;
             positions.push(pos);
+            // context_lens ≤ max_model_len ≪ u32::MAX
+            #[allow(clippy::cast_possible_truncation)]
             context_lens.push(seq.num_tokens as u32);
 
-            let sm = self.kv_cache_manager.compute_slot_mapping(seq, pos as usize, 1);
+            let sm = self
+                .kv_cache_manager
+                .compute_slot_mapping(seq, pos as usize, 1);
             slot_mapping.extend(sm);
 
+            // block_table ids ≤ num_gpu_blocks, typically hundreds ≪ i32::MAX
+            #[allow(clippy::cast_possible_truncation)]
             let bt: Vec<i32> = seq.block_table.iter().map(|&id| id as i32).collect();
             block_tables.push(bt);
         }
@@ -262,6 +278,8 @@ impl EngineCore {
 
         let meta = build_decode_metadata(&context_lens, &block_tables, &slot_mapping);
         {
+            // Engine is single-threaded (v0.1); Mutex is never poisoned.
+            #[allow(clippy::unwrap_used)]
             let mut lock = self.attn_meta.lock().unwrap();
             *lock = meta;
         }
@@ -275,9 +293,9 @@ impl EngineCore {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use candle_core::DType;
     use crate::engine::sequence::BLOCK_SIZE;
     use crate::Sampler;
+    use candle_core::DType;
 
     /// A mock CausalLM that always returns hidden states where token 7
     /// (not the Qwen3 EOS token 151645) has the highest logit. This lets
@@ -336,7 +354,15 @@ mod tests {
     ) -> EngineCore {
         let model = Box::new(MockModel::new(42, device.clone()));
         let sampler = Sampler::new_with_seed(0);
-        EngineCore::new(scheduler, kv_mgr, model, sampler, paged_kv, attn_meta, device.clone())
+        EngineCore::new(
+            scheduler,
+            kv_mgr,
+            model,
+            sampler,
+            paged_kv,
+            attn_meta,
+            device.clone(),
+        )
     }
 
     fn make_fake_cache() -> Arc<Mutex<PagedKVCache>> {
@@ -375,7 +401,10 @@ mod tests {
         let mut engine = make_engine(scheduler, kv_mgr, paged_kv, attn_meta, &device);
 
         let outputs = engine.step().unwrap();
-        assert!(outputs.is_empty(), "prefill should not finish with max_tokens=5");
+        assert!(
+            outputs.is_empty(),
+            "prefill should not finish with max_tokens=5"
+        );
 
         let mut total_outputs = 0;
         for step_num in 1..=10 {
@@ -391,7 +420,10 @@ mod tests {
             }
         }
 
-        assert!(!engine.is_running(), "engine should stop after max_tokens reached");
+        assert!(
+            !engine.is_running(),
+            "engine should stop after max_tokens reached"
+        );
     }
 
     #[test]

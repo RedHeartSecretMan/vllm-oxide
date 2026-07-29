@@ -18,7 +18,7 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor};
 
 use crate::utils::kv_cache_layout_shape;
 
-pub use metadata::{AttnMetadata, build_decode_metadata, build_prefill_metadata};
+pub use metadata::{build_decode_metadata, build_prefill_metadata, AttnMetadata};
 
 /// Physical GPU buffer for the paged KV cache.
 ///
@@ -46,11 +46,15 @@ impl PagedKVCache {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
-        let shape = kv_cache_layout_shape(
-            num_layers, num_blocks, block_size, num_kv_heads, head_dim,
-        );
+        let shape =
+            kv_cache_layout_shape(num_layers, num_blocks, block_size, num_kv_heads, head_dim);
         let buffer = Tensor::zeros(&shape, dtype, device)?;
-        Ok(Self { buffer, num_layers, num_blocks, block_size })
+        Ok(Self {
+            buffer,
+            num_layers,
+            num_blocks,
+            block_size,
+        })
     }
 
     /// Per-layer K cache view: `[num_blocks, block_size, num_kv_heads, head_dim]`.
@@ -66,7 +70,11 @@ impl PagedKVCache {
     /// Write per-step K/V into the paged cache via the custom CUDA kernel.
     #[cfg(feature = "cuda")]
     pub fn reshape_and_cache(
-        &self, layer_id: usize, key: &Tensor, value: &Tensor, slot_mapping: &Tensor,
+        &self,
+        layer_id: usize,
+        key: &Tensor,
+        value: &Tensor,
+        slot_mapping: &Tensor,
     ) -> Result<()> {
         let k_cache = self.k_cache(layer_id)?;
         let v_cache = self.v_cache(layer_id)?;
@@ -78,11 +86,18 @@ impl PagedKVCache {
         self.buffer.shape().dims().to_vec()
     }
 
-    pub fn num_blocks(&self) -> usize { self.num_blocks }
-    pub fn block_size(&self) -> usize { self.block_size }
+    pub fn num_blocks(&self) -> usize {
+        self.num_blocks
+    }
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
+// All test unwraps: PagedKVCache::new with hardcoded small dimensions always
+// succeeds on CPU; k_cache/v_cache indices are within allocated layer count.
 mod tests {
     use super::*;
 
@@ -136,7 +151,8 @@ mod gpu_tests {
 
         let num_kv_heads = 2;
         let head_dim = 64;
-        let cache = PagedKVCache::new(1, 4, 256, num_kv_heads, head_dim, DType::BF16, &dev).unwrap();
+        let cache =
+            PagedKVCache::new(1, 4, 256, num_kv_heads, head_dim, DType::BF16, &dev).unwrap();
 
         let num_tokens = 3;
         let key = Tensor::arange(0f32, (num_tokens * num_kv_heads * head_dim) as f32, &dev)
@@ -145,35 +161,53 @@ mod gpu_tests {
             .unwrap()
             .to_dtype(DType::BF16)
             .unwrap();
-        let value = Tensor::arange(1000f32, 1000f32 + (num_tokens * num_kv_heads * head_dim) as f32, &dev)
-            .unwrap()
-            .reshape((num_tokens, num_kv_heads, head_dim))
-            .unwrap()
-            .to_dtype(DType::BF16)
-            .unwrap();
+        let value = Tensor::arange(
+            1000f32,
+            1000f32 + (num_tokens * num_kv_heads * head_dim) as f32,
+            &dev,
+        )
+        .unwrap()
+        .reshape((num_tokens, num_kv_heads, head_dim))
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
 
         let slot_mapping = Tensor::from_vec(vec![0i64, 256, 512], (num_tokens,), &dev).unwrap();
 
-        cache.reshape_and_cache(0, &key, &value, &slot_mapping).unwrap();
+        cache
+            .reshape_and_cache(0, &key, &value, &slot_mapping)
+            .unwrap();
 
         let k_cache = cache.k_cache(0).unwrap();
         let v_cache = cache.v_cache(0).unwrap();
 
         let expected_k_0 = key.i(0).unwrap();
         let written_k_0 = k_cache.i((0, 0)).unwrap();
-        let diff = (written_k_0.to_dtype(DType::F32).unwrap() - expected_k_0.to_dtype(DType::F32).unwrap()).unwrap().abs().unwrap();
+        let diff = (written_k_0.to_dtype(DType::F32).unwrap()
+            - expected_k_0.to_dtype(DType::F32).unwrap())
+        .unwrap()
+        .abs()
+        .unwrap();
         let max_diff = diff.max_all().unwrap().to_vec0::<f32>().unwrap();
         assert_eq!(max_diff, 0.0, "K slot 0 (block 0, offset 0) mismatch");
 
         let expected_k_1 = key.i(1).unwrap();
         let written_k_1 = k_cache.i((1, 0)).unwrap();
-        let diff = (written_k_1.to_dtype(DType::F32).unwrap() - expected_k_1.to_dtype(DType::F32).unwrap()).unwrap().abs().unwrap();
+        let diff = (written_k_1.to_dtype(DType::F32).unwrap()
+            - expected_k_1.to_dtype(DType::F32).unwrap())
+        .unwrap()
+        .abs()
+        .unwrap();
         let max_diff = diff.max_all().unwrap().to_vec0::<f32>().unwrap();
         assert_eq!(max_diff, 0.0, "K slot 256 (block 1, offset 0) mismatch");
 
         let expected_v_2 = value.i(2).unwrap();
         let written_v_2 = v_cache.i((2, 0)).unwrap();
-        let diff = (written_v_2.to_dtype(DType::F32).unwrap() - expected_v_2.to_dtype(DType::F32).unwrap()).unwrap().abs().unwrap();
+        let diff = (written_v_2.to_dtype(DType::F32).unwrap()
+            - expected_v_2.to_dtype(DType::F32).unwrap())
+        .unwrap()
+        .abs()
+        .unwrap();
         let max_diff = diff.max_all().unwrap().to_vec0::<f32>().unwrap();
         assert_eq!(max_diff, 0.0, "V slot 512 (block 2, offset 0) mismatch");
     }
@@ -190,11 +224,24 @@ mod gpu_tests {
         let head_dim = 64;
         let seq_len = 8;
 
-        let q = Tensor::randn(0f32, 1f32, (seq_len, num_heads, head_dim), &dev).unwrap().to_dtype(DType::BF16).unwrap();
-        let k = Tensor::randn(0f32, 1f32, (seq_len, num_heads, head_dim), &dev).unwrap().to_dtype(DType::BF16).unwrap();
-        let v = Tensor::randn(0f32, 1f32, (seq_len, num_heads, head_dim), &dev).unwrap().to_dtype(DType::BF16).unwrap();
+        let q = Tensor::randn(0f32, 1f32, (seq_len, num_heads, head_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::randn(0f32, 1f32, (seq_len, num_heads, head_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let v = Tensor::randn(0f32, 1f32, (seq_len, num_heads, head_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
 
-        let meta = build_prefill_metadata(&[seq_len as u32], &[seq_len as u32], &(0..seq_len as i64).collect::<Vec<_>>());
+        let meta = build_prefill_metadata(
+            &[seq_len as u32],
+            &[seq_len as u32],
+            &(0..seq_len as i64).collect::<Vec<_>>(),
+        );
         let scale = 1.0 / (head_dim as f32).sqrt();
 
         let out = super::flash_attn::prefill_attn(&q, &k, &v, &meta, scale).unwrap();
@@ -203,7 +250,9 @@ mod gpu_tests {
         let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();
         let has_nan = (0..out_f32.elem_count())
             .step_by(out_f32.elem_count() / 16 + 1)
-            .try_fold(false, |acc, i| Ok::<_, candle_core::Error>(acc | out_f32.get(i)?.to_vec0::<f32>()?.is_nan()))
+            .try_fold(false, |acc, i| {
+                Ok::<_, candle_core::Error>(acc | out_f32.get(i)?.to_vec0::<f32>()?.is_nan())
+            })
             .unwrap();
         assert!(!has_nan, "prefill output contains NaN");
     }
@@ -223,20 +272,32 @@ mod gpu_tests {
 
         let cache = PagedKVCache::new(1, 1, 256, kv_heads, head_dim, DType::BF16, &dev).unwrap();
 
-        let key = Tensor::randn(0f32, 1f32, (ctx_len, kv_heads, head_dim), &dev).unwrap().to_dtype(DType::BF16).unwrap();
-        let value = Tensor::randn(0f32, 1f32, (ctx_len, kv_heads, head_dim), &dev).unwrap().to_dtype(DType::BF16).unwrap();
+        let key = Tensor::randn(0f32, 1f32, (ctx_len, kv_heads, head_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let value = Tensor::randn(0f32, 1f32, (ctx_len, kv_heads, head_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
         let slots: Vec<i64> = (0..ctx_len as i64).collect();
         let slot_mapping = Tensor::from_vec(slots, (ctx_len,), &dev).unwrap();
-        cache.reshape_and_cache(0, &key, &value, &slot_mapping).unwrap();
+        cache
+            .reshape_and_cache(0, &key, &value, &slot_mapping)
+            .unwrap();
 
-        let q = Tensor::randn(0f32, 1f32, (1, num_heads, head_dim), &dev).unwrap().to_dtype(DType::BF16).unwrap();
+        let q = Tensor::randn(0f32, 1f32, (1, num_heads, head_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
         let k_cache = cache.k_cache(0).unwrap();
         let v_cache = cache.v_cache(0).unwrap();
 
         let meta = build_decode_metadata(&[ctx_len as u32], &[vec![0]], &[ctx_len as i64]);
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let out = super::flash_attn::decode_attn(&q, &k_cache, &v_cache, &meta, scale, 256).unwrap();
+        let out =
+            super::flash_attn::decode_attn(&q, &k_cache, &v_cache, &meta, scale, 256).unwrap();
 
         assert_eq!(out.shape().dims(), &[1, num_heads, head_dim]);
         let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();

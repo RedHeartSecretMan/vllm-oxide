@@ -74,10 +74,15 @@ fn slice_ptr(tensor: &Tensor) -> Result<(u64, TensorGuard)> {
     // SAFETY: SyncOnDrop borrows from the CudaSlice, which is owned by storage.
     // We keep the RwLockReadGuard alive in TensorGuard, so the device handle and
     // memory remain valid. Caller must drop TensorGuard before the source Tensor.
-    let storage: RwLockReadGuard<'static, Storage> =
-        unsafe { std::mem::transmute(storage) };
+    let storage: RwLockReadGuard<'static, Storage> = unsafe { std::mem::transmute(storage) };
 
-    Ok((ptr, TensorGuard { _guard: guard, _storage: storage }))
+    Ok((
+        ptr,
+        TensorGuard {
+            _guard: guard,
+            _storage: storage,
+        },
+    ))
 }
 
 fn get_stream(tensor: &Tensor) -> Result<CUstream> {
@@ -146,11 +151,7 @@ pub fn reshape_and_cache(
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn copy_blocks(
-    key_cache: &Tensor,
-    value_cache: &Tensor,
-    block_mapping: &Tensor,
-) -> Result<()> {
+pub fn copy_blocks(key_cache: &Tensor, value_cache: &Tensor, block_mapping: &Tensor) -> Result<()> {
     let dtype = dtype_code(key_cache.dtype())?;
 
     let (kc_ptr, _g1) = slice_ptr(key_cache)?;

@@ -61,8 +61,12 @@ pub fn build_prefill_metadata(
     for (i, (&sq, &sk)) in scheduled_tokens.iter().zip(kv_lengths).enumerate() {
         cu_seqlens_q.push(cu_seqlens_q[i] + sq);
         cu_seqlens_k.push(cu_seqlens_k[i] + sk);
-        if sq as usize > max_seqlen_q { max_seqlen_q = sq as usize; }
-        if sk as usize > max_seqlen_k { max_seqlen_k = sk as usize; }
+        if sq as usize > max_seqlen_q {
+            max_seqlen_q = sq as usize;
+        }
+        if sk as usize > max_seqlen_k {
+            max_seqlen_k = sk as usize;
+        }
     }
     AttnMetadata {
         is_prefill: true,
@@ -91,20 +95,29 @@ mod tests {
 
         #[test]
         fn batch_cu_seqlens_are_cumulative() {
-            let meta = build_decode_metadata(&[5u32, 20, 3], &[vec![0], vec![1, 2], vec![3]], &[100i64, 200, 300]);
+            let meta = build_decode_metadata(
+                &[5u32, 20, 3],
+                &[vec![0], vec![1, 2], vec![3]],
+                &[100i64, 200, 300],
+            );
             assert_eq!(meta.cu_seqlens_q, vec![0, 1, 2, 3]);
             assert_eq!(meta.cu_seqlens_k, vec![0, 5, 25, 28]);
         }
 
         #[test]
         fn max_seqlen_q_is_one() {
-            let meta = build_decode_metadata(&[100u32, 200, 300], &[vec![0], vec![1], vec![2]], &[0i64; 3]);
+            let meta = build_decode_metadata(
+                &[100u32, 200, 300],
+                &[vec![0], vec![1], vec![2]],
+                &[0i64; 3],
+            );
             assert_eq!(meta.max_seqlen_q, 1);
         }
 
         #[test]
         fn max_seqlen_k_is_max_context() {
-            let meta = build_decode_metadata(&[5u32, 47, 3], &[vec![0], vec![1], vec![2]], &[0i64; 3]);
+            let meta =
+                build_decode_metadata(&[5u32, 47, 3], &[vec![0], vec![1], vec![2]], &[0i64; 3]);
             assert_eq!(meta.max_seqlen_k, 47);
         }
 
@@ -117,7 +130,11 @@ mod tests {
         #[test]
         fn slot_mapping_passes_through() {
             let slots = vec![10i64, 20, 30, -1];
-            let meta = build_decode_metadata(&[1u32, 1, 1, 1], &[vec![0], vec![1], vec![2], vec![3]], &slots);
+            let meta = build_decode_metadata(
+                &[1u32, 1, 1, 1],
+                &[vec![0], vec![1], vec![2], vec![3]],
+                &slots,
+            );
             assert_eq!(meta.slot_mapping, slots);
         }
 
@@ -138,7 +155,11 @@ mod tests {
 
         #[test]
         fn cu_seqlens_lens_are_batch_plus_one() {
-            let meta = build_decode_metadata(&[1u32, 2, 3, 4, 5], &(0..5).map(|i| vec![i as i32]).collect::<Vec<_>>(), &[0i64; 5]);
+            let meta = build_decode_metadata(
+                &[1u32, 2, 3, 4, 5],
+                &(0..5).map(|i| vec![i]).collect::<Vec<_>>(),
+                &[0i64; 5],
+            );
             assert_eq!(meta.cu_seqlens_q.len(), 6);
             assert_eq!(meta.cu_seqlens_k.len(), 6);
         }

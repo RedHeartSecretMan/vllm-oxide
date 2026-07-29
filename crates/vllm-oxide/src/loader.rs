@@ -47,7 +47,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{DType, Device};
-use candle_nn::var_builder::{ShardedSafeTensors, ShardedVarBuilder, SimpleBackend, VarBuilder, VarBuilderArgs};
+use candle_nn::var_builder::{
+    ShardedSafeTensors, ShardedVarBuilder, SimpleBackend, VarBuilder, VarBuilderArgs,
+};
 use serde::Deserialize;
 
 use crate::config::{is_hf_hub_offline, Source};
@@ -70,10 +72,8 @@ pub fn load_weights(
     let paths = match source {
         Source::Local(dir) => resolve_local_shards(&dir)
             .with_context(|| format!("resolving local shards under {}", dir.display()))?,
-        Source::Hub { repo, revision } => {
-            resolve_hub_shards(&repo, revision.as_deref())
-                .with_context(|| format!("resolving Hub shards for {repo}"))?
-        }
+        Source::Hub { repo, revision } => resolve_hub_shards(&repo, revision.as_deref())
+            .with_context(|| format!("resolving Hub shards for {repo}"))?,
     };
     if paths.is_empty() {
         return Err(anyhow!(
@@ -102,10 +102,16 @@ pub(crate) fn resolve_paths(source: &Source) -> Result<Vec<PathBuf>> {
     }
 }
 
-pub fn load_weights_vb(source: Source, dtype: DType, device: &Device) -> Result<VarBuilder<'static>> {
+pub fn load_weights_vb(
+    source: Source,
+    dtype: DType,
+    device: &Device,
+) -> Result<VarBuilder<'static>> {
     let paths = resolve_paths(&source)?;
     if paths.is_empty() {
-        return Err(anyhow!("resolved zero safetensors shards from the requested source"));
+        return Err(anyhow!(
+            "resolved zero safetensors shards from the requested source"
+        ));
     }
     let tensors = unsafe { MmapedSafetensors::multi(&paths)? };
     let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
@@ -156,8 +162,8 @@ struct SafetensorsIndex {
 /// referenced by `weight_map`, and return absolute paths rooted at `dir`.
 /// Errors if `weight_map` is empty or any referenced shard is missing.
 fn parse_index_shards(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
-    let bytes = std::fs::read(index_path)
-        .with_context(|| format!("reading {}", index_path.display()))?;
+    let bytes =
+        std::fs::read(index_path).with_context(|| format!("reading {}", index_path.display()))?;
     let parsed: SafetensorsIndex = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {} as safetensors index", index_path.display()))?;
 
@@ -370,12 +376,10 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             write_multishard_fixture(tmp.path(), &["model-00001-of-00002.safetensors"]);
             assert!(resolve_local_shards(tmp.path()).is_ok());
-            assert!(
-                !resolve_local_shards(tmp.path())
-                    .unwrap()
-                    .iter()
-                    .any(|p| p.to_string_lossy().contains("index.json"))
-            );
+            assert!(!resolve_local_shards(tmp.path())
+                .unwrap()
+                .iter()
+                .any(|p| p.to_string_lossy().contains("index.json")));
         }
 
         #[test]
@@ -412,7 +416,11 @@ mod tests {
                 let shard = format!("shard-{}.safetensors", i % 3);
                 wm.insert(format!("t{i}"), shard);
             }
-            for s in ["shard-0.safetensors", "shard-1.safetensors", "shard-2.safetensors"] {
+            for s in [
+                "shard-0.safetensors",
+                "shard-1.safetensors",
+                "shard-2.safetensors",
+            ] {
                 write_safetensors_fixture(&tmp.path().join(s), "t", &[0.0]);
             }
             let index_path = write_index(tmp.path(), wm);
@@ -488,10 +496,7 @@ mod tests {
         #[test]
         fn multi_shard_load_round_trip() {
             let tmp = tempfile::tempdir().unwrap();
-            write_multishard_fixture(
-                tmp.path(),
-                &["shard-a.safetensors", "shard-b.safetensors"],
-            );
+            write_multishard_fixture(tmp.path(), &["shard-a.safetensors", "shard-b.safetensors"]);
 
             let device = Device::Cpu;
             let vb =
@@ -507,11 +512,7 @@ mod tests {
         #[test]
         fn dtype_cast_on_get_when_checkpoint_mismatches() {
             let tmp = tempfile::tempdir().unwrap();
-            write_safetensors_fixture(
-                &tmp.path().join("model.safetensors"),
-                "w",
-                &[1.0_f32, 2.0],
-            );
+            write_safetensors_fixture(&tmp.path().join("model.safetensors"), "w", &[1.0_f32, 2.0]);
 
             let device = Device::Cpu;
             // Request F16 even though the file is F32 — candle casts lazily
@@ -526,11 +527,7 @@ mod tests {
         #[test]
         fn missing_tensor_errors_cannot_find_tensor() {
             let tmp = tempfile::tempdir().unwrap();
-            write_safetensors_fixture(
-                &tmp.path().join("model.safetensors"),
-                "present",
-                &[0.0_f32],
-            );
+            write_safetensors_fixture(&tmp.path().join("model.safetensors"), "present", &[0.0_f32]);
 
             let device = Device::Cpu;
             let vb =
