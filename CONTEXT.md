@@ -77,7 +77,7 @@ Input enum: `Text(String)` for natural-language prompts, `TokenIds(Vec<u32>)` fo
 _Avoid_: input, query, user message.
 
 **RequestOutput**:
-Per-request result: `{ seq_id: usize, text: String, token_ids: Vec<u32> }`. Both decoded text and raw token IDs are always provided so callers can post-process tokens without re-tokenizing.
+Per-request result: `{ seq_id: usize, text: String, token_ids: Vec<u32>, finished: bool }`. Both decoded text and raw token IDs are always provided so callers can post-process tokens without re-tokenizing; `finished` reports whether the sequence reached a stop condition (EOS or `max_tokens`).
 _Avoid_: generation result, completion output.
 
 **SamplingParams**:
