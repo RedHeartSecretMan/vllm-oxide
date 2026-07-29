@@ -51,20 +51,20 @@ v0.1 面向**单 GPU、离线推理**（无服务器、无异步）。引擎以 
 
 ## 架构概览
 
-```
-┌──────────────────────────────────────────────────────┐
-│                   LLM (composition root)              │
-│  LLM::new(source, opts) → LLM::generate(prompts, …)  │
-└────────────────────┬─────────────────────────────────┘
-                     │ owns
-┌────────────────────▼─────────────────────────────────┐
-│                    EngineCore                          │
-│  Scheduler → Blocks → KVCacheManager → PagedKVCache  │
-│  ↓                                                     │
-│  model.forward() → compute_logits() → Sampler         │
-│  ↓                                                     │
-│  detokenize → RequestOutput                            │
-└────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    LLM["LLM::new(source, opts)"] -->|owns| EC["EngineCore"]
+
+    subgraph EC ["EngineCore — synchronous step() loop"]
+        direction LR
+        SCH[Scheduler] --> BLK[Blocks]
+        BLK --> KVM[KVCacheManager]
+        KVM --> KV[PagedKVCache]
+        KV --> FWD["model.forward()"]
+        FWD --> LOG[compute_logits]
+        LOG --> SMP[Sampler]
+        SMP --> OUT["detokenize → RequestOutput"]
+    end
 ```
 
 引擎运行一个同步的 `step()` 循环：调度 token、准备张量、执行模型前向传播（hidden states）、从最后一个 token 的 hidden state 计算 logits、采样下一个 token、更新 KV 缓存，然后重复直到所有序列完成。

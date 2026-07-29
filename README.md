@@ -52,20 +52,20 @@ v0.1 targets **single-GPU, offline inference** (no server, no async). The engine
 
 ## Architecture overview
 
-```
-┌──────────────────────────────────────────────────────┐
-│                   LLM (composition root)              │
-│  LLM::new(source, opts) → LLM::generate(prompts, …)  │
-└────────────────────┬─────────────────────────────────┘
-                     │ owns
-┌────────────────────▼─────────────────────────────────┐
-│                    EngineCore                          │
-│  Scheduler → Blocks → KVCacheManager → PagedKVCache  │
-│  ↓                                                     │
-│  model.forward() → compute_logits() → Sampler         │
-│  ↓                                                     │
-│  detokenize → RequestOutput                            │
-└────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    LLM["LLM::new(source, opts)"] -->|owns| EC["EngineCore"]
+
+    subgraph EC ["EngineCore — synchronous step() loop"]
+        direction LR
+        SCH[Scheduler] --> BLK[Blocks]
+        BLK --> KVM[KVCacheManager]
+        KVM --> KV[PagedKVCache]
+        KV --> FWD["model.forward()"]
+        FWD --> LOG[compute_logits]
+        LOG --> SMP[Sampler]
+        SMP --> OUT["detokenize → RequestOutput"]
+    end
 ```
 
 The engine runs a synchronous `step()` loop: schedule tokens, prepare tensors, run the model forward pass (hidden states), compute logits from the last-token hidden state, sample the next token, update the KV cache, and repeat until all sequences finish.
