@@ -5,6 +5,24 @@
 //! `attention::PagedKVCache` directly. Owns the mapping from logical
 //! block tables to physical block ids and to paged-cache slot indices.
 //!
+//! # Design: deliberate structural adapter
+//!
+//! This module is **not** deep (see ADR-0004 M3). The value is
+//! information-hiding, not behavioural abstraction: 6 of its public
+//! methods (`can_allocate`, `allocate`, `deallocate`, `can_append`,
+//! `may_append`, `hash_blocks`) are one-line delegations to
+//! `BlockPool`; `num_free_blocks` and `block_size` are trivial
+//! accessors. `compute_slot_mapping` is the sole logic-carrying method
+//! (~20 LOC: logical block-table index → physical slot via
+//! `block_id * block_size + intra_offset`, `-1` sentinel for
+//! out-of-range).
+//!
+//! The deletion test: compute vanishes (it is all pass-through), but
+//! every direct `BlockPool` import in `scheduler.rs` reappears — the
+//! module earns its keep on what it hides, not what it computes.
+//! Future readers: do **not** deepen by moving scheduler logic in,
+//! and do **not** delete it for being shallow.
+//!
 //! # V1 three-layer split (ADR-0004)
 //!
 //! KvCacheManager is the middle seam: the Scheduler (#21) calls
@@ -25,6 +43,14 @@ use crate::engine::sequence::Sequence;
 /// the pool size. All block-allocation logic is forwarded to the inner
 /// `BlockPool`; `compute_slot_mapping` is the bridge from logical
 /// block tables to cache slot indices.
+///
+/// **Adapter, not computational module.** The value of this module is
+/// what the Scheduler cannot see — `BlockPool`, `BlockPoolError`,
+/// physical `PagedKVCache` internals — not behavioural depth. Six of
+/// its methods are one-line delegations by design;
+/// `compute_slot_mapping` is the sole behavioural bridge (logical
+/// block table → physical slot indices). Thinness is the design, not
+/// debt.
 pub struct KvCacheManager {
     pub(crate) block_pool: BlockPool,
     paged_kv: Arc<Mutex<PagedKVCache>>,

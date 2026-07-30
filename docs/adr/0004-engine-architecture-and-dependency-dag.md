@@ -51,6 +51,10 @@ performs the full loop in one method: scheduler → tensor prep →
   re-exported at the crate root without pulling in the engine.
 - **M2**: `Sequence`, `SequenceGroup`, `SequenceStatus` are the V1 data-model
   leaf — the scheduler's working set.
+- **M3**: `KvCacheManager` is a deliberate information-hiding adapter
+  (structural seam, not computational module). Its 6 delegations + 1
+  bridge method are the intended final shape. Thinness is the design,
+  not debt.
 
 **Consequences**:
 - New modules must fit the DAG; cyclic imports are a design error, not a
