@@ -14,11 +14,28 @@ pub(crate) mod metadata;
 #[cfg(feature = "cuda")]
 pub(crate) mod kernels;
 
+use std::sync::{Arc, Mutex};
+
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 
 use crate::utils::kv_cache_layout_shape;
 
 pub use metadata::{build_decode_metadata, build_prefill_metadata, AttnMetadata};
+
+/// Shared attention state crossing the `engine ↔ model` seam.
+///
+/// `paged_kv` and `attn_meta` are always created together in a model's `build`
+/// factory and consumed together by every attention layer and by `EngineCore`.
+/// Bundling them names the seam and replaces an always-adjacent parameter pair
+/// (the direct cause of the `too_many_arguments` lints in the model's `from_vb`
+/// chain). Cloning is cheap (bumps `Arc` refcounts); all clones share the same
+/// underlying `Mutex`es, so resizing the `PagedKVCache` in place is visible to
+/// every holder.
+#[derive(Clone)]
+pub struct AttentionContext {
+    pub paged_kv: Arc<Mutex<PagedKVCache>>,
+    pub attn_meta: Arc<Mutex<AttnMetadata>>,
+}
 
 /// Physical GPU buffer for the paged KV cache.
 ///

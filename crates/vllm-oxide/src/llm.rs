@@ -111,21 +111,22 @@ impl LLM {
 
         tracing::info!(?dtype, "loading model");
 
-        let BuiltModel {
-            model,
-            paged_kv,
-            attn_meta,
-        } = build_model(source.clone(), &device, options.max_model_len)?;
+        let BuiltModel { model, attn_ctx } =
+            build_model(source.clone(), &device, options.max_model_len)?;
 
         #[cfg(feature = "cuda")]
-        let num_gpu_blocks = warmup_and_size_kv_pool(&device, &dtype, &options, &paged_kv)?;
+        let num_gpu_blocks =
+            warmup_and_size_kv_pool(&device, &dtype, &options, &attn_ctx.paged_kv)?;
         #[cfg(not(feature = "cuda"))]
-        let num_gpu_blocks = warmup_and_size_kv_pool(&device, &dtype, &options, &paged_kv);
+        let num_gpu_blocks = warmup_and_size_kv_pool(&device, &dtype, &options, &attn_ctx.paged_kv);
 
         tracing::info!(num_gpu_blocks, "sized KV cache pool after warmup");
 
         {
-            let mut lock = paged_kv.lock().map_err(|e| anyhow!("paged_kv lock: {e}"))?;
+            let mut lock = attn_ctx
+                .paged_kv
+                .lock()
+                .map_err(|e| anyhow!("paged_kv lock: {e}"))?;
             let old_shape = lock.buffer_shape();
             let num_layers = old_shape[1];
             let block_size = old_shape[3];
@@ -148,7 +149,7 @@ impl LLM {
             options.gpu_memory_utilization,
         );
 
-        let kv_cache_manager = KvCacheManager::new(num_gpu_blocks, 256, paged_kv.clone());
+        let kv_cache_manager = KvCacheManager::new(num_gpu_blocks, 256, attn_ctx.paged_kv.clone());
 
         let sampler = Sampler::new_with_seed(0);
 
@@ -157,8 +158,7 @@ impl LLM {
             kv_cache_manager,
             model,
             sampler,
-            paged_kv.clone(),
-            attn_meta,
+            attn_ctx.clone(),
             device.clone(),
         );
 
@@ -172,7 +172,7 @@ impl LLM {
         Ok(Self {
             engine,
             tokenizer,
-            _paged_kv: paged_kv,
+            _paged_kv: attn_ctx.paged_kv,
             device,
         })
     }

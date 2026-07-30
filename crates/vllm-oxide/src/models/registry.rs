@@ -1,10 +1,8 @@
-use std::sync::{Arc, Mutex};
-
 use anyhow::{anyhow, Result};
 use candle_core::Device;
 use serde::Deserialize;
 
-use crate::attention::{AttnMetadata, PagedKVCache};
+use crate::attention::AttentionContext;
 use crate::config::Source;
 
 use super::CausalLM;
@@ -25,8 +23,7 @@ inventory::collect!(ModelEntry);
 
 pub struct BuiltModel {
     pub model: Box<dyn CausalLM>,
-    pub paged_kv: Arc<Mutex<PagedKVCache>>,
-    pub attn_meta: Arc<Mutex<AttnMetadata>>,
+    pub attn_ctx: AttentionContext,
 }
 
 pub fn build(source: Source, device: &Device, max_model_len: usize) -> Result<BuiltModel> {

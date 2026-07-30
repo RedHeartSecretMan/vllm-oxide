@@ -16,7 +16,9 @@ pub(crate) mod utils;
 pub use sampler::{Sampler, SamplingParams};
 pub use utils::{kv_cache_layout_shape, round_up};
 
-pub use attention::{build_decode_metadata, build_prefill_metadata, AttnMetadata, PagedKVCache};
+pub use attention::{
+    build_decode_metadata, build_prefill_metadata, AttentionContext, AttnMetadata, PagedKVCache,
+};
 
 // T2/#20 — engine data model: Sequence/SequenceGroup, BlockPool, KVCacheManager.
 // T2/#21 — Scheduler + EngineCore: the live control loop.

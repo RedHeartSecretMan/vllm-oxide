@@ -25,11 +25,9 @@ pub mod kv_cache_manager;
 pub mod scheduler;
 pub mod sequence;
 
-use std::sync::{Arc, Mutex};
-
 use candle_core::{DType, Device, Result, Tensor};
 
-use crate::attention::{build_decode_metadata, build_prefill_metadata, AttnMetadata, PagedKVCache};
+use crate::attention::{build_decode_metadata, build_prefill_metadata, AttentionContext};
 use crate::models::CausalLM;
 use crate::Sampler;
 use crate::SamplingParams;
@@ -42,16 +40,15 @@ pub use sequence::{Sequence, SequenceGroup, SequenceStatus};
 /// In-process engine core — collapses V1/nano-vllm's `ModelRunner` (ADR-0004).
 ///
 /// `step()` performs scheduler → tensor prep → `model.forward()` →
-/// sampler → KV update in one method. Holds the shared `PagedKVCache`
-/// and `AttnMetadata` via `Arc<Mutex<>>` so attention layers can read
-/// them during the forward pass.
+/// sampler → KV update in one method. Holds the shared attention state
+/// (`AttentionContext`) so attention layers can read it during the forward
+/// pass; each step writes fresh `AttnMetadata` into the shared `Mutex`.
 pub struct EngineCore {
     pub scheduler: Scheduler,
     pub kv_cache_manager: KvCacheManager,
     model: Box<dyn CausalLM>,
     sampler: Sampler,
-    paged_kv: Arc<Mutex<PagedKVCache>>,
-    attn_meta: Arc<Mutex<AttnMetadata>>,
+    attn_ctx: AttentionContext,
     device: Device,
 }
 
@@ -61,8 +58,7 @@ impl EngineCore {
         kv_cache_manager: KvCacheManager,
         model: Box<dyn CausalLM>,
         sampler: Sampler,
-        paged_kv: Arc<Mutex<PagedKVCache>>,
-        attn_meta: Arc<Mutex<AttnMetadata>>,
+        attn_ctx: AttentionContext,
         device: Device,
     ) -> Self {
         Self {
@@ -70,8 +66,7 @@ impl EngineCore {
             kv_cache_manager,
             model,
             sampler,
-            paged_kv,
-            attn_meta,
+            attn_ctx,
             device,
         }
     }
@@ -217,7 +212,7 @@ impl EngineCore {
         {
             // Engine is single-threaded (v0.1); Mutex is never poisoned.
             #[allow(clippy::unwrap_used)]
-            let mut lock = self.attn_meta.lock().unwrap();
+            let mut lock = self.attn_ctx.attn_meta.lock().unwrap();
             *lock = meta;
         }
 
@@ -280,7 +275,7 @@ impl EngineCore {
         {
             // Engine is single-threaded (v0.1); Mutex is never poisoned.
             #[allow(clippy::unwrap_used)]
-            let mut lock = self.attn_meta.lock().unwrap();
+            let mut lock = self.attn_ctx.attn_meta.lock().unwrap();
             *lock = meta;
         }
 
@@ -292,7 +287,10 @@ impl EngineCore {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use crate::attention::{AttnMetadata, PagedKVCache};
     use crate::engine::sequence::BLOCK_SIZE;
     use crate::Sampler;
     use candle_core::DType;
@@ -348,21 +346,12 @@ mod tests {
     fn make_engine(
         scheduler: Scheduler,
         kv_mgr: KvCacheManager,
-        paged_kv: Arc<Mutex<PagedKVCache>>,
-        attn_meta: Arc<Mutex<AttnMetadata>>,
+        attn_ctx: AttentionContext,
         device: &Device,
     ) -> EngineCore {
         let model = Box::new(MockModel::new(42, device.clone()));
         let sampler = Sampler::new_with_seed(0);
-        EngineCore::new(
-            scheduler,
-            kv_mgr,
-            model,
-            sampler,
-            paged_kv,
-            attn_meta,
-            device.clone(),
-        )
+        EngineCore::new(scheduler, kv_mgr, model, sampler, attn_ctx, device.clone())
     }
 
     fn make_fake_cache() -> Arc<Mutex<PagedKVCache>> {
@@ -386,9 +375,11 @@ mod tests {
         let device = Device::Cpu;
 
         let mut scheduler = Scheduler::with_defaults();
-        let paged_kv = make_fake_cache();
-        let attn_meta = make_fake_meta();
-        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, paged_kv.clone());
+        let attn_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
 
         scheduler.add_request(
             vec![1, 2, 3],
@@ -398,7 +389,7 @@ mod tests {
             },
         );
 
-        let mut engine = make_engine(scheduler, kv_mgr, paged_kv, attn_meta, &device);
+        let mut engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
 
         let outputs = engine.step().unwrap();
         assert!(
@@ -430,11 +421,13 @@ mod tests {
     fn empty_engine_returns_empty() {
         let device = Device::Cpu;
         let scheduler = Scheduler::with_defaults();
-        let paged_kv = make_fake_cache();
-        let attn_meta = make_fake_meta();
-        let kv_mgr = KvCacheManager::new(10, BLOCK_SIZE, paged_kv.clone());
+        let attn_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let kv_mgr = KvCacheManager::new(10, BLOCK_SIZE, attn_ctx.paged_kv.clone());
 
-        let mut engine = make_engine(scheduler, kv_mgr, paged_kv, attn_meta, &device);
+        let mut engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
         let outputs = engine.step().unwrap();
         assert!(outputs.is_empty());
         assert!(!engine.is_running());
@@ -444,12 +437,14 @@ mod tests {
     fn add_request_makes_engine_running() {
         let device = Device::Cpu;
         let mut scheduler = Scheduler::with_defaults();
-        let paged_kv = make_fake_cache();
-        let attn_meta = make_fake_meta();
-        let kv_mgr = KvCacheManager::new(10, BLOCK_SIZE, paged_kv.clone());
+        let attn_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let kv_mgr = KvCacheManager::new(10, BLOCK_SIZE, attn_ctx.paged_kv.clone());
 
         scheduler.add_request(vec![1, 2, 3], SamplingParams::default());
-        let engine = make_engine(scheduler, kv_mgr, paged_kv, attn_meta, &device);
+        let engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
         assert!(engine.is_running());
     }
 }

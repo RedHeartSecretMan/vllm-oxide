@@ -7,7 +7,7 @@ use candle_core::{Device, IndexOp, Result as CandleResult, Tensor};
 use candle_nn::{Module, VarBuilder};
 use serde::Deserialize;
 
-use crate::attention::{build_prefill_metadata, AttnMetadata, PagedKVCache};
+use crate::attention::{build_prefill_metadata, AttentionContext, PagedKVCache};
 use crate::config::{default_dtype_from_config_json, Source};
 use crate::layers::activation::SiluAndMul;
 use crate::layers::linear::{Linear, LinearSpec};
@@ -94,8 +94,7 @@ struct Qwen3Attention {
     q_norm: Option<RMSNorm>,
     k_norm: Option<RMSNorm>,
     rotary_emb: RotaryEmbedding,
-    paged_kv: Arc<Mutex<PagedKVCache>>,
-    attn_meta: Arc<Mutex<AttnMetadata>>,
+    attn_ctx: AttentionContext,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -103,13 +102,11 @@ struct Qwen3Attention {
 }
 
 impl Qwen3Attention {
-    #[allow(clippy::too_many_arguments)]
     fn from_vb(
         vb: VarBuilder,
         config: &Qwen3Config,
         dev: &Device,
-        paged_kv: Arc<Mutex<PagedKVCache>>,
-        attn_meta: Arc<Mutex<AttnMetadata>>,
+        attn_ctx: AttentionContext,
         layer_id: usize,
     ) -> CandleResult<Self> {
         let hd = config.head_dim();
@@ -155,8 +152,7 @@ impl Qwen3Attention {
             q_norm,
             k_norm,
             rotary_emb,
-            paged_kv,
-            attn_meta,
+            attn_ctx,
             num_heads: nh,
             num_kv_heads: nkv,
             head_dim: hd,
@@ -188,6 +184,7 @@ impl Qwen3Attention {
     #[cfg(feature = "cuda")]
     fn attn_compute(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> CandleResult<Tensor> {
         let meta = self
+            .attn_ctx
             .attn_meta
             .lock()
             .map_err(|e| candle_core::Error::Msg(format!("attn_meta: {e}")))?;
@@ -197,6 +194,7 @@ impl Qwen3Attention {
             q.device(),
         )?;
         let pkv = self
+            .attn_ctx
             .paged_kv
             .lock()
             .map_err(|e| candle_core::Error::Msg(format!("pkv: {e}")))?;
@@ -229,25 +227,16 @@ struct Qwen3DecoderLayer {
 }
 
 impl Qwen3DecoderLayer {
-    #[allow(clippy::too_many_arguments)]
     fn from_vb(
         vb: VarBuilder,
         config: &Qwen3Config,
         dev: &Device,
-        paged_kv: Arc<Mutex<PagedKVCache>>,
-        attn_meta: Arc<Mutex<AttnMetadata>>,
+        attn_ctx: AttentionContext,
         layer_id: usize,
     ) -> CandleResult<Self> {
         let eps = config.rms_norm_eps;
         Ok(Self {
-            self_attn: Qwen3Attention::from_vb(
-                vb.clone(),
-                config,
-                dev,
-                paged_kv,
-                attn_meta,
-                layer_id,
-            )?,
+            self_attn: Qwen3Attention::from_vb(vb.clone(), config, dev, attn_ctx, layer_id)?,
             mlp: Qwen3Mlp::from_vb(vb.pp("mlp"), config, dev)?,
             input_layernorm: RMSNorm::from_vb(vb.pp("input_layernorm"), config.hidden_size, eps)?,
             post_attention_layernorm: RMSNorm::from_vb(
@@ -282,8 +271,7 @@ impl Qwen3Model {
         vb: VarBuilder,
         config: &Qwen3Config,
         dev: &Device,
-        paged_kv: Arc<Mutex<PagedKVCache>>,
-        attn_meta: Arc<Mutex<AttnMetadata>>,
+        attn_ctx: AttentionContext,
     ) -> CandleResult<Self> {
         let ew = vb
             .pp("embed_tokens")
@@ -295,8 +283,7 @@ impl Qwen3Model {
                 vb.pp("layers").pp(i),
                 config,
                 dev,
-                paged_kv.clone(),
-                attn_meta.clone(),
+                attn_ctx.clone(),
                 i,
             )?);
         }
@@ -331,10 +318,9 @@ impl Qwen3ForCausalLM {
         vb: VarBuilder,
         config: &Qwen3Config,
         dev: &Device,
-        paged_kv: Arc<Mutex<PagedKVCache>>,
-        attn_meta: Arc<Mutex<AttnMetadata>>,
+        attn_ctx: AttentionContext,
     ) -> CandleResult<Self> {
-        let model = Qwen3Model::from_vb(vb.pp("model"), config, dev, paged_kv, attn_meta)?;
+        let model = Qwen3Model::from_vb(vb.pp("model"), config, dev, attn_ctx)?;
         let lm_head = if config.tie_word_embeddings() {
             Linear::<Row>::from_weight(model.embed_tokens.embeddings().clone())
         } else {
@@ -379,18 +365,17 @@ impl Qwen3ForCausalLM {
             device,
         )?));
         let attn_meta = Arc::new(Mutex::new(build_prefill_metadata(&[1], &[1], &[0])));
+        let attn_ctx = AttentionContext {
+            paged_kv,
+            attn_meta,
+        };
         let model = Box::new(Qwen3ForCausalLM::from_vb(
             vb,
             &config,
             device,
-            paged_kv.clone(),
-            attn_meta.clone(),
+            attn_ctx.clone(),
         )?);
-        Ok(BuiltModel {
-            model,
-            paged_kv,
-            attn_meta,
-        })
+        Ok(BuiltModel { model, attn_ctx })
     }
 }
 
