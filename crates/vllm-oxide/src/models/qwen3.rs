@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::attention::{build_prefill_metadata, AttentionContext, PagedKVCache};
 use crate::config::{default_dtype_from_config_json, Source};
-use crate::layers::activation::SiluAndMul;
+use crate::layers::activation::silu_and_mul;
 use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
 use crate::layers::rmsnorm::RMSNorm;
@@ -60,7 +60,6 @@ impl Qwen3Config {
 struct Qwen3Mlp {
     gate_up_proj: Linear<GateUpMerged>,
     down_proj: Linear<Row>,
-    act_fn: SiluAndMul,
 }
 
 impl Qwen3Mlp {
@@ -78,12 +77,11 @@ impl Qwen3Mlp {
         Ok(Self {
             gate_up_proj: Linear::<GateUpMerged>::from_vb(vb.clone(), &gu_spec, dev)?,
             down_proj: Linear::<Row>::from_vb(vb.pp("down_proj"), &dn_spec, dev)?,
-            act_fn: SiluAndMul::new(),
         })
     }
     fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
         let gu = self.gate_up_proj.forward(x)?;
-        let act = self.act_fn.forward(&gu)?;
+        let act = silu_and_mul(&gu)?;
         self.down_proj.forward(&act)
     }
 }
