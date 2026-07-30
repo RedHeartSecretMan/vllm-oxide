@@ -47,8 +47,17 @@ Owns physical `Block`s (`block_id`, `ref_count`, `hash`, `token_ids`), the free-
 _Avoid_: block manager (V0 term; V1 split BlockPool from KVCacheManager).
 
 **KVCacheManager**:
-The **only** Scheduler-facing seam over `BlockPool` + the physical `PagedKVCache`. The Scheduler never imports `BlockPool` or `attention::PagedKVCache` directly. Owns the mapping from logical block tables to physical block ids and paged-cache slot indices.
-_Avoid_: KV cache adapter, block-to-slot mapper.
+Deliberate information-hiding adapter at the scheduler-facing seam.
+The **only** Scheduler-facing seam over `BlockPool` + the physical
+`PagedKVCache`. The Scheduler never imports `BlockPool` or
+`attention::PagedKVCache` directly. Its value is what the Scheduler
+cannot see — `BlockPool`, `BlockPoolError`, physical `PagedKVCache`
+internals — not behavioural depth: 6 methods are one-line delegations
+by design; `compute_slot_mapping` is the sole logic-carrying bridge.
+Owns the mapping from logical block tables to physical block ids and
+paged-cache slot indices.
+_Avoid_: block-to-slot mapper (undersells the seam — the value is what
+it hides, not what it maps).
 
 **Scheduler**:
 Token-level scheduling with `waiting`/`running` deques. One `schedule()` step is either pure-prefill or pure-decode. Chunked prefill applies only to the first sequence in a step. Preemption is recompute-only (deallocate + requeue front of `waiting`). `postprocess()` updates block hashes, advances `num_cached_tokens`, and finalises sequences on EOS or `max_tokens`.
