@@ -103,8 +103,13 @@ fn main() -> Result<()> {
         debug: cli.debug,
         epsilon: cli.epsilon,
     };
-    let mut report =
-        vllm_oxide_test::run_comparison(&golden_manifest, &fixture_dir, &cli.model_path, &canonical_prompts, &opts)?;
+    let mut report = vllm_oxide_test::run_comparison(
+        &golden_manifest,
+        &fixture_dir,
+        &cli.model_path,
+        &canonical_prompts,
+        &opts,
+    )?;
 
     report.manifest_path = cli
         .manifest
