@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 
 use crate::engine::kv_cache_manager::KvCacheManager;
-use crate::engine::sequence::{Sequence, SequenceGroup, SequenceStatus};
+use crate::engine::sequence::{Sequence, SequenceStatus};
 use crate::SamplingParams;
 
 /// Default `max_num_batched_tokens` — the maximum number of tokens the engine
@@ -53,8 +53,8 @@ pub struct ScheduleOutput {
 
 /// Token-level scheduler — the algorithmic heart of the engine.
 ///
-/// Maintains `waiting` / `running` deques of `SequenceGroup`s. One
-/// `schedule()` call produces either a pure-prefill or pure-decode step.
+/// Maintains `waiting` / `running` deques of `Sequence`s. One `schedule()`
+/// call produces either a pure-prefill or pure-decode step.
 /// `postprocess()` updates sequence state after the model forward pass
 /// and sampling, producing `RequestOutput`s for finished sequences.
 ///
@@ -63,8 +63,8 @@ pub struct ScheduleOutput {
 /// Scheduler talks to `KvCacheManager`, never to `BlockPool` or
 /// `PagedKVCache` directly (ADR-0004 seam).
 pub struct Scheduler {
-    waiting: VecDeque<SequenceGroup>,
-    running: VecDeque<SequenceGroup>,
+    waiting: VecDeque<Sequence>,
+    running: VecDeque<Sequence>,
     max_num_batched_tokens: usize,
     max_num_seqs: usize,
     /// Fraction of GPU memory reserved for the KV cache pool.
@@ -104,8 +104,8 @@ impl Scheduler {
         )
     }
 
-    /// Add a new inference request. Creates a `Sequence` wrapped in a 1:1
-    /// `SequenceGroup` (n>1 sampling deferred to v0.2).
+    /// Add a new inference request. Creates a `Sequence` directly
+    /// (the former 1:1 `SequenceGroup` wrapper has been absorbed).
     ///
     /// The new sequence starts in `Waiting` status.
     pub fn add_request(&mut self, prompt_token_ids: Vec<u32>, params: SamplingParams) {
@@ -114,9 +114,8 @@ impl Scheduler {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
 
-        let seq = Sequence::new(seq_id, prompt_token_ids, &params);
-        let group = SequenceGroup::new(request_id, seq);
-        self.waiting.push_back(group);
+        let seq = Sequence::new(request_id, seq_id, prompt_token_ids, &params);
+        self.waiting.push_back(seq);
     }
 
     /// The primary scheduling step. Returns a `ScheduleOutput` indicating
@@ -138,7 +137,7 @@ impl Scheduler {
 
         // Chunked prefill continuation: running sequences that still need
         // more prompt tokens before they can decode.
-        if self.running.iter().any(|g| g.seq().is_prefill) {
+        if self.running.iter().any(|s| s.is_prefill) {
             return self.schedule_prefill_continue();
         }
 
@@ -166,12 +165,11 @@ impl Scheduler {
 
         let mut finished_indices = Vec::new();
 
-        for (i, group) in self.running.iter_mut().enumerate() {
+        for (i, seq) in self.running.iter_mut().enumerate() {
             if i >= batch {
                 break;
             }
             let token_id = sampled_tokens[i];
-            let seq = group.seq_mut();
             let scheduled = seq.num_scheduled_tokens;
 
             seq.append_token(token_id);
@@ -199,7 +197,7 @@ impl Scheduler {
         }
 
         for &idx in finished_indices.iter().rev() {
-            let _ = kv_mgr.deallocate(self.running[idx].seq_mut());
+            let _ = kv_mgr.deallocate(&mut self.running[idx]);
             self.running.remove(idx);
         }
 
@@ -223,12 +221,12 @@ impl Scheduler {
 
     /// Iterator over running sequences (read-only). Used by EngineCore
     /// to build tensors for the forward pass.
-    pub fn running_seqs(&self) -> impl Iterator<Item = &SequenceGroup> {
+    pub fn running_seqs(&self) -> impl Iterator<Item = &Sequence> {
         self.running.iter()
     }
 
     /// Iterator over waiting sequences (read-only).
-    pub fn waiting_seqs(&self) -> impl Iterator<Item = &SequenceGroup> {
+    pub fn waiting_seqs(&self) -> impl Iterator<Item = &Sequence> {
         self.waiting.iter()
     }
 
@@ -241,7 +239,7 @@ impl Scheduler {
     /// (lowest priority). Recompute-only: deallocate blocks, requeue
     /// at the front of waiting.
     fn preempt_if_needed(&mut self, kv_mgr: &mut KvCacheManager) {
-        let needs_preemption = self.running.iter().any(|g| !kv_mgr.can_append(g.seq()));
+        let needs_preemption = self.running.iter().any(|s| !kv_mgr.can_append(s));
 
         if !needs_preemption {
             return;
@@ -251,14 +249,13 @@ impl Scheduler {
             // running is non-empty (loop guard); pop_back cannot return None
             #[allow(clippy::unwrap_used)]
             let mut victim = self.running.pop_back().unwrap();
-            let _ = kv_mgr.deallocate(victim.seq_mut());
-            let vseq = victim.seq_mut();
-            vseq.status = SequenceStatus::Waiting;
-            vseq.num_scheduled_tokens = 0;
+            let _ = kv_mgr.deallocate(&mut victim);
+            victim.status = SequenceStatus::Waiting;
+            victim.num_scheduled_tokens = 0;
             self.waiting.push_front(victim);
 
             // Re-check.
-            let still_needed = self.running.iter().any(|g| !kv_mgr.can_append(g.seq()));
+            let still_needed = self.running.iter().any(|s| !kv_mgr.can_append(s));
             if !still_needed {
                 break;
             }
@@ -267,9 +264,7 @@ impl Scheduler {
 
     /// Schedule a decode step: one token per running sequence.
     fn schedule_decode(&mut self, kv_mgr: &mut KvCacheManager) -> ScheduleOutput {
-        for group in self.running.iter_mut() {
-            let seq = group.seq_mut();
-
+        for seq in self.running.iter_mut() {
             if !kv_mgr.can_append(seq) {
                 seq.num_scheduled_tokens = 0;
                 continue;
@@ -282,13 +277,12 @@ impl Scheduler {
 
         let mut i = 0;
         while i < self.running.len() {
-            if self.running[i].seq().num_scheduled_tokens == 0 {
+            if self.running[i].num_scheduled_tokens == 0 {
                 // i is a valid index verified by the preceding access self.running[i]
                 #[allow(clippy::unwrap_used)]
                 let mut victim = self.running.remove(i).unwrap();
-                let _ = kv_mgr.deallocate(victim.seq_mut());
-                let vseq = victim.seq_mut();
-                vseq.status = SequenceStatus::Waiting;
+                let _ = kv_mgr.deallocate(&mut victim);
+                victim.status = SequenceStatus::Waiting;
                 self.waiting.push_front(victim);
             } else {
                 i += 1;
@@ -305,8 +299,7 @@ impl Scheduler {
     /// running sequences that still have `is_prefill` set.
     fn schedule_prefill_continue(&mut self) -> ScheduleOutput {
         let mut total_tokens = 0;
-        for group in self.running.iter_mut() {
-            let seq = group.seq_mut();
+        for seq in self.running.iter_mut() {
             if !seq.is_prefill {
                 seq.num_scheduled_tokens = 0;
                 continue;
@@ -354,8 +347,7 @@ impl Scheduler {
         let mut to_schedule: Vec<(usize, usize)> = Vec::new(); // (waiting_index, n_tokens)
 
         for i in 0..self.waiting.len().min(max_running) {
-            let group = &self.waiting[i];
-            let seq = group.seq();
+            let seq = &self.waiting[i];
 
             let remaining = seq.num_prompt_tokens.saturating_sub(seq.num_cached_tokens);
             if remaining == 0 {
@@ -391,21 +383,20 @@ impl Scheduler {
         for &(idx, n_tokens) in to_schedule.iter().rev() {
             // idx comes from valid indices into waiting (verified earlier in this fn)
             #[allow(clippy::unwrap_used)]
-            let mut group = self.waiting.remove(idx).unwrap();
-            let seq = group.seq_mut();
+            let mut seq = self.waiting.remove(idx).unwrap();
 
-            match kv_mgr.can_allocate(seq) {
+            match kv_mgr.can_allocate(&seq) {
                 Some(num_cached) => {
-                    let _ = kv_mgr.allocate(seq, num_cached);
+                    let _ = kv_mgr.allocate(&mut seq, num_cached);
                     seq.num_scheduled_tokens = n_tokens;
                     let fully_prefilled = seq.num_cached_tokens + n_tokens >= seq.num_prompt_tokens;
                     seq.is_prefill = !fully_prefilled;
                     seq.status = SequenceStatus::Running;
-                    self.running.push_back(group);
+                    self.running.push_back(seq);
                 }
                 None => {
                     seq.status = SequenceStatus::Waiting;
-                    self.waiting.push_front(group);
+                    self.waiting.push_front(seq);
                 }
             }
         }
@@ -494,8 +485,8 @@ mod tests {
             let mut s = make_scheduler();
             s.add_request(vec![1], make_params(16));
             s.add_request(vec![2], make_params(16));
-            assert_eq!(s.waiting[0].seq().seq_id, 0);
-            assert_eq!(s.waiting[1].seq().seq_id, 1);
+            assert_eq!(s.waiting[0].seq_id, 0);
+            assert_eq!(s.waiting[1].seq_id, 1);
             assert_eq!(s.waiting[0].request_id(), 0);
             assert_eq!(s.waiting[1].request_id(), 1);
         }
@@ -504,7 +495,7 @@ mod tests {
         fn sequence_starts_waiting() {
             let mut s = make_scheduler();
             s.add_request(vec![1, 2, 3], make_params(16));
-            assert_eq!(s.waiting[0].seq().status, SequenceStatus::Waiting);
+            assert_eq!(s.waiting[0].status, SequenceStatus::Waiting);
         }
     }
 
@@ -521,7 +512,7 @@ mod tests {
             assert_eq!(s.num_running(), 1);
             assert_eq!(s.num_waiting(), 0);
 
-            let seq = s.running[0].seq();
+            let seq = &s.running[0];
             assert!(
                 !seq.is_prefill,
                 "fully prefilled seq should have is_prefill=false"
@@ -537,7 +528,7 @@ mod tests {
             s.add_request((0..500u32).collect(), make_params(16));
             let output = s.schedule(&mut kv);
             assert_eq!(output.mode, ScheduleMode::Prefill);
-            let seq = s.running[0].seq();
+            let seq = &s.running[0];
             assert!(seq.is_prefill);
             // Should be chunked: budget is 100, so only 100 scheduled.
             assert_eq!(seq.num_scheduled_tokens, 100);
@@ -589,7 +580,7 @@ mod tests {
             // Next step should be decode.
             let output = s.schedule(&mut kv);
             assert_eq!(output.mode, ScheduleMode::Decode);
-            let seq = s.running[0].seq();
+            let seq = &s.running[0];
             assert!(!seq.is_prefill, "decode must set is_prefill=false");
             assert_eq!(seq.num_scheduled_tokens, 1);
         }
@@ -620,7 +611,7 @@ mod tests {
             s.schedule(&mut kv); // prefill
 
             let outputs = s.postprocess(&[42], &mut kv);
-            let seq = s.running[0].seq();
+            let seq = &s.running[0];
             assert_eq!(seq.num_cached_tokens, 3); // 3 prompt + 1 generated
             assert!(outputs.is_empty(), "not yet finished");
         }
@@ -686,7 +677,7 @@ mod tests {
             assert_eq!(kv.num_free_blocks(), 0);
 
             {
-                let seq = s.running[0].seq_mut();
+                let seq = &mut s.running[0];
                 while seq.num_tokens < BLOCK_SIZE + 1 {
                     seq.append_token(99);
                 }
@@ -732,7 +723,7 @@ mod tests {
             let mut kv = make_kv_mgr(100);
             s.add_request((0..200u32).collect(), make_params(16));
             s.schedule(&mut kv);
-            let tokens = s.running[0].seq().num_scheduled_tokens;
+            let tokens = s.running[0].num_scheduled_tokens;
             assert!(tokens <= 50, "must respect max_num_batched_tokens (50)");
         }
 

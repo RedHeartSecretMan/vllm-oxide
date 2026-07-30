@@ -178,6 +178,7 @@ mod tests {
     fn make_seq(token_ids: Vec<u32>) -> Sequence {
         Sequence::new(
             0,
+            0,
             token_ids,
             &crate::SamplingParams {
                 max_tokens: 64,

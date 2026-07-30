@@ -7,7 +7,7 @@
 //!
 //! # Current status
 //!
-//! - **T2/#20 (landed)**: `Sequence`, `SequenceGroup`, `SequenceStatus`,
+//! - **T2/#20 (landed)**: `Sequence`, `SequenceStatus`,
 //!   `Block`, `BlockPool`, `KVCacheManager` — the full data-model leaf below
 //!   the scheduler.
 //! - **T2/#21 (this)**: `EngineCore`, `Scheduler`, `RequestOutput` — the
@@ -35,7 +35,7 @@ use crate::SamplingParams;
 pub use block_pool::BlockPoolError;
 pub use kv_cache_manager::KvCacheManager;
 pub use scheduler::{RequestOutput, ScheduleMode, ScheduleOutput, Scheduler};
-pub use sequence::{Sequence, SequenceGroup, SequenceStatus};
+pub use sequence::{Sequence, SequenceStatus};
 
 /// In-process engine core — collapses V1/nano-vllm's `ModelRunner` (ADR-0004).
 ///
@@ -123,21 +123,18 @@ impl EngineCore {
         let params: Vec<SamplingParams> = self
             .scheduler
             .running_seqs()
-            .map(|g| {
-                let s = g.seq();
-                SamplingParams {
-                    temperature: s.temperature,
-                    max_tokens: s.max_tokens,
-                    ignore_eos: s.ignore_eos,
-                    ..SamplingParams::default()
-                }
+            .map(|s| SamplingParams {
+                temperature: s.temperature,
+                max_tokens: s.max_tokens,
+                ignore_eos: s.ignore_eos,
+                ..SamplingParams::default()
             })
             .collect();
 
         let token_histories: Vec<Vec<u32>> = self
             .scheduler
             .running_seqs()
-            .map(|g| g.seq().token_ids.clone())
+            .map(|s| s.token_ids.clone())
             .collect();
 
         let sampled = self.sampler.forward(logits, &params, &token_histories)?;
@@ -170,8 +167,7 @@ impl EngineCore {
         let mut kv_lengths: Vec<u32> = Vec::new();
 
         let mut cumsum = 0usize;
-        for group in self.scheduler.running_seqs() {
-            let seq = group.seq();
+        for seq in self.scheduler.running_seqs() {
             let n = seq.num_scheduled_tokens;
             let start = seq.num_cached_tokens.saturating_sub(n);
 
@@ -245,9 +241,7 @@ impl EngineCore {
         let mut slot_mapping: Vec<i64> = Vec::new();
         let mut block_tables: Vec<Vec<i32>> = Vec::new();
 
-        for group in self.scheduler.running_seqs() {
-            let seq = group.seq();
-
+        for seq in self.scheduler.running_seqs() {
             last_tokens.push(seq.last_token);
             // decode position ≤ max_model_len ≪ u32::MAX
             #[allow(clippy::cast_possible_truncation)]

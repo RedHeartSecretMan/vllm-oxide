@@ -20,13 +20,14 @@ pub use attention::{
     build_decode_metadata, build_prefill_metadata, AttentionContext, AttnMetadata, PagedKVCache,
 };
 
-// T2/#20 — engine data model: Sequence/SequenceGroup, BlockPool, KVCacheManager.
+// T2/#20 — engine data model: Sequence (carries its own request_id), BlockPool,
+// KVCacheManager. The former 1:1 SequenceGroup wrapper has been absorbed.
 // T2/#21 — Scheduler + EngineCore: the live control loop.
 // The scheduler imports only KvCacheManager (and Sequence) — never BlockPool
 // or PagedKVCache directly (ADR-0004 seam contract).
 pub use engine::{
     BlockPoolError, EngineCore, KvCacheManager, RequestOutput, ScheduleMode, ScheduleOutput,
-    Scheduler, Sequence, SequenceGroup, SequenceStatus,
+    Scheduler, Sequence, SequenceStatus,
 };
 
 // T15 — weight loader + config (ADR-0002). Loader is model-agnostic: returns

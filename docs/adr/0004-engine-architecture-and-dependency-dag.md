@@ -49,8 +49,10 @@ performs the full loop in one method: scheduler → tensor prep →
 
 - **M1**: `SamplingParams` lives in `sampler.rs` (not `engine/`) so it can be
   re-exported at the crate root without pulling in the engine.
-- **M2**: `Sequence`, `SequenceGroup`, `SequenceStatus` are the V1 data-model
-  leaf — the scheduler's working set.
+- **M2**: `Sequence` (carrying its own `request_id`) is the V1 data-model leaf —
+  the scheduler's working set. The former 1:1 `SequenceGroup` wrapper was
+  absorbed because it added delegation without depth; n>1 sampling (v0.2) will
+  reintroduce grouping deliberately if/when the capability exists.
 - **M3**: `KvCacheManager` is a deliberate information-hiding adapter
   (structural seam, not computational module). Its 6 delegations + 1
   bridge method are the intended final shape. Thinness is the design,

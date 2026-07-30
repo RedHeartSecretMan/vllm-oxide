@@ -1,6 +1,6 @@
 use vllm_oxide::{
     default_dtype_from_config_json, is_offline_value, kv_cache_layout_shape, round_up,
-    EngineOptions, Prompt, SamplingParams, Sequence, SequenceGroup, Source,
+    EngineOptions, Prompt, SamplingParams, Sequence, Source,
 };
 
 fn greedy_params() -> SamplingParams {
@@ -49,13 +49,13 @@ fn default_engine_options_match_spec() {
 
 #[test]
 fn new_sequence_is_not_finished() {
-    let seq = Sequence::new(0, vec![1, 2, 3], &greedy_params());
+    let seq = Sequence::new(0, 0, vec![1, 2, 3], &greedy_params());
     assert!(!seq.is_finished());
 }
 
 #[test]
 fn sequence_num_completion_tokens_after_append() {
-    let mut seq = Sequence::new(0, vec![10, 20, 30], &greedy_params());
+    let mut seq = Sequence::new(0, 0, vec![10, 20, 30], &greedy_params());
     assert_eq!(seq.num_completion_tokens(), 0);
     seq.append_token(42);
     assert_eq!(seq.num_completion_tokens(), 1);
@@ -65,7 +65,7 @@ fn sequence_num_completion_tokens_after_append() {
 
 #[test]
 fn sequence_prompt_and_completion_partitioning() {
-    let mut seq = Sequence::new(0, vec![100, 200, 300], &greedy_params());
+    let mut seq = Sequence::new(0, 0, vec![100, 200, 300], &greedy_params());
     assert_eq!(seq.prompt_token_ids(), &[100, 200, 300]);
     assert!(seq.completion_token_ids().is_empty());
     seq.append_token(400);
@@ -77,30 +77,22 @@ fn sequence_prompt_and_completion_partitioning() {
 #[test]
 fn sequence_num_blocks_rounds_up() {
     let tokens: Vec<u32> = (0..257).collect();
-    let seq = Sequence::new(0, tokens, &greedy_params());
+    let seq = Sequence::new(0, 0, tokens, &greedy_params());
     assert_eq!(seq.num_blocks(), 2);
 }
 
 #[test]
 fn sequence_block_slicing() {
     let tokens: Vec<u32> = (0..300).collect();
-    let seq = Sequence::new(0, tokens, &greedy_params());
+    let seq = Sequence::new(0, 0, tokens, &greedy_params());
     assert_eq!(seq.block(0).len(), 256);
     assert_eq!(seq.block(1).len(), 44);
 }
 
 #[test]
-fn sequence_group_request_id() {
-    let seq = Sequence::new(0, vec![1], &greedy_params());
-    let group = SequenceGroup::new(42, seq);
-    assert_eq!(group.request_id(), 42);
-}
-
-#[test]
-fn sequence_group_delegates_is_finished() {
-    let seq = Sequence::new(0, vec![1], &greedy_params());
-    let group = SequenceGroup::new(0, seq);
-    assert!(!group.is_finished());
+fn sequence_request_id() {
+    let seq = Sequence::new(42, 0, vec![1], &greedy_params());
+    assert_eq!(seq.request_id(), 42);
 }
 
 #[test]
