@@ -54,9 +54,9 @@ _Avoid_: KV cache adapter, block-to-slot mapper.
 Token-level scheduling with `waiting`/`running` deques. One `schedule()` step is either pure-prefill or pure-decode. Chunked prefill applies only to the first sequence in a step. Preemption is recompute-only (deallocate + requeue front of `waiting`). `postprocess()` updates block hashes, advances `num_cached_tokens`, and finalises sequences on EOS or `max_tokens`.
 _Avoid_: batch scheduler, request scheduler.
 
-**Sequence / SequenceGroup**:
-V1 data model for tracking individual requests. `SequenceStatus { Waiting, Running, Finished }`. Per-sequence: `block_table`, `num_tokens`, `num_cached_tokens`, `num_scheduled_tokens`, `is_prefill`, `last_token`, plus attached sampling scalars. `SequenceGroup` is a thin 1:1 wrapper (n>1 sampling deferred to v0.2).
-_Avoid_: request, prompt context, generation state.
+**Sequence**:
+V1 data-model leaf tracking one request; carries `request_id`, `seq_id`, `block_table`, `num_tokens`, `num_cached_tokens`, `num_scheduled_tokens`, `is_prefill`, `last_token`, plus attached sampling scalars. `SequenceStatus { Waiting, Running, Finished }`. The former 1:1 `SequenceGroup` wrapper was absorbed (n>1 sampling deferred to v0.2 will reintroduce grouping deliberately).
+_Avoid_: SequenceGroup (absorbed), request wrapper.
 
 **PagedKVCache**:
 The physical GPU buffer shaped `[2, num_layers, num_blocks, 256, num_kv_heads, head_dim]`. Held as `Arc<Mutex<PagedKVCache>>` and shared between `EngineCore` and every attention layer. `reshape_and_cache` writes per-step K/V into the paged cache.

@@ -1,9 +1,10 @@
-//! V1 sequence data model — `Sequence`, `SequenceGroup`, `SequenceStatus` (ADR-0004 M2).
+//! V1 sequence data model — `Sequence`, `SequenceStatus` (ADR-0004 M2).
 //!
 //! Mirrors `nano-vllm/nanovllm/engine/sequence.py` field-for-field, but with
-//! `seq_id` as a constructor parameter (no global `itertools.count()`) and
-//! the V1 three-layer split where `SequenceGroup` is a thin 1:1 wrapper
-//! (n>1 sampling deferred to v0.2).
+//! `seq_id` and `request_id` as constructor parameters (no global counters).
+//! The former 1:1 `SequenceGroup` wrapper has been absorbed into `Sequence`
+//! itself — it added delegation without depth (n>1 sampling, deferred to v0.2,
+//! will reintroduce grouping deliberately).
 //!
 //! # V1 three-layer split (ADR-0004)
 //!
@@ -42,6 +43,7 @@ pub enum SequenceStatus {
 /// block may be partial (fewer than `BLOCK_SIZE` tokens).
 #[derive(Debug, Clone)]
 pub struct Sequence {
+    pub(crate) request_id: usize,
     pub(crate) seq_id: usize,
     pub(crate) status: SequenceStatus,
     pub(crate) token_ids: Vec<u32>,
@@ -61,13 +63,20 @@ pub struct Sequence {
 impl Sequence {
     /// Construct a new sequence in `Waiting` status.
     ///
-    /// `seq_id` is caller-provided (EngineCore/Scheduler owns the counter in
-    /// #21). Sampling scalars are read from `params` so the engine loop
-    /// can access them without a `SamplingParams` ref.
-    pub fn new(seq_id: usize, token_ids: Vec<u32>, params: &SamplingParams) -> Self {
+    /// `request_id` identifies the logical inference request; `seq_id` is the
+    /// unique sequence counter (EngineCore/Scheduler owns both counters).
+    /// Sampling scalars are read from `params` so the engine loop can access
+    /// them without a `SamplingParams` ref.
+    pub fn new(
+        request_id: usize,
+        seq_id: usize,
+        token_ids: Vec<u32>,
+        params: &SamplingParams,
+    ) -> Self {
         let num_tokens = token_ids.len();
         let last_token = *token_ids.last().unwrap_or(&0);
         Self {
+            request_id,
             seq_id,
             status: SequenceStatus::Waiting,
             token_ids,
@@ -133,6 +142,11 @@ impl Sequence {
         self.status == SequenceStatus::Finished
     }
 
+    /// The logical request id that this sequence belongs to.
+    pub fn request_id(&self) -> usize {
+        self.request_id
+    }
+
     /// Number of completion tokens generated so far (total − prompt).
     pub fn num_completion_tokens(&self) -> usize {
         self.num_tokens - self.num_prompt_tokens
@@ -146,50 +160,6 @@ impl Sequence {
     /// Completion (generated) portion of `token_ids`.
     pub fn completion_token_ids(&self) -> &[u32] {
         &self.token_ids[self.num_prompt_tokens..]
-    }
-}
-
-/// Thin 1:1 wrapper over a single `Sequence` sharing a `request_id`.
-///
-/// V1 parity: `SequenceGroup` groups one or more `Sequence`s that share a
-/// logical request. v0.1 uses 1:1 (one group, one sequence) — n>1 sampling
-/// (beam search / best-of / parallel sampling) is deferred to v0.2.
-///
-/// # v0.2 migration
-///
-/// When n>1 lands, this struct will hold `Vec<Sequence>` (or similar). The
-/// accessor methods [`seq`], [`seq_mut`], and [`is_finished`] will operate on
-/// the primary sequence (index 0). Callers should not rely on the 1:1 shape.
-#[derive(Debug, Clone)]
-pub struct SequenceGroup {
-    request_id: usize,
-    seq: Sequence,
-}
-
-impl SequenceGroup {
-    /// Create a 1:1 group wrapping one sequence.
-    pub fn new(request_id: usize, seq: Sequence) -> Self {
-        Self { request_id, seq }
-    }
-
-    /// Immutable access to the inner sequence.
-    pub fn seq(&self) -> &Sequence {
-        &self.seq
-    }
-
-    /// Mutable access to the inner sequence.
-    pub fn seq_mut(&mut self) -> &mut Sequence {
-        &mut self.seq
-    }
-
-    /// The logical request id shared across all sequences in this group.
-    pub fn request_id(&self) -> usize {
-        self.request_id
-    }
-
-    /// Delegates to the inner sequence's `is_finished()`.
-    pub fn is_finished(&self) -> bool {
-        self.seq.is_finished()
     }
 }
 
@@ -207,7 +177,25 @@ mod tests {
     }
 
     fn make_seq(token_ids: Vec<u32>) -> Sequence {
-        Sequence::new(0, token_ids, &greedy_params())
+        Sequence::new(42, 0, token_ids, &greedy_params())
+    }
+
+    mod request_id {
+        use super::*;
+
+        #[test]
+        fn new_sequence_has_request_id() {
+            let s = Sequence::new(99, 0, vec![1, 2, 3], &greedy_params());
+            assert_eq!(s.request_id(), 99);
+        }
+
+        #[test]
+        fn different_sequence_keeps_different_id() {
+            let s1 = Sequence::new(1, 0, vec![1], &greedy_params());
+            let s2 = Sequence::new(2, 0, vec![2], &greedy_params());
+            assert_eq!(s1.request_id(), 1);
+            assert_eq!(s2.request_id(), 2);
+        }
     }
 
     mod status_transitions {
@@ -396,35 +384,6 @@ mod tests {
             assert_eq!(s.num_completion_tokens(), 2);
             assert_eq!(s.prompt_token_ids(), &[100, 200, 300]);
             assert_eq!(s.completion_token_ids(), &[400, 500]);
-        }
-    }
-
-    mod group {
-        use super::*;
-
-        #[test]
-        fn group_new_and_accessors() {
-            let seq = make_seq(vec![1, 2, 3]);
-            let group = SequenceGroup::new(42, seq);
-            assert_eq!(group.request_id(), 42);
-            assert_eq!(group.seq().seq_id, 0);
-        }
-
-        #[test]
-        fn group_is_finished_delegates_to_seq() {
-            let seq = make_seq(vec![1]);
-            let mut group = SequenceGroup::new(0, seq);
-            assert!(!group.is_finished());
-            group.seq_mut().status = SequenceStatus::Finished;
-            assert!(group.is_finished());
-        }
-
-        #[test]
-        fn group_seq_mut_allows_mutation() {
-            let seq = make_seq(vec![1, 2]);
-            let mut group = SequenceGroup::new(0, seq);
-            group.seq_mut().append_token(42);
-            assert_eq!(group.seq().num_tokens, 3);
         }
     }
 }
