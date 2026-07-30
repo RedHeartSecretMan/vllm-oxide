@@ -74,7 +74,10 @@ pub fn run_comparison(
             PromptCategory::Regression => "L1",
         };
         tracing::info!("[{}/{}] loading engine", meta.prompt_id, layer_label);
-        let mut llm = LLM::new(Source::Local(model_path.to_path_buf()), EngineOptions::default())?;
+        let mut llm = LLM::new(
+            Source::Local(model_path.to_path_buf()),
+            EngineOptions::default(),
+        )?;
 
         let logits = match llm.generate_logits(&prompt, max_tokens) {
             Ok(t) => t,
@@ -112,8 +115,12 @@ pub fn run_comparison(
 
                 if !opts.l1_only {
                     // ADR-0005: L2 uses same-prefix comparison (skips divergent steps)
-                    let l2_result =
-                        compare_l2(&fixture, &logits_vals, &generated_tokens, &manifest.tolerance)?;
+                    let l2_result = compare_l2(
+                        &fixture,
+                        &logits_vals,
+                        &generated_tokens,
+                        &manifest.tolerance,
+                    )?;
                     report.l2_results.push(l2_result);
                 }
 
