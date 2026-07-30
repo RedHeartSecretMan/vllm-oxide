@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::attention::AttentionContext;
 use crate::config::Source;
 
-use super::CausalLM;
+use crate::causal_lm::CausalLM;
 
 pub type ModelFactory = fn(
     config_json: &[u8],

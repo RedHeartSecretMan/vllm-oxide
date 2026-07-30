@@ -25,7 +25,7 @@ An attention computation that reads K/V from a paged block cache (fixed-size blo
 _Avoid_: paged KV cache attention, block attention.
 
 **CausalLM (trait)**:
-The engine-facing model contract in v0.1 — `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits` + `vocab_size()` + `device()`. Returned by the registry as `Box<dyn CausalLM>`; EngineCore holds one stable type regardless of architecture. `forward` returns hidden_states (not logits) so prefill can skip lm_head projection on non-last tokens; `compute_logits` is called separately when sampling. v0.2 adds new tasks via new independent traits (`SequenceClassifier`, `Embedder`), not by overloading `CausalLM`.
+The engine-facing model contract in v0.1 — `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits` + `vocab_size()` + `device()`. Defined in neutral `src/causal_lm.rs` (outside `models/`) so that `engine/` and `models/` can both depend on it without either depending on the other. Returned by the registry as `Box<dyn CausalLM>`; EngineCore holds one stable type regardless of architecture. `forward` returns hidden_states (not logits) so prefill can skip lm_head projection on non-last tokens; `compute_logits` is called separately when sampling. v0.2 adds new tasks via new independent traits (`SequenceClassifier`, `Embedder`), not by overloading `CausalLM`.
 _Avoid_: model interface, Model trait, CausalLM struct.
 
 **Model registry (inventory)**:

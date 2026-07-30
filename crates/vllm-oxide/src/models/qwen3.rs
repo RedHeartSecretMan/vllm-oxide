@@ -17,7 +17,7 @@ use crate::layers::rope::RotaryEmbedding;
 use crate::loader::load_weights_vb;
 
 use super::registry::{BuiltModel, ModelEntry};
-use super::CausalLM;
+use crate::causal_lm::CausalLM;
 
 fn default_rope_theta() -> f32 {
     1_000_000.0

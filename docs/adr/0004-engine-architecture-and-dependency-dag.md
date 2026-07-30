@@ -13,14 +13,17 @@ llm  (composition root — owns everything)
  ├── sampler       (SamplingParams, Sampler)
  ├── config        (Source, dtype resolution, HF_HUB_OFFLINE shim)
  ├── loader        (weight loading — depends on config)
- └── layers        (Linear, RMSNorm, RoPE, activations, parallel — leaf)
+ ├── layers        (Linear, RMSNorm, RoPE, activations, parallel — leaf)
+ └── causal_lm     (CausalLM trait — neutral contract; depends on candle_core)
 ```
 
 **Rules**:
-- `layers/`, `attention/`, `loader/`, `sampler/` are leaves: no internal deps.
-- `models/` depends on `layers/` + `attention/` + `loader/`.
+- `layers/`, `attention/`, `loader/`, `sampler/`, `causal_lm.rs` are leaves: no
+  internal deps.
+- `models/` depends on `layers/` + `attention/` + `loader/` and implements
+  the `CausalLM` trait from the neutral `causal_lm.rs` contract.
 - `engine/` does NOT depend on `models/` — it receives `Box<dyn CausalLM>` from
-  the composition root.
+  the composition root and depends on the neutral `causal_lm.rs` contract instead.
 - `llm.rs` is the ONLY composition root that wires everything.
 - The potential `engine ↔ attention` cycle is broken: engine holds
   `Arc<Mutex<PagedKVCache>>` and builds `AttnMetadata` from its own scheduler
