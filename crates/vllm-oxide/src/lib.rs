@@ -38,10 +38,8 @@ pub use config::{
 };
 pub use loader::{load_weights, load_weights_vb};
 
-pub use models::{
-    registry::{build as build_model, BuiltModel, ModelEntry},
-    CausalLM,
-};
+pub use causal_lm::CausalLM;
+pub use models::registry::{build as build_model, BuiltModel, ModelEntry};
 
 pub use llm::{EngineOptions, Prompt, LLM};
 
@@ -51,6 +49,7 @@ pub use llm::{EngineOptions, Prompt, LLM};
 // layers + attention + loader; engine does not depend on models; llm is
 // the only composition root.
 pub(crate) mod attention;
+pub(crate) mod causal_lm;
 pub(crate) mod config;
 pub(crate) mod engine;
 pub(crate) mod layers;

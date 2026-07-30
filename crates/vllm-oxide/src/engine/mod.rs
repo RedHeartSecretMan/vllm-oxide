@@ -28,7 +28,7 @@ pub mod sequence;
 use candle_core::{DType, Device, Result, Tensor};
 
 use crate::attention::{build_decode_metadata, build_prefill_metadata, AttentionContext};
-use crate::models::CausalLM;
+use crate::causal_lm::CausalLM;
 use crate::Sampler;
 use crate::SamplingParams;
 
