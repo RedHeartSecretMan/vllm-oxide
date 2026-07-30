@@ -114,9 +114,11 @@ pub struct FixtureData {
 }
 
 impl FixtureData {
-    pub fn model_vocab_size(&self) -> usize {
+    pub fn model_vocab_size(&self, logits: &[f32]) -> usize {
         if self.logits_shape.1 > 0 {
             self.logits_shape.1
+        } else if self.logits_shape.0 > 0 && !logits.is_empty() {
+            logits.len() / self.logits_shape.0
         } else {
             0
         }

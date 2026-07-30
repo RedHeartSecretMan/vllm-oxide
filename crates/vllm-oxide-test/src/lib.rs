@@ -12,6 +12,7 @@
 //! does NOT imply numerical validation — see README.
 
 pub mod download;
+pub mod driver;
 pub mod l1;
 pub mod l2;
 pub mod l3;
@@ -21,6 +22,7 @@ pub mod report;
 pub mod types;
 
 pub use download::{download_release, load_from_dir};
+pub use driver::{run_comparison, DriverOptions};
 pub use l1::{compare_l1, compare_l1_regression, L1Result};
 pub use l2::{compare_l2, L2Result};
 pub use l3::{compare_l3, L3Result};

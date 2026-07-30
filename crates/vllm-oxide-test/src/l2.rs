@@ -1,5 +1,4 @@
 use anyhow::Result;
-use candle_core::{DType, Tensor};
 
 use crate::types::{FixtureData, ToleranceCalibration};
 
@@ -30,7 +29,7 @@ pub struct L2Result {
 ///   `|actual - expected| <= atol`
 pub fn compare_l2(
     fixture: &FixtureData,
-    generated_logits: &Tensor,
+    generated_logits: &[f32],
     generated_tokens: &[u32],
     tolerance: &ToleranceCalibration,
 ) -> Result<L2Result> {
@@ -39,10 +38,7 @@ pub fn compare_l2(
     };
 
     let n_steps = fixture.num_tokens as usize;
-    let vocab_size = fixture.model_vocab_size();
-
-    let gen_f32 = generated_logits.to_dtype(DType::F32)?.flatten_all()?;
-    let gen_vals = gen_f32.to_vec1::<f32>()?;
+    let vocab_size = fixture.model_vocab_size(generated_logits);
 
     let min_steps = n_steps
         .min(generated_tokens.len())
@@ -70,7 +66,7 @@ pub fn compare_l2(
         let expected_slice = &logits_flat[start..end];
 
         for (j, &expected) in expected_slice.iter().enumerate() {
-            let actual = gen_vals[start + j] as f64;
+            let actual = generated_logits[start + j] as f64;
             let expected_f = expected as f64;
             let abs_diff = (actual - expected_f).abs();
 
@@ -127,11 +123,10 @@ mod tests {
         };
 
         let gen_vals = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let gen = Tensor::from_vec(gen_vals, (2, 3), &candle_core::Device::Cpu).unwrap();
         let generated_tokens: Vec<u32> = vec![1, 2];
         let tol = make_tolerance();
 
-        let result = compare_l2(&fixture, &gen, &generated_tokens, &tol).unwrap();
+        let result = compare_l2(&fixture, &gen_vals, &generated_tokens, &tol).unwrap();
         assert!(result.passed);
         assert_eq!(result.elements_exceeding_tol, 0);
         assert_eq!(result.same_token_steps, 2);
@@ -153,13 +148,12 @@ mod tests {
             top5_logits: None,
         };
 
-        // Second value differs by 1.0 — well beyond atol=1e-5.
-        let gen =
-            Tensor::from_vec(vec![1.0f32, 3.1, 3.0], (1, 3), &candle_core::Device::Cpu).unwrap();
+        // Second value differs by 1.1 — well beyond atol=1e-5.
+        let gen_vals = vec![1.0f32, 3.1, 3.0];
         let generated_tokens: Vec<u32> = vec![42];
         let tol = make_tolerance();
 
-        let result = compare_l2(&fixture, &gen, &generated_tokens, &tol).unwrap();
+        let result = compare_l2(&fixture, &gen_vals, &generated_tokens, &tol).unwrap();
         assert!(!result.passed);
         assert!(result.elements_exceeding_tol > 0);
     }
@@ -184,10 +178,9 @@ mod tests {
         // a diff of 0.001 exceeds atol=1e-5, so the test should NOT pass.
         // We keep it as a demonstration of atol-only strictness.
         let tol = make_tolerance();
-        let gen =
-            Tensor::from_vec(vec![100.001f32, 50.0], (1, 2), &candle_core::Device::Cpu).unwrap();
+        let gen_vals = vec![100.001f32, 50.0];
         let generated_tokens: Vec<u32> = vec![7];
-        let result = compare_l2(&fixture, &gen, &generated_tokens, &tol).unwrap();
+        let result = compare_l2(&fixture, &gen_vals, &generated_tokens, &tol).unwrap();
         // 0.001 > 1e-5 → does NOT pass under atol-only
         assert!(!result.passed);
     }
@@ -210,16 +203,11 @@ mod tests {
         // Step 0: token matches (golden=1, gen=1) → compared
         // Step 1: token mismatch (golden=99, gen=2) → skipped
         // Step 2: token matches (golden=3, gen=3) → compared
-        let gen = Tensor::from_vec(
-            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-            (3, 3),
-            &candle_core::Device::Cpu,
-        )
-        .unwrap();
+        let gen_vals = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let generated_tokens: Vec<u32> = vec![1, 2, 3];
         let tol = make_tolerance();
 
-        let result = compare_l2(&fixture, &gen, &generated_tokens, &tol).unwrap();
+        let result = compare_l2(&fixture, &gen_vals, &generated_tokens, &tol).unwrap();
         assert!(result.passed);
         assert_eq!(result.same_token_steps, 2);
         assert_eq!(result.diff_token_steps, 1);
