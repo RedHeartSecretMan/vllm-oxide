@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "3db2d0d871594882fa3c68fb6db891c67303fbfd"
+      "blob_oid": "55ed88582e816cf4bb1327970daff0e4ce8708d1"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -23,7 +23,7 @@
     },
     {
       "path": "docs/adr/0004-engine-architecture-and-dependency-dag.md",
-      "blob_oid": "4d363f8606cbe347ae7ba25dfbd55ea36a3f5263"
+      "blob_oid": "aa44fb1d11945a27573383cee0752267cb674d3c"
     },
     {
       "path": "docs/adr/0005-golden-generation-correctness-strategy.md",
@@ -36,6 +36,10 @@
     {
       "path": "docs/adr/0007-resolved-model-identity-seam.md",
       "blob_oid": "15ab419be763d066146c959ea6c677506403165c"
+    },
+    {
+      "path": "docs/adr/0008-request-identity-and-output-order.md",
+      "blob_oid": "b5d5fa0227bb90fcded1e5a226efa35616bfb420"
     }
   ]
 }

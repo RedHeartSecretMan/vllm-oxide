@@ -83,6 +83,10 @@ _Avoid_: postprocess output, step output.
 The scheduler-owned lifecycle state for one request. Multi-candidate (`n > 1`) sampling remains deferred beyond v0.2.0 and would reintroduce grouping only when that capability exists.
 _Avoid_: SequenceGroup (absorbed), request wrapper.
 
+**Request identity**:
+The stable public identifier assigned to one accepted prompt. It is independent of both the scheduler's internal sequence identity and the prompt's position in one input batch.
+_Avoid_: sequence id, batch index.
+
 **PagedKVCache**:
 The physical GPU buffer shaped `[2, num_layers, num_blocks, 256, num_kv_heads, head_dim]`. Held as `Arc<Mutex<PagedKVCache>>` and shared between `EngineCore` and every attention layer. `reshape_and_cache` writes per-step K/V into the paged cache.
 _Avoid_: block cache buffer, GPU cache pool.
@@ -106,7 +110,7 @@ Input enum: `Text(String)` for natural-language prompts, `TokenIds(Vec<u32>)` fo
 _Avoid_: input, query, user message.
 
 **RequestOutput**:
-Per-request result: `{ seq_id: usize, text: String, token_ids: Vec<u32>, finished: bool }`. Both decoded text and raw token IDs are always provided so callers can post-process tokens without re-tokenizing; `finished` reports whether the sequence reached a stop condition (EOS or `max_tokens`).
+Per-request result: `{ request_id: usize, text: String, token_ids: Vec<u32>, finished: bool }`. The enclosing result vector preserves input-prompt order, while `request_id` remains stable independently of that call-local position.
 _Avoid_: generation result, completion output.
 
 **SamplingParams**:

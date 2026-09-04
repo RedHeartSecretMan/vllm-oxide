@@ -41,6 +41,11 @@ currently semver-visible registry factory may remain reachable through
 construction constraint, not part of the supported composition-root API
 (ADR-0007).
 
+`RequestOutput` exposes a public request identity rather than the scheduler's
+internal sequence identity. `LLM::generate` returns outputs in input-prompt
+order, so batch position is represented by the result vector and not by another
+public identifier (ADR-0008).
+
 ## EngineCore coordination seam
 
 **Decision**: v0.1 collapsed V1/nano-vllm's `ModelRunner` into
