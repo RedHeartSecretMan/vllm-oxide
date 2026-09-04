@@ -1,7 +1,12 @@
 use vllm_oxide::{
-    default_dtype_from_config_json, is_offline_value, kv_cache_layout_shape, round_up,
-    EngineOptions, Prompt, SamplingParams, Sequence, Source,
+    build_prefill_metadata, default_dtype_from_config_json, is_offline_value,
+    kv_cache_layout_shape, round_up, AttentionContext, EngineOptions, PagedKVCache, Prompt,
+    SamplingParams, Sequence, Source,
 };
+
+use std::sync::{Arc, Mutex};
+
+use candle_core::{DType, Device};
 
 fn greedy_params() -> SamplingParams {
     SamplingParams {
@@ -184,4 +189,22 @@ fn kv_cache_layout_shape_dimensions() {
     assert_eq!(shape[3], 256);
     assert_eq!(shape[4], 8);
     assert_eq!(shape[5], 128);
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn attention_context_remains_constructible_through_its_public_fields() {
+    let device = Device::Cpu;
+    let paged_kv = Arc::new(Mutex::new(
+        PagedKVCache::new(1, 2, 256, 1, 8, DType::F32, &device).unwrap(),
+    ));
+    let logical = build_prefill_metadata(&[1], &[1], &[0]);
+
+    let context = AttentionContext {
+        paged_kv: paged_kv.clone(),
+        attn_meta: Arc::new(Mutex::new(logical.clone())),
+    };
+
+    assert!(Arc::ptr_eq(&context.paged_kv, &paged_kv));
+    assert_eq!(*context.attn_meta.lock().unwrap(), logical);
 }

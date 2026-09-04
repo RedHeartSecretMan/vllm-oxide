@@ -10,8 +10,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 
 use crate::attention::{
-    build_decode_metadata, build_prefill_metadata, AttentionContext, PagedKVCache,
-    PagedKVCacheGeometry,
+    build_decode_metadata, build_prefill_metadata, AttentionContext, AttentionEpoch, AttnMetadata,
+    PagedKVCache, PagedKVCacheGeometry,
 };
 use crate::causal_lm::CausalLM;
 
@@ -252,72 +252,95 @@ pub(super) fn warmup_model(
         build_prefill_metadata(&[warmup_tokens_u32], &[warmup_tokens_u32], &slot_mapping);
     let decode_meta =
         build_decode_metadata(&[context_tokens_u32], &[decode_blocks], &[decode_slot]);
-    let previous_meta = {
-        let mut metadata = attn_ctx
-            .attn_meta
-            .lock()
-            .map_err(|error| anyhow!("attn_meta lock: {error}"))?;
-        std::mem::replace(&mut *metadata, warmup_meta)
-    };
+    let previous_meta = attn_ctx
+        .attn_meta
+        .lock()
+        .map_err(|error| anyhow!("attention logical metadata lock: {error}"))?
+        .clone();
 
     let warmup_result = (|| -> Result<()> {
-        let mut execute_step =
-            |phase: &str, input_ids: &Tensor, positions: &Tensor| -> Result<()> {
-                let expected_rows = input_ids.dim(0)?;
-                let hidden = model
-                    .forward(input_ids, positions)
-                    .with_context(|| format!("warmup {phase} model forward"))?;
-                if hidden.dim(0)? != expected_rows {
-                    bail!(
-                        "warmup {phase} shape contract failed: expected {expected_rows} hidden \
+        let mut execute_step = |phase: &str,
+                                epoch: AttentionEpoch,
+                                metadata: AttnMetadata,
+                                input_ids: &Tensor,
+                                positions: &Tensor|
+         -> Result<()> {
+            let attention_step = attn_ctx
+                .prepare(epoch, metadata, device)
+                .with_context(|| format!("preparing warmup {phase} attention metadata"))?;
+            let attention_consumer = attn_ctx
+                .bind_consumer(epoch)
+                .with_context(|| format!("binding warmup {phase} attention consumer"))?;
+            let expected_rows = input_ids.dim(0)?;
+            let hidden = model
+                .forward(input_ids, positions)
+                .with_context(|| format!("warmup {phase} model forward"))?;
+            if hidden.dim(0)? != expected_rows {
+                bail!(
+                    "warmup {phase} shape contract failed: expected {expected_rows} hidden \
                          rows, got {}",
-                        hidden.dim(0)?
-                    );
-                }
-                if hidden.dtype() != cache_dtype {
-                    bail!(
-                        "warmup {phase} dtype contract failed: model produced {:?}, KV cache uses \
+                    hidden.dim(0)?
+                );
+            }
+            if hidden.dtype() != cache_dtype {
+                bail!(
+                    "warmup {phase} dtype contract failed: model produced {:?}, KV cache uses \
                          {cache_dtype:?}",
-                        hidden.dtype()
-                    );
-                }
-                let final_hidden = hidden.get(expected_rows - 1)?.unsqueeze(0)?;
-                let logits = model
-                    .compute_logits(&final_hidden)
-                    .with_context(|| format!("warmup {phase} logits projection"))?;
-                if logits.dims() != [1, model.vocab_size()] {
-                    bail!(
-                        "warmup {phase} logits shape contract failed: expected [1, {}], got {:?}",
-                        model.vocab_size(),
-                        logits.dims()
-                    );
-                }
-                Ok(())
-            };
+                    hidden.dtype()
+                );
+            }
+            let final_hidden = hidden.get(expected_rows - 1)?.unsqueeze(0)?;
+            let logits = model
+                .compute_logits(&final_hidden)
+                .with_context(|| format!("warmup {phase} logits projection"))?;
+            if logits.dims() != [1, model.vocab_size()] {
+                bail!(
+                    "warmup {phase} logits shape contract failed: expected [1, {}], got {:?}",
+                    model.vocab_size(),
+                    logits.dims()
+                );
+            }
+            attention_consumer
+                .finish()
+                .with_context(|| format!("releasing warmup {phase} attention consumer"))?;
+            attention_step
+                .finish()
+                .with_context(|| format!("releasing warmup {phase} attention metadata"))?;
+            Ok(())
+        };
 
-        execute_step("prefill", &input_ids, &positions)?;
-        {
-            let mut metadata = attn_ctx
-                .attn_meta
-                .lock()
-                .map_err(|error| anyhow!("attn_meta lock for warmup decode: {error}"))?;
-            *metadata = decode_meta;
-        }
-        execute_step("decode", &decode_input_ids, &decode_positions)?;
+        execute_step(
+            "prefill",
+            AttentionEpoch::WarmupPrefill,
+            warmup_meta,
+            &input_ids,
+            &positions,
+        )?;
+        execute_step(
+            "decode",
+            AttentionEpoch::WarmupDecode,
+            decode_meta,
+            &decode_input_ids,
+            &decode_positions,
+        )?;
         device
             .synchronize()
             .context("synchronizing representative warmup")?;
         Ok(())
     })();
 
-    {
-        let mut metadata = attn_ctx
-            .attn_meta
-            .lock()
-            .map_err(|error| anyhow!("restoring attn_meta after warmup: {error}"))?;
-        *metadata = previous_meta;
-    }
-
+    let restore_result = attn_ctx
+        .attn_meta
+        .lock()
+        .map_err(|error| anyhow!("restoring attention logical metadata after warmup: {error}"))
+        .map(|mut metadata| *metadata = previous_meta);
+    let warmup_result = match (warmup_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(warmup_error), Err(restore_error)) => Err(warmup_error.context(format!(
+            "restoring attention logical metadata also failed: {restore_error}"
+        ))),
+    };
     warmup_result.context("representative model warmup failed")
 }
 
@@ -491,9 +514,12 @@ mod tests {
             observation.forward_calls += 1;
             observation.input_ids.push(input_ids.to_vec1()?);
             observation.positions.push(positions.to_vec1()?);
-            observation
-                .attention
-                .push(self.attn_ctx.attn_meta.lock().unwrap().clone());
+            observation.attention.push(
+                self.attn_ctx
+                    .prepared_for_bound_consumer()?
+                    .logical()
+                    .clone(),
+            );
             Tensor::zeros((input_ids.dim(0)?, 4), self.dtype, &self.device)
         }
 
@@ -545,16 +571,14 @@ mod tests {
     }
 
     #[test]
-    fn warmup_executes_representative_prefill_and_restores_attention_metadata() {
+    fn warmup_prepares_representative_prefill_and_decode_once_each() {
         let device = Device::Cpu;
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(2, 4, 4, 2, 8, DType::F16, &device).unwrap(),
         ));
+        let attn_ctx = AttentionContext::new(paged_kv);
         let original_meta = build_decode_metadata(&[1], &[vec![3]], &[12]);
-        let attn_ctx = AttentionContext {
-            paged_kv,
-            attn_meta: Arc::new(Mutex::new(original_meta.clone())),
-        };
+        *attn_ctx.attn_meta.lock().unwrap() = original_meta.clone();
         let observation = Arc::new(Mutex::new(WarmupObservation::default()));
         let mut model = RecordingModel {
             device: device.clone(),
@@ -578,20 +602,26 @@ mod tests {
             ]
         );
         drop(observation);
+        assert_eq!(
+            attn_ctx.instrumentation(),
+            crate::attention::AttentionInstrumentation {
+                prepare_calls: 2,
+                device_tensor_uploads: 7,
+            }
+        );
+        assert!(attn_ctx.is_idle());
         assert_eq!(*attn_ctx.attn_meta.lock().unwrap(), original_meta);
     }
 
     #[test]
-    fn warmup_propagates_model_failure_and_still_restores_attention_metadata() {
+    fn warmup_propagates_model_failure_and_releases_attention_metadata() {
         let device = Device::Cpu;
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 4, 4, 1, 1, DType::F32, &device).unwrap(),
         ));
+        let attn_ctx = AttentionContext::new(paged_kv);
         let original_meta = build_decode_metadata(&[1], &[vec![2]], &[8]);
-        let attn_ctx = AttentionContext {
-            paged_kv,
-            attn_meta: Arc::new(Mutex::new(original_meta.clone())),
-        };
+        *attn_ctx.attn_meta.lock().unwrap() = original_meta.clone();
         let mut model = FailingModel {
             device: device.clone(),
             forward_calls: 0,
@@ -604,6 +634,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains("representative model warmup failed"));
+        assert_eq!(attn_ctx.instrumentation().prepare_calls, 2);
+        assert_eq!(attn_ctx.instrumentation().device_tensor_uploads, 7);
+        assert!(attn_ctx.is_idle());
         assert_eq!(*attn_ctx.attn_meta.lock().unwrap(), original_meta);
     }
 }

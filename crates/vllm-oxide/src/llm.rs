@@ -500,9 +500,7 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::attention::{
-        build_prefill_metadata, AttentionContext, AttnMetadata, PagedKVCacheGeometry,
-    };
+    use crate::attention::{AttentionContext, AttnMetadata, PagedKVCacheGeometry};
     use crate::causal_lm::CausalLM;
     use crate::engine::sequence::BLOCK_SIZE;
     use candle_core::Tensor;
@@ -580,7 +578,11 @@ mod tests {
             input_ids: &Tensor,
             positions: &Tensor,
         ) -> candle_core::Result<Tensor> {
-            let metadata = self.attn_ctx.attn_meta.lock().unwrap().clone();
+            let metadata = self
+                .attn_ctx
+                .prepared_for_bound_consumer()?
+                .logical()
+                .clone();
             self.controls
                 .seen_metadata
                 .lock()
@@ -688,7 +690,11 @@ mod tests {
         ) -> candle_core::Result<Tensor> {
             let input_ids = input_ids.to_vec1::<u32>()?;
             let positions = positions.to_vec1::<u32>()?;
-            let metadata = self.attn_ctx.attn_meta.lock().unwrap().clone();
+            let metadata = self
+                .attn_ctx
+                .prepared_for_bound_consumer()?
+                .logical()
+                .clone();
             if input_ids.len() != positions.len() || input_ids.len() != metadata.slot_mapping.len()
             {
                 candle_core::bail!("cache-aware model received inconsistent step metadata");
@@ -858,10 +864,7 @@ mod tests {
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
         ));
-        let attn_ctx = AttentionContext {
-            paged_kv: paged_kv.clone(),
-            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
-        };
+        let attn_ctx = AttentionContext::new(paged_kv.clone());
         let scheduler = Scheduler::new(16, 16, 0.9);
         let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, attn_ctx.paged_kv.clone());
         let model: Box<dyn CausalLM> = Box::new(MockModel {
@@ -892,10 +895,7 @@ mod tests {
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
         ));
-        let attn_ctx = AttentionContext {
-            paged_kv: paged_kv.clone(),
-            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
-        };
+        let attn_ctx = AttentionContext::new(paged_kv.clone());
         let scheduler = Scheduler::new_with_eos_token_ids(16, 16, 0.9, eos_token_ids);
         let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, attn_ctx.paged_kv.clone());
         let model: Box<dyn CausalLM> = Box::new(ControlledLogitsModel {
@@ -921,10 +921,7 @@ mod tests {
             head_dim: 1,
             dtype: DType::F16,
         })));
-        let attn_ctx = AttentionContext {
-            paged_kv: paged_kv.clone(),
-            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
-        };
+        let attn_ctx = AttentionContext::new(paged_kv.clone());
         let physical_tokens = Arc::new(Mutex::new(HashMap::new()));
         let mut model: Box<dyn CausalLM> = Box::new(CacheAwareModel {
             device: device.clone(),
@@ -999,10 +996,7 @@ mod tests {
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
         ));
-        let attn_ctx = AttentionContext {
-            paged_kv: paged_kv.clone(),
-            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
-        };
+        let attn_ctx = AttentionContext::new(paged_kv.clone());
         let controls = CausalFingerprintControls {
             fail_next: Arc::new(AtomicBool::new(false)),
             seen_metadata: Arc::new(Mutex::new(Vec::new())),

@@ -4,8 +4,8 @@
 //! `flash_attn_varlen_paged_windowed` (continued prefill and decode) directly —
 //! NO `AttentionBackend` trait for v0.1 (YAGNI). The
 //! `engine ↔ attention` cycle is broken by `attention/` never importing
-//! `engine/`; EngineCore holds `Arc<Mutex<PagedKVCache>>` and builds
-//! `AttnMetadata` from scheduler state.
+//! `engine/`; EngineCore prepares scheduler-owned `AttnMetadata` through the
+//! shared `AttentionContext` before model execution.
 
 #![allow(dead_code)]
 
@@ -21,23 +21,448 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor};
 
 use crate::utils::kv_cache_layout_shape;
 
-pub(crate) use metadata::build_continued_prefill_metadata;
+pub(crate) use metadata::{build_continued_prefill_metadata, PreparedAttention};
 pub use metadata::{build_decode_metadata, build_prefill_metadata, AttnMetadata};
 
 /// Shared attention state crossing the `engine ↔ model` seam.
 ///
-/// `paged_kv` and `attn_meta` are created together in a model's `build` factory
-/// and consumed together by every attention layer and by `EngineCore`. The
-/// cache initially carries only immutable geometry; the composition root binds
-/// its backing tensor exactly once after device-memory sizing. Bundling both
-/// values names the seam and replaces an always-adjacent parameter pair (the
-/// direct cause of the `too_many_arguments` lints in the model's `from_vb`
-/// chain). Cloning is cheap and every clone observes the same one-time
-/// allocation and per-step metadata.
+/// The cache initially carries only immutable geometry; the composition root
+/// binds its backing tensor exactly once after device-memory sizing. Before a
+/// model forward, `EngineCore` transactionally prepares one logical
+/// [`AttnMetadata`] value into device tensors and binds it to that StepPlan's
+/// epoch. Every layer then borrows the same immutable prepared value. The
+/// active value is released after plan execution, including error and unwind
+/// paths, so a later step cannot silently consume stale metadata. Until #44
+/// contracts the public surface, the exact v0.1 public fields remain intact;
+/// the crate-private runtime sidecar lives in [`PagedKVCache`].
 #[derive(Clone)]
 pub struct AttentionContext {
     pub paged_kv: Arc<Mutex<PagedKVCache>>,
     pub attn_meta: Arc<Mutex<AttnMetadata>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttentionEpoch {
+    StepPlan(u64),
+    WarmupPrefill,
+    WarmupDecode,
+    DirectForward(u64),
+}
+
+impl std::fmt::Display for AttentionEpoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StepPlan(plan_id) => write!(formatter, "StepPlan({plan_id})"),
+            Self::WarmupPrefill => formatter.write_str("WarmupPrefill"),
+            Self::WarmupDecode => formatter.write_str("WarmupDecode"),
+            Self::DirectForward(epoch) => write!(formatter, "DirectForward({epoch})"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AttentionLifecycle {
+    Idle,
+    Preparing(AttentionEpoch),
+    Ready(Arc<PreparedAttention>),
+}
+
+#[derive(Debug)]
+struct AttentionState {
+    lifecycle: AttentionLifecycle,
+    bound_consumer: Option<AttentionEpoch>,
+    next_direct_forward_epoch: u64,
+    prepare_calls: usize,
+    device_tensor_uploads: usize,
+}
+
+impl Default for AttentionState {
+    fn default() -> Self {
+        Self {
+            lifecycle: AttentionLifecycle::Idle,
+            bound_consumer: None,
+            next_direct_forward_epoch: 0,
+            prepare_calls: 0,
+            device_tensor_uploads: 0,
+        }
+    }
+}
+
+impl AttentionContext {
+    pub(crate) fn new(paged_kv: Arc<Mutex<PagedKVCache>>) -> Self {
+        Self {
+            paged_kv,
+            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+        }
+    }
+
+    /// Prepare and publish one complete metadata value for `epoch`.
+    ///
+    /// The lifecycle is reserved before uploads begin, but the active value is
+    /// replaced only after every tensor succeeds. A failed preparation from an
+    /// idle context returns it to idle; a conflicting preparation leaves the
+    /// existing active value untouched.
+    pub(crate) fn prepare(
+        &self,
+        epoch: AttentionEpoch,
+        logical: AttnMetadata,
+        device: &Device,
+    ) -> Result<AttentionStepGuard> {
+        self.reserve(epoch)?;
+        self.complete_preparation(epoch, device, || Ok(logical))
+    }
+
+    /// Bind the only model consumer allowed to use the active epoch.
+    pub(crate) fn bind_consumer(&self, expected: AttentionEpoch) -> Result<AttentionConsumerGuard> {
+        let runtime = self.runtime_state()?;
+        let mut state = lock_attention_state(&runtime)?;
+        match &state.lifecycle {
+            AttentionLifecycle::Ready(active) if active.epoch() != expected => {
+                candle_core::bail!(
+                    "stale attention consumer expected {expected}, active epoch is {}",
+                    active.epoch()
+                )
+            }
+            AttentionLifecycle::Ready(_) => {
+                if let Some(bound) = state.bound_consumer {
+                    candle_core::bail!(
+                        "attention epoch {expected} already has bound consumer {bound}"
+                    )
+                }
+                state.bound_consumer = Some(expected);
+            }
+            AttentionLifecycle::Preparing(active_epoch) => {
+                candle_core::bail!(
+                    "cannot bind attention consumer {expected}; {active_epoch} is still preparing"
+                )
+            }
+            AttentionLifecycle::Idle => {
+                candle_core::bail!("cannot bind attention consumer {expected}; context is idle")
+            }
+        }
+        Ok(AttentionConsumerGuard {
+            context: self.clone(),
+            epoch: expected,
+            owned_step: None,
+            armed: true,
+        })
+    }
+
+    /// For the semver-visible direct `CausalLM::forward` path, prepare and bind
+    /// one private epoch from the public logical metadata only when idle.
+    /// Engine and warmup callers arrive with an already-ready epoch and receive
+    /// `None`; their independently owned consumer guard remains authoritative.
+    pub(crate) fn bind_direct_forward_if_idle(
+        &self,
+        device: &Device,
+    ) -> Result<Option<AttentionConsumerGuard>> {
+        let Some(epoch) = self.reserve_direct_forward()? else {
+            return Ok(None);
+        };
+        let step = self.complete_preparation(epoch, device, || self.logical_snapshot())?;
+        let mut consumer = self.bind_consumer(epoch)?;
+        consumer.owned_step = Some(step);
+        Ok(Some(consumer))
+    }
+
+    /// Borrow only when a consumer is explicitly bound to the ready epoch.
+    pub(crate) fn prepared_for_bound_consumer(&self) -> Result<Arc<PreparedAttention>> {
+        let runtime = self.runtime_state()?;
+        let state = lock_attention_state(&runtime)?;
+        match (&state.lifecycle, state.bound_consumer) {
+            (AttentionLifecycle::Ready(prepared), Some(bound)) if prepared.epoch() == bound => {
+                Ok(prepared.clone())
+            }
+            (AttentionLifecycle::Ready(prepared), Some(bound)) => candle_core::bail!(
+                "bound attention consumer {bound} does not match active epoch {}",
+                prepared.epoch()
+            ),
+            (AttentionLifecycle::Ready(prepared), None) => {
+                candle_core::bail!("attention epoch {} has no bound consumer", prepared.epoch())
+            }
+            (AttentionLifecycle::Preparing(epoch), _) => {
+                candle_core::bail!("attention metadata for {epoch} is not ready")
+            }
+            (AttentionLifecycle::Idle, _) => {
+                candle_core::bail!("attention context has no prepared metadata")
+            }
+        }
+    }
+
+    fn reserve(&self, epoch: AttentionEpoch) -> Result<()> {
+        {
+            let runtime = self.runtime_state()?;
+            let mut state = lock_attention_state(&runtime)?;
+            if let Some(bound) = state.bound_consumer {
+                candle_core::bail!(
+                    "attention context has bound consumer {bound}; cannot prepare {epoch}"
+                )
+            }
+            match &state.lifecycle {
+                AttentionLifecycle::Idle => {
+                    state.lifecycle = AttentionLifecycle::Preparing(epoch);
+                }
+                AttentionLifecycle::Preparing(active_epoch) => {
+                    candle_core::bail!(
+                        "attention context is preparing {active_epoch}; cannot prepare {epoch}"
+                    )
+                }
+                AttentionLifecycle::Ready(active) => {
+                    candle_core::bail!(
+                        "attention context is active for {}; cannot prepare {epoch}",
+                        active.epoch()
+                    )
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reserve_direct_forward(&self) -> Result<Option<AttentionEpoch>> {
+        let runtime = self.runtime_state()?;
+        let mut state = lock_attention_state(&runtime)?;
+        match &state.lifecycle {
+            AttentionLifecycle::Idle => {
+                if let Some(bound) = state.bound_consumer {
+                    candle_core::bail!(
+                        "idle attention context unexpectedly has bound consumer {bound}"
+                    )
+                }
+                let epoch = AttentionEpoch::DirectForward(state.next_direct_forward_epoch);
+                state.next_direct_forward_epoch = state
+                    .next_direct_forward_epoch
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        candle_core::Error::Msg(
+                            "direct attention forward epoch exhausted".to_string(),
+                        )
+                    })?;
+                state.lifecycle = AttentionLifecycle::Preparing(epoch);
+                Ok(Some(epoch))
+            }
+            AttentionLifecycle::Ready(_) => Ok(None),
+            AttentionLifecycle::Preparing(epoch) => candle_core::bail!(
+                "cannot start direct attention forward while {epoch} is still preparing"
+            ),
+        }
+    }
+
+    fn complete_preparation(
+        &self,
+        epoch: AttentionEpoch,
+        device: &Device,
+        logical: impl FnOnce() -> Result<AttnMetadata>,
+    ) -> Result<AttentionStepGuard> {
+        let mut reservation = AttentionPreparationReservation {
+            context: self.clone(),
+            epoch,
+            armed: true,
+        };
+        let logical = logical()?;
+        let prepared = PreparedAttention::prepare(epoch, logical, device)?;
+        let device_tensor_uploads = prepared.device_tensor_uploads();
+        let logical = prepared.logical().clone();
+        let prepared = Arc::new(prepared);
+
+        {
+            let runtime = self.runtime_state()?;
+            let mut state = lock_attention_state(&runtime)?;
+            match state.lifecycle {
+                AttentionLifecycle::Preparing(current)
+                    if current == epoch && state.bound_consumer.is_none() =>
+                {
+                    let mut attn_meta = self.attn_meta.lock().map_err(|error| {
+                        candle_core::Error::Msg(format!(
+                            "attention logical metadata lock poisoned: {error}"
+                        ))
+                    })?;
+                    *attn_meta = logical;
+                    state.lifecycle = AttentionLifecycle::Ready(prepared);
+                    state.prepare_calls += 1;
+                    state.device_tensor_uploads += device_tensor_uploads;
+                }
+                _ => {
+                    candle_core::bail!("attention context lost preparation reservation for {epoch}")
+                }
+            }
+        }
+        reservation.armed = false;
+
+        Ok(AttentionStepGuard {
+            context: self.clone(),
+            epoch,
+            armed: true,
+        })
+    }
+
+    fn logical_snapshot(&self) -> Result<AttnMetadata> {
+        self.attn_meta
+            .lock()
+            .map(|metadata| metadata.clone())
+            .map_err(|error| {
+                candle_core::Error::Msg(format!(
+                    "attention logical metadata lock poisoned: {error}"
+                ))
+            })
+    }
+
+    fn runtime_state(&self) -> Result<Arc<Mutex<AttentionState>>> {
+        let cache = self.paged_kv.lock().map_err(|error| {
+            candle_core::Error::Msg(format!("paged KV cache lock poisoned: {error}"))
+        })?;
+        Ok(cache.attention_runtime())
+    }
+
+    fn cancel_preparation(&self, epoch: AttentionEpoch) {
+        let Ok(runtime) = self.runtime_state() else {
+            return;
+        };
+        if let Ok(mut state) = runtime.lock() {
+            if matches!(state.lifecycle, AttentionLifecycle::Preparing(current) if current == epoch)
+            {
+                state.lifecycle = AttentionLifecycle::Idle;
+            }
+        };
+    }
+
+    fn release_consumer(&self, epoch: AttentionEpoch) -> Result<()> {
+        let runtime = self.runtime_state()?;
+        let mut state = lock_attention_state(&runtime)?;
+        match state.bound_consumer {
+            Some(bound) if bound == epoch => {
+                state.bound_consumer = None;
+                Ok(())
+            }
+            Some(bound) => candle_core::bail!(
+                "cannot release attention consumer {epoch}; bound consumer is {bound}"
+            ),
+            None => candle_core::bail!(
+                "cannot release attention consumer {epoch}; no consumer is bound"
+            ),
+        }
+    }
+
+    fn release(&self, epoch: AttentionEpoch) -> Result<()> {
+        let runtime = self.runtime_state()?;
+        let mut state = lock_attention_state(&runtime)?;
+        if let Some(bound) = state.bound_consumer {
+            candle_core::bail!(
+                "cannot release attention epoch {epoch}; consumer {bound} is still bound"
+            )
+        }
+        match &state.lifecycle {
+            AttentionLifecycle::Ready(active) if active.epoch() == epoch => {
+                state.lifecycle = AttentionLifecycle::Idle;
+                Ok(())
+            }
+            AttentionLifecycle::Ready(active) => candle_core::bail!(
+                "cannot release attention epoch {epoch}; active epoch is {}",
+                active.epoch()
+            ),
+            AttentionLifecycle::Preparing(active_epoch) => candle_core::bail!(
+                "cannot release attention epoch {epoch}; {active_epoch} is still preparing"
+            ),
+            AttentionLifecycle::Idle => {
+                candle_core::bail!("cannot release attention epoch {epoch}; context is idle")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn instrumentation(&self) -> AttentionInstrumentation {
+        let runtime = self.runtime_state().unwrap();
+        let state = runtime.lock().unwrap();
+        AttentionInstrumentation {
+            prepare_calls: state.prepare_calls,
+            device_tensor_uploads: state.device_tensor_uploads,
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn is_idle(&self) -> bool {
+        let runtime = self.runtime_state().unwrap();
+        let state = runtime.lock().unwrap();
+        matches!(state.lifecycle, AttentionLifecycle::Idle) && state.bound_consumer.is_none()
+    }
+}
+
+fn lock_attention_state(
+    runtime: &Mutex<AttentionState>,
+) -> Result<std::sync::MutexGuard<'_, AttentionState>> {
+    runtime.lock().map_err(|error| {
+        candle_core::Error::Msg(format!("attention runtime state lock poisoned: {error}"))
+    })
+}
+
+pub(crate) struct AttentionStepGuard {
+    context: AttentionContext,
+    epoch: AttentionEpoch,
+    armed: bool,
+}
+
+pub(crate) struct AttentionConsumerGuard {
+    context: AttentionContext,
+    epoch: AttentionEpoch,
+    owned_step: Option<AttentionStepGuard>,
+    armed: bool,
+}
+
+impl AttentionConsumerGuard {
+    pub(crate) fn finish(mut self) -> Result<()> {
+        self.context.release_consumer(self.epoch)?;
+        self.armed = false;
+        if let Some(step) = self.owned_step.take() {
+            step.finish()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AttentionConsumerGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.context.release_consumer(self.epoch);
+        }
+    }
+}
+
+impl AttentionStepGuard {
+    pub(crate) fn finish(mut self) -> Result<()> {
+        self.context.release(self.epoch)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for AttentionStepGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.context.release(self.epoch);
+        }
+    }
+}
+
+struct AttentionPreparationReservation {
+    context: AttentionContext,
+    epoch: AttentionEpoch,
+    armed: bool,
+}
+
+impl Drop for AttentionPreparationReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.context.cancel_preparation(self.epoch);
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AttentionInstrumentation {
+    pub(crate) prepare_calls: usize,
+    pub(crate) device_tensor_uploads: usize,
 }
 
 /// Immutable dimensions and dtype needed to size a paged KV cache.
@@ -63,6 +488,7 @@ pub struct PagedKVCache {
     buffer: Option<Tensor>,
     geometry: PagedKVCacheGeometry,
     num_blocks: usize,
+    attention_runtime: Arc<Mutex<AttentionState>>,
 }
 
 impl PagedKVCache {
@@ -92,6 +518,7 @@ impl PagedKVCache {
             buffer: None,
             geometry,
             num_blocks: 0,
+            attention_runtime: Arc::new(Mutex::new(AttentionState::default())),
         }
     }
 
@@ -176,6 +603,10 @@ impl PagedKVCache {
         self.geometry
     }
 
+    fn attention_runtime(&self) -> Arc<Mutex<AttentionState>> {
+        self.attention_runtime.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn allocation_count(&self) -> usize {
         usize::from(self.buffer.is_some())
@@ -183,11 +614,17 @@ impl PagedKVCache {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 // All test unwraps: PagedKVCache::new with hardcoded small dimensions always
 // succeeds on CPU; k_cache/v_cache indices are within allocated layer count.
 mod tests {
     use super::*;
+
+    fn context() -> AttentionContext {
+        AttentionContext::new(Arc::new(Mutex::new(
+            PagedKVCache::new(1, 4, 4, 1, 8, DType::F32, &Device::Cpu).unwrap(),
+        )))
+    }
 
     #[test]
     fn allocates_correct_shape() {
@@ -241,6 +678,225 @@ mod tests {
         assert_eq!(cache.allocation_count(), 1);
         assert_eq!(cache.num_blocks(), 4);
     }
+
+    #[test]
+    fn failed_preparation_from_idle_is_transactional() {
+        let context = context();
+        let malformed = AttnMetadata {
+            is_prefill: true,
+            cu_seqlens_q: vec![0, 2],
+            cu_seqlens_k: vec![0, 2],
+            max_seqlen_q: 2,
+            max_seqlen_k: 2,
+            slot_mapping: vec![0],
+            block_table: Vec::new(),
+        };
+
+        let error = context
+            .prepare(AttentionEpoch::StepPlan(7), malformed, &Device::Cpu)
+            .err()
+            .unwrap();
+
+        assert!(error
+            .to_string()
+            .contains("slot mapping has 1 entries for 2 query tokens"));
+        assert!(context.is_idle());
+        assert_eq!(
+            context.instrumentation(),
+            AttentionInstrumentation {
+                prepare_calls: 0,
+                device_tensor_uploads: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn conflicting_preparation_preserves_the_active_epoch() {
+        let context = context();
+        let first = context
+            .prepare(
+                AttentionEpoch::StepPlan(7),
+                build_prefill_metadata(&[1], &[1], &[0]),
+                &Device::Cpu,
+            )
+            .unwrap();
+        let consumer = context.bind_consumer(AttentionEpoch::StepPlan(7)).unwrap();
+        let slot_mapping_id = context
+            .prepared_for_bound_consumer()
+            .unwrap()
+            .slot_mapping()
+            .id();
+        consumer.finish().unwrap();
+
+        let error = context
+            .prepare(
+                AttentionEpoch::StepPlan(8),
+                build_prefill_metadata(&[1], &[1], &[1]),
+                &Device::Cpu,
+            )
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains("active for StepPlan(7)"));
+        assert_eq!(
+            {
+                let consumer = context.bind_consumer(AttentionEpoch::StepPlan(7)).unwrap();
+                let current = context
+                    .prepared_for_bound_consumer()
+                    .unwrap()
+                    .slot_mapping()
+                    .id();
+                consumer.finish().unwrap();
+                current
+            },
+            slot_mapping_id
+        );
+        assert_eq!(context.instrumentation().prepare_calls, 1);
+        first.finish().unwrap();
+        assert!(context.is_idle());
+    }
+
+    #[test]
+    fn stale_consumer_is_rejected_with_both_epochs() {
+        let context = context();
+        let step = context
+            .prepare(
+                AttentionEpoch::StepPlan(9),
+                build_prefill_metadata(&[1], &[1], &[0]),
+                &Device::Cpu,
+            )
+            .unwrap();
+
+        let error = context
+            .bind_consumer(AttentionEpoch::StepPlan(8))
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "stale attention consumer expected StepPlan(8), active epoch is StepPlan(9)"
+        );
+        let consumer = context.bind_consumer(AttentionEpoch::StepPlan(9)).unwrap();
+        assert_eq!(
+            context.prepared_for_bound_consumer().unwrap().epoch(),
+            AttentionEpoch::StepPlan(9)
+        );
+        consumer.finish().unwrap();
+        step.finish().unwrap();
+    }
+
+    #[test]
+    fn ready_metadata_requires_a_matching_consumer_binding() {
+        let context = context();
+        let step = context
+            .prepare(
+                AttentionEpoch::StepPlan(9),
+                build_prefill_metadata(&[1], &[1], &[0]),
+                &Device::Cpu,
+            )
+            .unwrap();
+
+        let unbound = context.prepared_for_bound_consumer().unwrap_err();
+        assert!(unbound.to_string().contains("has no bound consumer"));
+        assert!(context
+            .bind_direct_forward_if_idle(&Device::Cpu)
+            .unwrap()
+            .is_none());
+        let stale = context
+            .bind_consumer(AttentionEpoch::StepPlan(8))
+            .err()
+            .unwrap();
+        assert_eq!(
+            stale.to_string(),
+            "stale attention consumer expected StepPlan(8), active epoch is StepPlan(9)"
+        );
+
+        let consumer = context.bind_consumer(AttentionEpoch::StepPlan(9)).unwrap();
+        assert_eq!(
+            context.prepared_for_bound_consumer().unwrap().epoch(),
+            AttentionEpoch::StepPlan(9)
+        );
+        consumer.finish().unwrap();
+        step.finish().unwrap();
+        assert!(context.is_idle());
+    }
+
+    #[test]
+    fn direct_forward_uses_unique_epochs_and_owns_its_step_scope() {
+        let context = context();
+        *context.attn_meta.lock().unwrap() = build_prefill_metadata(&[1], &[1], &[0]);
+
+        let first = context
+            .bind_direct_forward_if_idle(&Device::Cpu)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            context.prepared_for_bound_consumer().unwrap().epoch(),
+            AttentionEpoch::DirectForward(0)
+        );
+        first.finish().unwrap();
+        assert!(context.is_idle());
+
+        let second = context
+            .bind_direct_forward_if_idle(&Device::Cpu)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            context.prepared_for_bound_consumer().unwrap().epoch(),
+            AttentionEpoch::DirectForward(1)
+        );
+        second.finish().unwrap();
+
+        assert!(context.is_idle());
+        assert_eq!(context.instrumentation().prepare_calls, 2);
+        assert_eq!(context.instrumentation().device_tensor_uploads, 6);
+    }
+
+    #[test]
+    fn direct_forward_consumer_unwinds_before_its_owned_step() {
+        let context = context();
+        *context.attn_meta.lock().unwrap() = build_prefill_metadata(&[1], &[1], &[0]);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let context = context.clone();
+            move || {
+                let _consumer = context
+                    .bind_direct_forward_if_idle(&Device::Cpu)
+                    .unwrap()
+                    .unwrap();
+                context.prepared_for_bound_consumer().unwrap();
+                panic!("injected direct forward panic");
+            }
+        }));
+
+        assert!(unwind.is_err());
+        assert!(context.is_idle());
+    }
+
+    #[test]
+    fn guard_drop_releases_metadata_during_unwind() {
+        let context = context();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let context = context.clone();
+            move || {
+                let _step = context
+                    .prepare(
+                        AttentionEpoch::StepPlan(11),
+                        build_prefill_metadata(&[1], &[1], &[0]),
+                        &Device::Cpu,
+                    )
+                    .unwrap();
+                panic!("injected model panic");
+            }
+        }));
+
+        assert!(unwind.is_err());
+        assert!(context.is_idle());
+        assert!(context
+            .prepared_for_bound_consumer()
+            .unwrap_err()
+            .to_string()
+            .contains("no prepared"));
+    }
 }
 
 #[cfg(all(test, feature = "cuda"))]
@@ -249,6 +905,39 @@ mod gpu_tests {
 
     fn cuda_device() -> Device {
         Device::cuda_if_available(0).unwrap_or(Device::Cpu)
+    }
+
+    #[test]
+    fn prepared_context_uploads_ragged_metadata_once_on_cuda() {
+        let dev = Device::new_cuda(0).unwrap();
+        let context = AttentionContext::new(Arc::new(Mutex::new(
+            PagedKVCache::new(1, 2, 256, 1, 64, DType::BF16, &dev).unwrap(),
+        )));
+        let step = context
+            .prepare(
+                AttentionEpoch::StepPlan(77),
+                build_decode_metadata(&[1, 257], &[vec![0], vec![0, 1]], &[0, 256]),
+                &dev,
+            )
+            .unwrap();
+        let consumer = context.bind_consumer(AttentionEpoch::StepPlan(77)).unwrap();
+        let prepared = context.prepared_for_bound_consumer().unwrap();
+
+        assert!(prepared.cu_seqlens_q().device().is_cuda());
+        assert!(prepared.cu_seqlens_k().device().is_cuda());
+        assert!(prepared.slot_mapping().device().is_cuda());
+        assert!(prepared.block_table().unwrap().device().is_cuda());
+        assert_eq!(
+            context.instrumentation(),
+            AttentionInstrumentation {
+                prepare_calls: 1,
+                device_tensor_uploads: 4,
+            }
+        );
+
+        consumer.finish().unwrap();
+        step.finish().unwrap();
+        assert!(context.is_idle());
     }
 
     #[test]
@@ -352,9 +1041,19 @@ mod gpu_tests {
             &[seq_len as u32],
             &(0..seq_len as i64).collect::<Vec<_>>(),
         );
+        let context = AttentionContext::new(Arc::new(Mutex::new(
+            PagedKVCache::new(1, 1, 256, num_heads, head_dim, DType::BF16, &dev).unwrap(),
+        )));
+        let step = context
+            .prepare(AttentionEpoch::StepPlan(0), meta, &dev)
+            .unwrap();
+        let consumer = context.bind_consumer(AttentionEpoch::StepPlan(0)).unwrap();
+        let prepared = context.prepared_for_bound_consumer().unwrap();
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let out = super::flash_attn::prefill_attn(&q, &k, &v, &meta, scale).unwrap();
+        let out = super::flash_attn::prefill_attn(&q, &k, &v, &prepared, scale).unwrap();
+        consumer.finish().unwrap();
+        step.finish().unwrap();
 
         assert_eq!(out.shape().dims(), &[seq_len, num_heads, head_dim]);
         let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();
@@ -380,7 +1079,9 @@ mod gpu_tests {
         let head_dim = 64;
         let ctx_len = 32;
 
-        let cache = PagedKVCache::new(1, 1, 256, kv_heads, head_dim, DType::BF16, &dev).unwrap();
+        let cache = Arc::new(Mutex::new(
+            PagedKVCache::new(1, 1, 256, kv_heads, head_dim, DType::BF16, &dev).unwrap(),
+        ));
 
         let key = Tensor::randn(0f32, 1f32, (ctx_len, kv_heads, head_dim), &dev)
             .unwrap()
@@ -393,6 +1094,8 @@ mod gpu_tests {
         let slots: Vec<i64> = (0..ctx_len as i64).collect();
         let slot_mapping = Tensor::from_vec(slots, (ctx_len,), &dev).unwrap();
         cache
+            .lock()
+            .unwrap()
             .reshape_and_cache(0, &key, &value, &slot_mapping)
             .unwrap();
 
@@ -400,13 +1103,22 @@ mod gpu_tests {
             .unwrap()
             .to_dtype(DType::BF16)
             .unwrap();
-        let k_cache = cache.k_cache(0).unwrap();
-        let v_cache = cache.v_cache(0).unwrap();
+        let k_cache = cache.lock().unwrap().k_cache(0).unwrap();
+        let v_cache = cache.lock().unwrap().v_cache(0).unwrap();
 
         let meta = build_decode_metadata(&[ctx_len as u32], &[vec![0]], &[ctx_len as i64]);
+        let context = AttentionContext::new(cache);
+        let step = context
+            .prepare(AttentionEpoch::StepPlan(0), meta, &dev)
+            .unwrap();
+        let consumer = context.bind_consumer(AttentionEpoch::StepPlan(0)).unwrap();
+        let prepared = context.prepared_for_bound_consumer().unwrap();
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let out = super::flash_attn::paged_attn(&q, &k_cache, &v_cache, &meta, scale, 256).unwrap();
+        let out =
+            super::flash_attn::paged_attn(&q, &k_cache, &v_cache, &prepared, scale, 256).unwrap();
+        consumer.finish().unwrap();
+        step.finish().unwrap();
 
         assert_eq!(out.shape().dims(), &[1, num_heads, head_dim]);
         let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();

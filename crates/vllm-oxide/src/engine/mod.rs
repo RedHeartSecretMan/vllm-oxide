@@ -2,8 +2,8 @@
 //!
 //! `Scheduler` / `BlockPool` / `KVCacheManager` / `EngineCore` / `Sequence`.
 //! The potential `engine ↔ attention` cycle is broken by the rule: engine
-//! holds `Arc<Mutex<PagedKVCache>>` and builds `AttnMetadata` from its own
-//! scheduler state; `attention/` never imports `engine/`.
+//! prepares scheduler-owned logical metadata through `AttentionContext`;
+//! `attention/` never imports `engine/`.
 //!
 //! Scheduler-owned state is captured in one immutable `StepPlan`.
 //! `EngineCore` executes only that plan and returns a corresponding
@@ -20,7 +20,7 @@ mod step;
 
 use candle_core::{DType, Device, Result, Tensor};
 
-use crate::attention::AttentionContext;
+use crate::attention::{AttentionContext, AttentionEpoch};
 use crate::causal_lm::CausalLM;
 use crate::sampler::selected_token_ids_to_host;
 use crate::Sampler;
@@ -101,7 +101,41 @@ impl EngineCore {
             return Ok((Vec::new(), empty));
         };
 
-        let (result, logits) = match self.execute_plan(&plan) {
+        let attention_step = match self.attn_ctx.prepare(
+            AttentionEpoch::StepPlan(plan.id),
+            plan.attention.clone(),
+            &self.device,
+        ) {
+            Ok(attention_step) => attention_step,
+            Err(error) => return Err(self.cleanup_failed_step(error)),
+        };
+        let attention_consumer = match self
+            .attn_ctx
+            .bind_consumer(AttentionEpoch::StepPlan(plan.id))
+        {
+            Ok(attention_consumer) => attention_consumer,
+            Err(binding_error) => {
+                let error = match attention_step.finish() {
+                    Ok(()) => binding_error,
+                    Err(release_error) => candle_core::Error::Msg(format!(
+                        "{binding_error}; releasing prepared attention metadata also failed: \
+                         {release_error}"
+                    )),
+                };
+                return Err(self.cleanup_failed_step(error));
+            }
+        };
+        let execution = finish_attention_scope(
+            self.execute_plan(&plan),
+            attention_consumer.finish(),
+            "releasing bound attention consumer",
+        );
+        let execution = finish_attention_scope(
+            execution,
+            attention_step.finish(),
+            "releasing prepared attention metadata",
+        );
+        let (result, logits) = match execution {
             Ok(executed) => executed,
             Err(error) => return Err(self.cleanup_failed_step(error)),
         };
@@ -158,13 +192,6 @@ impl EngineCore {
 
         let input_ids = Tensor::from_vec(input_token_ids, plan.token_budget, &self.device)?;
         let positions = Tensor::from_vec(logical_positions, plan.token_budget, &self.device)?;
-        {
-            // Engine execution is single-threaded; this mutex is never poisoned.
-            #[allow(clippy::unwrap_used)]
-            let mut attention = self.attn_ctx.attn_meta.lock().unwrap();
-            *attention = plan.attention.clone();
-        }
-
         let hidden = self.model.forward(&input_ids, &positions)?;
         let mut offset = 0usize;
         let mut sample_hiddens = Vec::new();
@@ -255,16 +282,30 @@ fn sampling_diagnostics(plan: &StepPlan) -> String {
         .join("; ")
 }
 
+fn finish_attention_scope<T>(
+    operation: Result<T>,
+    cleanup: Result<()>,
+    cleanup_action: &str,
+) -> Result<T> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(cleanup_error)) => Err(candle_core::Error::Msg(format!(
+            "{operation_error}; {cleanup_action} also failed: {cleanup_error}"
+        ))),
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::attention::{build_prefill_metadata, AttnMetadata, PagedKVCache};
+    use crate::attention::PagedKVCache;
     use crate::engine::sequence::BLOCK_SIZE;
     use crate::Sampler;
-    use candle_core::DType;
+    use candle_core::{DType, TensorId};
 
     /// A mock CausalLM that always returns hidden states where token 7
     /// (not the Qwen3 EOS token 151645) has the highest logit. This lets
@@ -283,6 +324,94 @@ mod tests {
 
     struct InvalidSamplingLogitsModel {
         device: Device,
+    }
+
+    struct AttentionFailingModel {
+        attn_ctx: AttentionContext,
+        device: Device,
+    }
+
+    struct PanickingAttentionModel {
+        attn_ctx: AttentionContext,
+        device: Device,
+    }
+
+    /// CPU stand-in for three Qwen3 attention layers borrowing one prepared
+    /// context during a model forward.
+    struct PerLayerMetadataModel {
+        attn_ctx: AttentionContext,
+        layers: usize,
+        seen_slot_mapping_ids: Arc<Mutex<Vec<TensorId>>>,
+        device: Device,
+    }
+
+    impl CausalLM for PerLayerMetadataModel {
+        fn forward(&mut self, input_ids: &Tensor, _positions: &Tensor) -> Result<Tensor> {
+            let prepared = self.attn_ctx.prepared_for_bound_consumer()?;
+            for _ in 0..self.layers {
+                self.seen_slot_mapping_ids
+                    .lock()
+                    .unwrap()
+                    .push(prepared.slot_mapping().id());
+            }
+            Tensor::zeros((input_ids.dim(0)?, 64), DType::F32, &self.device)
+        }
+
+        fn compute_logits(&self, hidden_states: &Tensor) -> Result<Tensor> {
+            let rows = hidden_states.dim(0)?;
+            let mut logits = vec![-100.0_f32; rows * 100];
+            for row in 0..rows {
+                logits[row * 100 + 42] = 100.0;
+            }
+            Tensor::from_vec(logits, (rows, 100), &self.device)
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+    }
+
+    impl CausalLM for AttentionFailingModel {
+        fn forward(&mut self, _input_ids: &Tensor, _positions: &Tensor) -> Result<Tensor> {
+            let prepared = self.attn_ctx.prepared_for_bound_consumer()?;
+            prepared.block_table()?;
+            unreachable!("initial prefill has no prepared block table")
+        }
+
+        fn compute_logits(&self, _hidden_states: &Tensor) -> Result<Tensor> {
+            unreachable!("attention failure happens before logits")
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+    }
+
+    impl CausalLM for PanickingAttentionModel {
+        fn forward(&mut self, _input_ids: &Tensor, _positions: &Tensor) -> Result<Tensor> {
+            self.attn_ctx.prepared_for_bound_consumer()?;
+            panic!("injected model panic after borrowing attention metadata")
+        }
+
+        fn compute_logits(&self, _hidden_states: &Tensor) -> Result<Tensor> {
+            unreachable!("model panics before logits")
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
     }
 
     impl CausalLM for RecordingModel {
@@ -385,10 +514,6 @@ mod tests {
         ))
     }
 
-    fn make_fake_meta() -> Arc<Mutex<AttnMetadata>> {
-        Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[])))
-    }
-
     /// T8 Q8.3 invariant #6: max_tokens boundary respected.
     ///
     /// Cross-reference with #17: sampler is single-step and cannot enforce
@@ -400,10 +525,7 @@ mod tests {
         let device = Device::Cpu;
 
         let mut scheduler = Scheduler::with_defaults();
-        let attn_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let attn_ctx = AttentionContext::new(make_fake_cache());
         let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
 
         scheduler.add_request(
@@ -446,10 +568,7 @@ mod tests {
     fn empty_engine_returns_empty() {
         let device = Device::Cpu;
         let scheduler = Scheduler::with_defaults();
-        let attn_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let attn_ctx = AttentionContext::new(make_fake_cache());
         let kv_mgr = KvCacheManager::new(10, BLOCK_SIZE, attn_ctx.paged_kv.clone());
 
         let mut engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
@@ -462,10 +581,7 @@ mod tests {
     fn add_request_makes_engine_running() {
         let device = Device::Cpu;
         let mut scheduler = Scheduler::with_defaults();
-        let attn_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let attn_ctx = AttentionContext::new(make_fake_cache());
         let kv_mgr = KvCacheManager::new(10, BLOCK_SIZE, attn_ctx.paged_kv.clone());
 
         scheduler.add_request(vec![1, 2, 3], SamplingParams::default());
@@ -476,19 +592,13 @@ mod tests {
     #[test]
     fn execute_plan_uses_only_plan_membership() {
         let device = Device::Cpu;
-        let source_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let source_ctx = AttentionContext::new(make_fake_cache());
         let mut source_scheduler = Scheduler::with_defaults();
         let mut source_kv = KvCacheManager::new(100, BLOCK_SIZE, source_ctx.paged_kv.clone());
         source_scheduler.add_request(vec![11, 12, 13], SamplingParams::default());
         let plan = source_scheduler.plan_step(&mut source_kv).unwrap().unwrap();
 
-        let engine_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let engine_ctx = AttentionContext::new(make_fake_cache());
         let mut decoy_scheduler = Scheduler::with_defaults();
         decoy_scheduler.add_request(vec![99], SamplingParams::default());
         let engine_kv = KvCacheManager::new(100, BLOCK_SIZE, engine_ctx.paged_kv.clone());
@@ -502,11 +612,23 @@ mod tests {
             engine_kv,
             model,
             Sampler::new_with_seed(0),
-            engine_ctx,
+            engine_ctx.clone(),
             device,
         );
 
+        let attention_step = engine_ctx
+            .prepare(
+                AttentionEpoch::StepPlan(plan.id),
+                plan.attention.clone(),
+                &Device::Cpu,
+            )
+            .unwrap();
+        let attention_consumer = engine_ctx
+            .bind_consumer(AttentionEpoch::StepPlan(plan.id))
+            .unwrap();
         let (result, _logits) = engine.execute_plan(&plan).unwrap();
+        attention_consumer.finish().unwrap();
+        attention_step.finish().unwrap();
 
         assert_eq!(*seen_input_ids.lock().unwrap(), vec![vec![11, 12, 13]]);
         assert_eq!(result.plan_id, plan.id);
@@ -517,13 +639,119 @@ mod tests {
     }
 
     #[test]
+    fn each_step_prepares_attention_metadata_once_for_all_layers() {
+        let device = Device::Cpu;
+        let mut scheduler = Scheduler::with_defaults();
+        let attn_ctx = AttentionContext::new(make_fake_cache());
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        scheduler.add_request(vec![11, 12, 13], SamplingParams::default());
+        let seen_slot_mapping_ids = Arc::new(Mutex::new(Vec::new()));
+        let model = Box::new(PerLayerMetadataModel {
+            attn_ctx: attn_ctx.clone(),
+            layers: 3,
+            seen_slot_mapping_ids: seen_slot_mapping_ids.clone(),
+            device: device.clone(),
+        });
+        let mut engine = EngineCore::new(
+            scheduler,
+            kv_mgr,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx.clone(),
+            device,
+        );
+
+        engine.step().unwrap();
+
+        let instrumentation = attn_ctx.instrumentation();
+        assert_eq!(instrumentation.prepare_calls, 1);
+        assert_eq!(instrumentation.device_tensor_uploads, 3);
+        let seen_ids = seen_slot_mapping_ids.lock().unwrap();
+        assert_eq!(seen_ids.len(), 3);
+        assert!(seen_ids.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(attn_ctx.is_idle());
+        let logical = attn_ctx.attn_meta.lock().unwrap().clone();
+        assert!(logical.is_prefill);
+        assert_eq!(logical.cu_seqlens_q, [0, 3]);
+        assert_eq!(logical.cu_seqlens_k, [0, 3]);
+        let first_step_tensor_id = seen_ids[0];
+        drop(seen_ids);
+
+        engine.step().unwrap();
+
+        let instrumentation = attn_ctx.instrumentation();
+        assert_eq!(instrumentation.prepare_calls, 2);
+        assert_eq!(instrumentation.device_tensor_uploads, 7);
+        let seen_ids = seen_slot_mapping_ids.lock().unwrap();
+        assert_eq!(seen_ids.len(), 6);
+        assert!(seen_ids[3..].windows(2).all(|pair| pair[0] == pair[1]));
+        assert_ne!(first_step_tensor_id, seen_ids[3]);
+        assert!(attn_ctx.is_idle());
+        let logical = attn_ctx.attn_meta.lock().unwrap().clone();
+        assert!(!logical.is_prefill);
+        assert_eq!(logical.cu_seqlens_q, [0, 1]);
+        assert_eq!(logical.cu_seqlens_k, [0, 4]);
+    }
+
+    #[test]
+    fn attention_error_releases_the_step_epoch() {
+        let device = Device::Cpu;
+        let mut scheduler = Scheduler::with_defaults();
+        let attn_ctx = AttentionContext::new(make_fake_cache());
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        scheduler.add_request(vec![11], SamplingParams::default());
+        let model = Box::new(AttentionFailingModel {
+            attn_ctx: attn_ctx.clone(),
+            device: device.clone(),
+        });
+        let mut engine = EngineCore::new(
+            scheduler,
+            kv_mgr,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx.clone(),
+            device,
+        );
+
+        let error = engine.step().unwrap_err();
+
+        assert!(error.to_string().contains("no paged block table"));
+        assert!(attn_ctx.is_idle());
+        assert_eq!(attn_ctx.instrumentation().prepare_calls, 1);
+    }
+
+    #[test]
+    fn model_panic_unwinds_the_step_epoch_to_idle() {
+        let device = Device::Cpu;
+        let mut scheduler = Scheduler::with_defaults();
+        let attn_ctx = AttentionContext::new(make_fake_cache());
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        scheduler.add_request(vec![11], SamplingParams::default());
+        let model = Box::new(PanickingAttentionModel {
+            attn_ctx: attn_ctx.clone(),
+            device: device.clone(),
+        });
+        let mut engine = EngineCore::new(
+            scheduler,
+            kv_mgr,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx.clone(),
+            device,
+        );
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.step()));
+
+        assert!(unwind.is_err());
+        assert!(attn_ctx.is_idle());
+        assert_eq!(attn_ctx.instrumentation().prepare_calls, 1);
+    }
+
+    #[test]
     fn sampling_tensor_error_retains_request_context() {
         let device = Device::Cpu;
         let mut scheduler = Scheduler::with_defaults();
-        let attn_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let attn_ctx = AttentionContext::new(make_fake_cache());
         let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
         scheduler.add_request(
             vec![11],
@@ -575,10 +803,7 @@ mod tests {
     fn engine_step_obeys_plan_sampling_permission() {
         let device = Device::Cpu;
         let mut scheduler = Scheduler::new(2, 512, 0.9);
-        let attn_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let attn_ctx = AttentionContext::new(make_fake_cache());
         let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
         scheduler.add_request(vec![11, 12, 13], SamplingParams::default());
         let mut engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
@@ -595,10 +820,7 @@ mod tests {
     fn batched_greedy_generation_remains_deterministic_through_step_plans() {
         let device = Device::Cpu;
         let mut scheduler = Scheduler::with_defaults();
-        let attn_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let attn_ctx = AttentionContext::new(make_fake_cache());
         let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
         let params = SamplingParams {
             max_tokens: 2,
@@ -625,10 +847,7 @@ mod tests {
     fn staggered_arrivals_interleave_and_complete_once_with_stable_identity() {
         let device = Device::Cpu;
         let scheduler = Scheduler::new(3, 3, 0.9);
-        let attn_ctx = AttentionContext {
-            paged_kv: make_fake_cache(),
-            attn_meta: make_fake_meta(),
-        };
+        let attn_ctx = AttentionContext::new(make_fake_cache());
         let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
         let seen_input_ids = Arc::new(Mutex::new(Vec::new()));
         let model = Box::new(RecordingModel {

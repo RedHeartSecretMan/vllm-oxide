@@ -6,6 +6,10 @@
 
 #![allow(dead_code)]
 
+use candle_core::{Device, Result, Tensor};
+
+use super::AttentionEpoch;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttnMetadata {
     pub is_prefill: bool,
@@ -23,6 +27,146 @@ impl AttnMetadata {
     pub(crate) fn uses_paged_kv(&self) -> bool {
         !self.block_table.is_empty()
     }
+}
+
+/// Device-ready form of one logical [`AttnMetadata`] value.
+///
+/// Construction performs every host-to-device metadata upload for an engine
+/// step. Transformer layers only borrow these tensors; they never reconstruct
+/// them from the logical vectors.
+#[derive(Debug)]
+pub(crate) struct PreparedAttention {
+    epoch: AttentionEpoch,
+    logical: AttnMetadata,
+    cu_seqlens_q: Tensor,
+    cu_seqlens_k: Tensor,
+    slot_mapping: Tensor,
+    block_table: Option<Tensor>,
+}
+
+impl PreparedAttention {
+    pub(crate) fn prepare(
+        epoch: AttentionEpoch,
+        logical: AttnMetadata,
+        device: &Device,
+    ) -> Result<Self> {
+        validate_logical_metadata(&logical)?;
+
+        let cu_seqlens_q = Tensor::from_vec(
+            logical.cu_seqlens_q.clone(),
+            logical.cu_seqlens_q.len(),
+            device,
+        )?;
+        let cu_seqlens_k = Tensor::from_vec(
+            logical.cu_seqlens_k.clone(),
+            logical.cu_seqlens_k.len(),
+            device,
+        )?;
+        let slot_mapping = Tensor::from_vec(
+            logical.slot_mapping.clone(),
+            logical.slot_mapping.len(),
+            device,
+        )?;
+        let block_table = prepare_block_table(&logical.block_table, device)?;
+
+        Ok(Self {
+            epoch,
+            logical,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            slot_mapping,
+            block_table,
+        })
+    }
+
+    pub(crate) fn epoch(&self) -> AttentionEpoch {
+        self.epoch
+    }
+
+    pub(crate) fn logical(&self) -> &AttnMetadata {
+        &self.logical
+    }
+
+    pub(crate) fn cu_seqlens_q(&self) -> &Tensor {
+        &self.cu_seqlens_q
+    }
+
+    pub(crate) fn cu_seqlens_k(&self) -> &Tensor {
+        &self.cu_seqlens_k
+    }
+
+    pub(crate) fn slot_mapping(&self) -> &Tensor {
+        &self.slot_mapping
+    }
+
+    pub(crate) fn block_table(&self) -> Result<&Tensor> {
+        self.block_table.as_ref().ok_or_else(|| {
+            candle_core::Error::Msg(
+                "prepared attention metadata has no paged block table".to_string(),
+            )
+        })
+    }
+
+    pub(crate) fn device_tensor_uploads(&self) -> usize {
+        3 + usize::from(self.block_table.is_some())
+    }
+}
+
+fn validate_logical_metadata(metadata: &AttnMetadata) -> Result<()> {
+    if metadata.cu_seqlens_q.is_empty() || metadata.cu_seqlens_k.is_empty() {
+        candle_core::bail!("attention cumulative lengths must start with zero")
+    }
+    if metadata.cu_seqlens_q.len() != metadata.cu_seqlens_k.len() {
+        candle_core::bail!(
+            "attention query/key cumulative length vectors must have the same batch shape"
+        )
+    }
+    if metadata.cu_seqlens_q[0] != 0 || metadata.cu_seqlens_k[0] != 0 {
+        candle_core::bail!("attention cumulative lengths must start with zero")
+    }
+    if !metadata
+        .cu_seqlens_q
+        .windows(2)
+        .all(|pair| pair[0] <= pair[1])
+        || !metadata
+            .cu_seqlens_k
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1])
+    {
+        candle_core::bail!("attention cumulative lengths must be monotonic")
+    }
+    let query_tokens = metadata.cu_seqlens_q.last().copied().unwrap_or(0) as usize;
+    if metadata.slot_mapping.len() != query_tokens {
+        candle_core::bail!(
+            "attention slot mapping has {} entries for {query_tokens} query tokens",
+            metadata.slot_mapping.len()
+        )
+    }
+    let batch_size = metadata.cu_seqlens_q.len() - 1;
+    if !metadata.block_table.is_empty() && metadata.block_table.len() != batch_size {
+        candle_core::bail!(
+            "attention block table has {} rows for batch size {batch_size}",
+            metadata.block_table.len()
+        )
+    }
+    Ok(())
+}
+
+fn prepare_block_table(block_table: &[Vec<i32>], device: &Device) -> Result<Option<Tensor>> {
+    if block_table.is_empty() {
+        return Ok(None);
+    }
+    let max_blocks = block_table.iter().map(Vec::len).max().unwrap_or(0);
+    if max_blocks == 0 {
+        candle_core::bail!("paged attention block table rows must be non-empty")
+    }
+    let batch = block_table.len();
+    let mut flat = Vec::with_capacity(batch * max_blocks);
+    for row in block_table {
+        flat.extend_from_slice(row);
+        flat.resize(flat.len() + max_blocks - row.len(), 0);
+    }
+    Ok(Some(Tensor::from_vec(flat, (batch, max_blocks), device)?))
 }
 
 pub fn build_decode_metadata(
@@ -99,6 +243,7 @@ pub(crate) fn build_continued_prefill_metadata(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -232,6 +377,90 @@ mod tests {
             let meta = build_prefill_metadata(&[], &[], &[]);
             assert_eq!(meta.cu_seqlens_q, vec![0]);
             assert_eq!(meta.cu_seqlens_k, vec![0]);
+        }
+    }
+
+    mod prepared_metadata {
+        use super::*;
+
+        #[test]
+        fn initial_prefill_preserves_lengths_and_uses_three_device_tensors() {
+            let prepared = PreparedAttention::prepare(
+                AttentionEpoch::StepPlan(1),
+                build_prefill_metadata(&[2, 3], &[2, 3], &[10, 11, 12, 13, 14]),
+                &Device::Cpu,
+            )
+            .unwrap();
+
+            assert_eq!(prepared.cu_seqlens_q().to_vec1::<u32>().unwrap(), [0, 2, 5]);
+            assert_eq!(prepared.cu_seqlens_k().to_vec1::<u32>().unwrap(), [0, 2, 5]);
+            assert_eq!(
+                prepared.slot_mapping().to_vec1::<i64>().unwrap(),
+                [10, 11, 12, 13, 14]
+            );
+            assert!(prepared.block_table().is_err());
+            assert_eq!(prepared.device_tensor_uploads(), 3);
+        }
+
+        #[test]
+        fn decode_pads_ragged_block_tables_without_changing_lengths() {
+            let prepared = PreparedAttention::prepare(
+                AttentionEpoch::StepPlan(2),
+                build_decode_metadata(&[3, 513], &[vec![7], vec![8, 9, 10]], &[100, 200]),
+                &Device::Cpu,
+            )
+            .unwrap();
+
+            assert_eq!(prepared.cu_seqlens_q().to_vec1::<u32>().unwrap(), [0, 1, 2]);
+            assert_eq!(
+                prepared.cu_seqlens_k().to_vec1::<u32>().unwrap(),
+                [0, 3, 516]
+            );
+            assert_eq!(
+                prepared.block_table().unwrap().to_vec2::<i32>().unwrap(),
+                [vec![7, 0, 0], vec![8, 9, 10]]
+            );
+            assert_eq!(prepared.device_tensor_uploads(), 4);
+        }
+
+        #[test]
+        fn chunked_continuation_keeps_new_query_and_full_kv_horizons() {
+            let prepared = PreparedAttention::prepare(
+                AttentionEpoch::StepPlan(3),
+                build_continued_prefill_metadata(&[2], &[4], &[vec![3]], &[20, 21]),
+                &Device::Cpu,
+            )
+            .unwrap();
+
+            assert_eq!(prepared.cu_seqlens_q().to_vec1::<u32>().unwrap(), [0, 2]);
+            assert_eq!(prepared.cu_seqlens_k().to_vec1::<u32>().unwrap(), [0, 4]);
+            assert_eq!(prepared.slot_mapping().to_vec1::<i64>().unwrap(), [20, 21]);
+            assert_eq!(prepared.block_table().unwrap().dims(), [1, 1]);
+        }
+
+        #[test]
+        fn mixed_prefix_hit_and_miss_keep_independent_causal_horizons() {
+            let prepared = PreparedAttention::prepare(
+                AttentionEpoch::StepPlan(4),
+                build_continued_prefill_metadata(
+                    &[1, 3],
+                    &[513, 3],
+                    &[vec![4, 5, 6], vec![7]],
+                    &[30, 40, 41, 42],
+                ),
+                &Device::Cpu,
+            )
+            .unwrap();
+
+            assert_eq!(prepared.cu_seqlens_q().to_vec1::<u32>().unwrap(), [0, 1, 4]);
+            assert_eq!(
+                prepared.cu_seqlens_k().to_vec1::<u32>().unwrap(),
+                [0, 513, 516]
+            );
+            assert_eq!(
+                prepared.block_table().unwrap().to_vec2::<i32>().unwrap(),
+                [vec![4, 5, 6], vec![7, 0, 0]]
+            );
         }
     }
 }

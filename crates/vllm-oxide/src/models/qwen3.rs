@@ -7,9 +7,7 @@ use candle_core::{Device, IndexOp, Result as CandleResult, Tensor};
 use candle_nn::{Module, VarBuilder};
 use serde::Deserialize;
 
-use crate::attention::{
-    build_prefill_metadata, AttentionContext, PagedKVCache, PagedKVCacheGeometry,
-};
+use crate::attention::{AttentionContext, PagedKVCache, PagedKVCacheGeometry, PreparedAttention};
 use crate::layers::activation::silu_and_mul;
 use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
@@ -159,7 +157,12 @@ impl Qwen3Attention {
             layer_id,
         })
     }
-    fn forward(&self, hidden: &Tensor, positions: &Tensor) -> CandleResult<Tensor> {
+    fn forward(
+        &self,
+        hidden: &Tensor,
+        positions: &Tensor,
+        prepared: &PreparedAttention,
+    ) -> CandleResult<Tensor> {
         let qkv = self.qkv_proj.forward(hidden)?;
         let qs = self.num_heads * self.head_dim;
         let ks = self.num_kv_heads * self.head_dim;
@@ -179,42 +182,45 @@ impl Qwen3Attention {
             None => k,
         };
         let (q, k) = self.rotary_emb.forward(positions, &q, &k)?;
-        self.attn_compute(&q, &k, &v)
+        self.attn_compute(&q, &k, &v, prepared)
     }
     #[cfg(feature = "cuda")]
-    fn attn_compute(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> CandleResult<Tensor> {
-        let meta = self
-            .attn_ctx
-            .attn_meta
-            .lock()
-            .map_err(|e| candle_core::Error::Msg(format!("attn_meta: {e}")))?;
-        let sm = Tensor::from_vec(
-            meta.slot_mapping.clone(),
-            (meta.slot_mapping.len(),),
-            q.device(),
-        )?;
+    fn attn_compute(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        prepared: &PreparedAttention,
+    ) -> CandleResult<Tensor> {
+        let logical = prepared.logical();
         let pkv = self
             .attn_ctx
             .paged_kv
             .lock()
             .map_err(|e| candle_core::Error::Msg(format!("pkv: {e}")))?;
-        pkv.reshape_and_cache(self.layer_id, k, v, &sm)?;
+        pkv.reshape_and_cache(self.layer_id, k, v, prepared.slot_mapping())?;
         let kc = pkv.k_cache(self.layer_id)?;
         let vc = pkv.v_cache(self.layer_id)?;
         let bs = pkv.block_size();
         drop(pkv);
         let scale = 1.0_f32 / (self.head_dim as f32).sqrt();
-        let out = if meta.is_prefill && !meta.uses_paged_kv() {
-            crate::attention::flash_attn::prefill_attn(q, k, v, &meta, scale)?
+        let out = if logical.is_prefill && !logical.uses_paged_kv() {
+            crate::attention::flash_attn::prefill_attn(q, k, v, prepared, scale)?
         } else {
-            crate::attention::flash_attn::paged_attn(q, &kc, &vc, &meta, scale, bs)?
+            crate::attention::flash_attn::paged_attn(q, &kc, &vc, prepared, scale, bs)?
         };
         let n = out.dim(0)?;
         self.o_proj
             .forward(&out.reshape((n, self.num_heads * self.head_dim))?)
     }
     #[cfg(not(feature = "cuda"))]
-    fn attn_compute(&self, _: &Tensor, _: &Tensor, _: &Tensor) -> CandleResult<Tensor> {
+    fn attn_compute(
+        &self,
+        _: &Tensor,
+        _: &Tensor,
+        _: &Tensor,
+        _: &PreparedAttention,
+    ) -> CandleResult<Tensor> {
         candle_core::bail!("attention requires --features cuda")
     }
 }
@@ -251,9 +257,10 @@ impl Qwen3DecoderLayer {
         positions: &Tensor,
         hidden: &Tensor,
         residual: Option<&Tensor>,
+        prepared: &PreparedAttention,
     ) -> CandleResult<(Tensor, Tensor)> {
         let (normed, res) = self.input_layernorm.forward(hidden, residual)?;
-        let attn = self.self_attn.forward(&normed, positions)?;
+        let attn = self.self_attn.forward(&normed, positions, prepared)?;
         let (normed, res) = self.post_attention_layernorm.forward(&attn, Some(&res))?;
         let mlp = self.mlp.forward(&normed)?;
         Ok((mlp, res))
@@ -294,11 +301,16 @@ impl Qwen3Model {
             norm,
         })
     }
-    fn forward(&self, input_ids: &Tensor, positions: &Tensor) -> CandleResult<Tensor> {
+    fn forward(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        prepared: &PreparedAttention,
+    ) -> CandleResult<Tensor> {
         let mut hidden = self.embed_tokens.forward(input_ids)?;
         let mut residual: Option<Tensor> = None;
         for layer in &self.layers {
-            let (out, res) = layer.forward(positions, &hidden, residual.as_ref())?;
+            let (out, res) = layer.forward(positions, &hidden, residual.as_ref(), prepared)?;
             hidden = out;
             residual = Some(res);
         }
@@ -311,6 +323,7 @@ pub struct Qwen3ForCausalLM {
     lm_head: Linear<Row>,
     vocab_size: usize,
     device: Device,
+    attn_ctx: AttentionContext,
 }
 
 impl Qwen3ForCausalLM {
@@ -320,7 +333,7 @@ impl Qwen3ForCausalLM {
         dev: &Device,
         attn_ctx: AttentionContext,
     ) -> CandleResult<Self> {
-        let model = Qwen3Model::from_vb(vb.pp("model"), config, dev, attn_ctx)?;
+        let model = Qwen3Model::from_vb(vb.pp("model"), config, dev, attn_ctx.clone())?;
         let lm_head = if config.tie_word_embeddings() {
             Linear::<Row>::from_weight(model.embed_tokens.embeddings().clone())
         } else {
@@ -336,6 +349,7 @@ impl Qwen3ForCausalLM {
             lm_head,
             vocab_size: config.vocab_size,
             device: dev.clone(),
+            attn_ctx,
         })
     }
     pub fn build(
@@ -362,11 +376,7 @@ impl Qwen3ForCausalLM {
             head_dim: config.head_dim(),
             dtype,
         })));
-        let attn_meta = Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[])));
-        let attn_ctx = AttentionContext {
-            paged_kv,
-            attn_meta,
-        };
+        let attn_ctx = AttentionContext::new(paged_kv);
         let model = Box::new(Qwen3ForCausalLM::from_vb(
             vb,
             &config,
@@ -379,7 +389,21 @@ impl Qwen3ForCausalLM {
 
 impl CausalLM for Qwen3ForCausalLM {
     fn forward(&mut self, input_ids: &Tensor, positions: &Tensor) -> CandleResult<Tensor> {
-        self.model.forward(input_ids, positions)
+        let direct_consumer = self.attn_ctx.bind_direct_forward_if_idle(&self.device)?;
+        let prepared = self.attn_ctx.prepared_for_bound_consumer()?;
+        let forward = self.model.forward(input_ids, positions, &prepared);
+        let cleanup = match direct_consumer {
+            Some(consumer) => consumer.finish(),
+            None => Ok(()),
+        };
+        match (forward, cleanup) {
+            (Ok(hidden), Ok(())) => Ok(hidden),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(forward_error), Err(cleanup_error)) => Err(candle_core::Error::Msg(format!(
+                "{forward_error}; releasing direct attention metadata also failed: \
+                 {cleanup_error}"
+            ))),
+        }
     }
     fn compute_logits(&self, hidden_states: &Tensor) -> CandleResult<Tensor> {
         self.lm_head.forward(hidden_states)
@@ -428,6 +452,37 @@ mod tests {
         .unwrap();
     }
 
+    fn build_zero_layer_model() -> BuiltModel {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            br#"{
+                "architectures":["Qwen3ForCausalLM"],
+                "torch_dtype":"bfloat16",
+                "eos_token_id":2,
+                "hidden_size":2,
+                "num_hidden_layers":0,
+                "num_attention_heads":1,
+                "num_key_value_heads":1,
+                "intermediate_size":2,
+                "vocab_size":5,
+                "rms_norm_eps":0.000001,
+                "max_position_embeddings":16,
+                "hidden_act":"silu",
+                "tie_word_embeddings":true
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
+        write_minimal_weights(&tmp.path().join("model.safetensors"));
+        let resolved = ResolvedModel::resolve(
+            crate::config::Source::Local(tmp.path().to_path_buf()),
+            Some(candle_core::DType::F16),
+        )
+        .unwrap();
+        Qwen3ForCausalLM::build(&resolved, &Device::Cpu, 8).unwrap()
+    }
+
     #[test]
     fn deserialises_qwen3_06b_config() {
         let json = r#"{"architectures":["Qwen3ForCausalLM"],"attention_bias":false,"head_dim":128,
@@ -461,35 +516,7 @@ mod tests {
 
     #[test]
     fn resolved_dtype_reaches_model_without_allocating_a_cache_buffer() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("config.json"),
-            br#"{
-                "architectures":["Qwen3ForCausalLM"],
-                "torch_dtype":"bfloat16",
-                "eos_token_id":2,
-                "hidden_size":2,
-                "num_hidden_layers":0,
-                "num_attention_heads":1,
-                "num_key_value_heads":1,
-                "intermediate_size":2,
-                "vocab_size":5,
-                "rms_norm_eps":0.000001,
-                "max_position_embeddings":16,
-                "hidden_act":"silu",
-                "tie_word_embeddings":true
-            }"#,
-        )
-        .unwrap();
-        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
-        write_minimal_weights(&tmp.path().join("model.safetensors"));
-        let resolved = ResolvedModel::resolve(
-            crate::config::Source::Local(tmp.path().to_path_buf()),
-            Some(candle_core::DType::F16),
-        )
-        .unwrap();
-
-        let built = Qwen3ForCausalLM::build(&resolved, &Device::Cpu, 8).unwrap();
+        let built = build_zero_layer_model();
         let cache = built.attn_ctx.paged_kv.lock().unwrap();
 
         assert_eq!(cache.dtype(), candle_core::DType::F16);
@@ -500,9 +527,21 @@ mod tests {
             .to_string()
             .contains("not allocated"));
         drop(cache);
-        assert_eq!(
-            *built.attn_ctx.attn_meta.lock().unwrap(),
-            build_prefill_metadata(&[], &[], &[])
-        );
+        assert!(built.attn_ctx.is_idle());
+    }
+
+    #[test]
+    fn direct_causal_lm_forward_uses_the_public_logical_metadata() {
+        let mut built = build_zero_layer_model();
+        let logical = crate::attention::build_prefill_metadata(&[1], &[1], &[0]);
+        *built.attn_ctx.attn_meta.lock().unwrap() = logical.clone();
+        let input_ids = Tensor::from_vec(vec![1_u32], 1, &Device::Cpu).unwrap();
+        let positions = Tensor::from_vec(vec![0_u32], 1, &Device::Cpu).unwrap();
+
+        let hidden = built.model.forward(&input_ids, &positions).unwrap();
+
+        assert_eq!(hidden.dims(), [1, 2]);
+        assert_eq!(*built.attn_ctx.attn_meta.lock().unwrap(), logical);
+        assert!(built.attn_ctx.is_idle());
     }
 }
