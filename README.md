@@ -190,7 +190,10 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     for output in outputs {
-        println!("[{}] {} (finished: {})", output.seq_id, output.text, output.finished);
+        println!(
+            "[{}] {} (finished: {})",
+            output.request_id, output.text, output.finished
+        );
     }
 
     Ok(())
@@ -204,7 +207,7 @@ fn main() -> anyhow::Result<()> {
 | `LLM` | Composition root. Constructed via `LLM::new(source, options)`, invoked via `LLM::generate(prompts, params)`. |
 | `Prompt` | Input enum: `Text(String)` for natural-language prompts, `TokenIds(Vec<u32>)` for pre-tokenized fixtures. Both are accepted in the same batch. |
 | `SamplingParams` | Per-prompt configuration: `temperature`, `top_k`, `top_p`, `max_tokens`, `ignore_eos`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`. Default is greedy (temperature=0). |
-| `RequestOutput` | Per-request result: `{ seq_id, token_ids, text, finished }`. Both decoded text and raw token IDs are always provided. |
+| `RequestOutput` | Per-request result: `{ request_id, token_ids, text, finished }`. The result vector preserves input-prompt order; request identity does not expose the internal sequence identifier. Both decoded text and raw token IDs are always provided. |
 | `EngineOptions` | Construction-time config: `max_num_batched_tokens` (default 16384), `max_num_seqs` (512), `max_model_len`, `gpu_memory_utilization` (0.9), `enforce_eager` (always true in v0.1), `dtype` override. |
 | `Source` | Weight source: `Source::Local(PathBuf)` for a local directory, or `Source::Hub { repo, revision }` for HuggingFace Hub. |
 

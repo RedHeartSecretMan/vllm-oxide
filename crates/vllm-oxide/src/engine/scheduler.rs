@@ -121,8 +121,9 @@ impl Scheduler {
     /// Add a new inference request. Creates a `Sequence` directly
     /// (the former 1:1 `SequenceGroup` wrapper has been absorbed).
     ///
-    /// The new sequence starts in `Waiting` status.
-    pub fn add_request(&mut self, prompt_token_ids: Vec<u32>, params: SamplingParams) {
+    /// The new sequence starts in `Waiting` status. Returns the stable public
+    /// request identity assigned to the accepted prompt.
+    pub fn add_request(&mut self, prompt_token_ids: Vec<u32>, params: SamplingParams) -> usize {
         let seq_id = self.next_seq_id;
         self.next_seq_id += 1;
         let request_id = self.next_request_id;
@@ -130,6 +131,7 @@ impl Scheduler {
 
         let seq = Sequence::new(request_id, seq_id, prompt_token_ids, &params);
         self.waiting.push_back(seq);
+        request_id
     }
 
     /// Select runnable work and capture its phase and cache-hit count before
@@ -380,7 +382,7 @@ impl Scheduler {
                     sequence.status = SequenceStatus::Finished;
                     finished_sequence_ids.push(sequence.seq_id);
                     outputs.push(RequestOutput {
-                        seq_id: sequence.seq_id,
+                        request_id: sequence.request_id,
                         token_ids: sequence.completion_token_ids().to_vec(),
                         text: String::new(),
                         finished: true,
@@ -603,13 +605,14 @@ impl Scheduler {
 }
 
 /// Per-step return value containing the completion tokens for a finished
-/// sequence. Accumulated by `LLM::generate` until `is_finished()`.
+/// request. Accumulated by `LLM::generate` until `is_finished()`.
 ///
 /// The `text` field is populated by the composition root (`llm.rs`) during
 /// detokenization — the scheduler does not have access to a tokenizer.
 #[derive(Debug, Clone)]
 pub struct RequestOutput {
-    pub seq_id: usize,
+    /// Stable public identity assigned when the prompt is accepted.
+    pub request_id: usize,
     pub token_ids: Vec<u32>,
     pub text: String,
     pub finished: bool,

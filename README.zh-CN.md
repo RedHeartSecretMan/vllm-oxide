@@ -189,7 +189,10 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     for output in outputs {
-        println!("[{}] {} (finished: {})", output.seq_id, output.text, output.finished);
+        println!(
+            "[{}] {} (finished: {})",
+            output.request_id, output.text, output.finished
+        );
     }
 
     Ok(())
@@ -203,7 +206,7 @@ fn main() -> anyhow::Result<()> {
 | `LLM`            | 组合根。通过`LLM::new(source, options)` 构建，通过 `LLM::generate(prompts, params)` 调用。                                                                                                   |
 | `Prompt`         | 输入枚举：`Text(String)` 用于自然语言提示，`TokenIds(Vec<u32>)` 用于预 token 化的夹具数据。同一批次中两者均可接受。                                                                          |
 | `SamplingParams` | 每条提示的配置：`temperature`、`top_k`、`top_p`、`max_tokens`、`ignore_eos`、`presence_penalty`、`frequency_penalty`、`repetition_penalty`。默认为贪心解码（temperature=0）。    |
-| `RequestOutput`  | 每条请求的结果：`{ seq_id, token_ids, text, finished }`。始终同时提供解码后的文本和原始 token ID。                                                                                             |
+| `RequestOutput`  | 每条请求的结果：`{ request_id, token_ids, text, finished }`。结果向量保持输入 prompt 顺序；请求标识不暴露内部序列标识。始终同时提供解码后的文本和原始 token ID。                                                       |
 | `EngineOptions`  | 构建时的配置：`max_num_batched_tokens`（默认 16384）、`max_num_seqs`（512）、`max_model_len`、`gpu_memory_utilization`（0.9）、`enforce_eager`（v0.1 中始终为 true）、`dtype` 覆盖。 |
 | `Source`         | 权重来源：`Source::Local(PathBuf)` 用于本地目录，或 `Source::Hub { repo, revision }` 用于 HuggingFace Hub。                                                                                  |
 

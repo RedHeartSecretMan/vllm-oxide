@@ -68,9 +68,9 @@ impl EngineCore {
         }
     }
 
-    /// Add a new inference request and schedule it.
-    pub fn add_request(&mut self, prompt: Vec<u32>, params: SamplingParams) {
-        self.scheduler.add_request(prompt, params);
+    /// Add a new inference request and return its stable public request identity.
+    pub fn add_request(&mut self, prompt: Vec<u32>, params: SamplingParams) -> usize {
+        self.scheduler.add_request(prompt, params)
     }
 
     /// One step of the engine loop: schedule → forward → sample → KV update.
@@ -477,12 +477,12 @@ mod tests {
         while engine.is_running() {
             outputs.extend(engine.step().unwrap());
         }
-        outputs.sort_by_key(|output| output.seq_id);
+        outputs.sort_by_key(|output| output.request_id);
 
         assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].seq_id, 0);
+        assert_eq!(outputs[0].request_id, 0);
         assert_eq!(outputs[0].token_ids, vec![42, 42]);
-        assert_eq!(outputs[1].seq_id, 1);
+        assert_eq!(outputs[1].request_id, 1);
         assert_eq!(outputs[1].token_ids, vec![42, 42]);
     }
 }

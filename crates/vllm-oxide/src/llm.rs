@@ -4,6 +4,7 @@
 //! `loader`, `sampler`, and `attention`. Port of nano-vllm `llm.py` /
 //! `llm_engine.py`.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -227,42 +228,37 @@ impl LLM {
         }
 
         let mut prompt_lens: Vec<usize> = Vec::with_capacity(prompts.len());
+        let mut request_ids = Vec::with_capacity(prompts.len());
         for (prompt, params) in prompts.iter().zip(sampling_params.iter()) {
             let token_ids = tokenize_prompt(prompt, &self.tokenizer)?;
             let len = token_ids.len();
             prompt_lens.push(len);
-            self.engine.add_request(token_ids, params.clone());
+            let request_id = self.engine.add_request(token_ids, params.clone());
+            request_ids.push(request_id);
         }
 
         let start = Instant::now();
         let mut step_count: usize = 0;
 
-        let mut finished_outputs: Vec<Option<RequestOutput>> = vec![None; prompts.len()];
+        let mut completed_outputs = Vec::with_capacity(prompts.len());
 
         while self.engine.is_running() {
             let outputs = self.engine.step()?;
             step_count += 1;
 
-            for mut output in outputs {
-                let prompt_idx = output.seq_id;
-                if prompt_idx < finished_outputs.len() {
-                    let text = self
-                        .tokenizer
-                        .decode(&output.token_ids, true)
-                        .map_err(|e| anyhow!("detokenization failed: {e}"))?;
-                    output.text = text;
-                    finished_outputs[prompt_idx] = Some(output);
-                }
-            }
+            completed_outputs.extend(outputs);
         }
 
         let elapsed = start.elapsed();
+        let mut results = order_request_outputs(&request_ids, completed_outputs)?;
+        for output in &mut results {
+            output.text = self
+                .tokenizer
+                .decode(&output.token_ids, true)
+                .map_err(|e| anyhow!("detokenization failed: {e}"))?;
+        }
         let total_tokens: usize = prompt_lens.iter().sum::<usize>()
-            + finished_outputs
-                .iter()
-                .flatten()
-                .map(|o| o.token_ids.len())
-                .sum::<usize>();
+            + results.iter().map(|o| o.token_ids.len()).sum::<usize>();
 
         if total_tokens > 0 {
             // total_tokens ≤ max_model_len (4096 default) ≪ 2^53 f64 mantissa
@@ -276,18 +272,6 @@ impl LLM {
                 "generate complete"
             );
         }
-
-        let results: Vec<RequestOutput> = finished_outputs
-            .into_iter()
-            .map(|opt| {
-                opt.unwrap_or_else(|| RequestOutput {
-                    seq_id: usize::MAX,
-                    token_ids: Vec::new(),
-                    text: String::new(),
-                    finished: false,
-                })
-            })
-            .collect();
 
         Ok(results)
     }
@@ -336,6 +320,45 @@ impl LLM {
         let refs: Vec<&candle_core::Tensor> = logits_list.iter().collect();
         Ok(candle_core::Tensor::cat(&refs, 0)?)
     }
+}
+
+fn order_request_outputs(
+    request_ids: &[usize],
+    completed_outputs: Vec<RequestOutput>,
+) -> Result<Vec<RequestOutput>> {
+    let mut input_positions = HashMap::with_capacity(request_ids.len());
+    for (input_position, &request_id) in request_ids.iter().enumerate() {
+        if input_positions.insert(request_id, input_position).is_some() {
+            bail!("generate: request {request_id} was accepted more than once");
+        }
+    }
+
+    let mut ordered_outputs = vec![None; request_ids.len()];
+    for output in completed_outputs {
+        let input_position = input_positions
+            .get(&output.request_id)
+            .copied()
+            .ok_or_else(|| anyhow!("generate: completed unknown request {}", output.request_id))?;
+        if ordered_outputs[input_position].replace(output).is_some() {
+            bail!(
+                "generate: request {} completed more than once",
+                request_ids[input_position]
+            );
+        }
+    }
+
+    ordered_outputs
+        .into_iter()
+        .enumerate()
+        .map(|(input_position, output)| {
+            output.ok_or_else(|| {
+                anyhow!(
+                    "generate: request {} at input position {input_position} did not complete",
+                    request_ids[input_position]
+                )
+            })
+        })
+        .collect()
 }
 
 impl Drop for LLM {
@@ -517,6 +540,106 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::attention::{build_prefill_metadata, AttentionContext};
+    use crate::causal_lm::CausalLM;
+    use crate::engine::sequence::BLOCK_SIZE;
+    use candle_core::Tensor;
+    use tokenizers::models::bpe::{Vocab, BPE};
+
+    struct MockModel {
+        device: Device,
+        fail_forward: bool,
+    }
+
+    impl CausalLM for MockModel {
+        fn forward(
+            &mut self,
+            input_ids: &Tensor,
+            _positions: &Tensor,
+        ) -> candle_core::Result<Tensor> {
+            if self.fail_forward {
+                return Err(candle_core::Error::Msg(
+                    "injected model execution failure".to_string(),
+                ));
+            }
+            Tensor::zeros((input_ids.dim(0)?, 1), DType::F32, &self.device)
+        }
+
+        fn compute_logits(&self, hidden_states: &Tensor) -> candle_core::Result<Tensor> {
+            let rows = hidden_states.dim(0)?;
+            let mut logits = vec![-100.0_f32; rows * 100];
+            for row in 0..rows {
+                logits[row * 100 + 42] = 100.0;
+            }
+            Tensor::from_vec(logits, (rows, 100), &self.device)
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+    }
+
+    fn test_llm_with_forward_failure(fail_forward: bool) -> LLM {
+        let device = Device::Cpu;
+        let paged_kv = Arc::new(Mutex::new(
+            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
+        ));
+        let attn_ctx = AttentionContext {
+            paged_kv: paged_kv.clone(),
+            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+        };
+        let scheduler = Scheduler::new(16, 16, 0.9);
+        let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        let engine = EngineCore::new(
+            scheduler,
+            kv_cache_manager,
+            Box::new(MockModel {
+                device: device.clone(),
+                fail_forward,
+            }),
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device.clone(),
+        );
+
+        let vocab = (0..100_u32)
+            .map(|token_id| (format!("token-{token_id}"), token_id))
+            .collect::<Vocab>();
+        let tokenizer = HFTokenizer::new(
+            BPE::builder()
+                .vocab_and_merges(vocab, Vec::new())
+                .build()
+                .unwrap(),
+        );
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            br#"{"torch_dtype":"bfloat16"}"#,
+        )
+        .unwrap();
+        tokenizer
+            .save(model_dir.path().join("tokenizer.json"), false)
+            .unwrap();
+        std::fs::write(model_dir.path().join("model.safetensors"), b"").unwrap();
+        let resolved_model =
+            ResolvedModel::resolve(Source::Local(model_dir.path().to_path_buf()), None).unwrap();
+
+        LLM {
+            engine,
+            tokenizer,
+            _resolved_model: resolved_model,
+            _paged_kv: paged_kv,
+            device,
+        }
+    }
+
+    fn test_llm() -> LLM {
+        test_llm_with_forward_failure(false)
+    }
 
     mod engine_options {
         use super::*;
@@ -620,7 +743,7 @@ mod tests {
         #[test]
         fn text_field_defaults_empty() {
             let output = RequestOutput {
-                seq_id: 0,
+                request_id: 0,
                 token_ids: vec![1, 2, 3],
                 text: String::new(),
                 finished: true,
@@ -633,13 +756,78 @@ mod tests {
         #[test]
         fn text_field_can_be_populated() {
             let output = RequestOutput {
-                seq_id: 1,
+                request_id: 1,
                 token_ids: vec![42],
                 text: "hello".into(),
                 finished: true,
             };
             assert_eq!(output.text, "hello");
-            assert_eq!(output.seq_id, 1);
+            assert_eq!(output.request_id, 1);
+        }
+    }
+
+    mod order_request_outputs {
+        use super::*;
+
+        fn output(request_id: usize, token_id: u32) -> RequestOutput {
+            RequestOutput {
+                request_id,
+                token_ids: vec![token_id],
+                text: String::new(),
+                finished: true,
+            }
+        }
+
+        #[test]
+        fn restores_input_order_from_reversed_completion_order() {
+            let outputs = order_request_outputs(
+                &[10, 20, 30],
+                vec![output(30, 3), output(20, 2), output(10, 1)],
+            )
+            .unwrap();
+
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|output| output.request_id)
+                    .collect::<Vec<_>>(),
+                vec![10, 20, 30]
+            );
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|output| output.token_ids[0])
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+        }
+
+        #[test]
+        fn rejects_an_unknown_completion() {
+            let error = order_request_outputs(&[10], vec![output(99, 1)]).unwrap_err();
+
+            assert_eq!(error.to_string(), "generate: completed unknown request 99");
+        }
+
+        #[test]
+        fn rejects_a_duplicate_completion() {
+            let error =
+                order_request_outputs(&[10], vec![output(10, 1), output(10, 2)]).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "generate: request 10 completed more than once"
+            );
+        }
+
+        #[test]
+        fn rejects_a_missing_completion() {
+            let error = order_request_outputs(&[10, 20], vec![output(10, 1)]).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "generate: request 20 at input position 1 did not complete"
+            );
         }
     }
 
@@ -661,6 +849,111 @@ mod tests {
                 opts.gpu_memory_utilization,
                 crate::engine::scheduler::DEFAULT_GPU_MEMORY_UTILIZATION
             );
+        }
+    }
+
+    mod generate_repeated_calls {
+        use super::*;
+
+        #[test]
+        fn second_call_returns_a_real_output() {
+            let mut llm = test_llm();
+            let prompts = [Prompt::TokenIds(vec![1])];
+            let params = [SamplingParams {
+                max_tokens: 1,
+                ..SamplingParams::default()
+            }];
+
+            let first = llm.generate(&prompts, &params).unwrap();
+            assert_eq!(first[0].token_ids, vec![42]);
+
+            let second = llm.generate(&prompts, &params).unwrap();
+            assert_eq!(second[0].token_ids, vec![42]);
+            assert!(second[0].finished);
+        }
+
+        #[test]
+        fn one_instance_returns_complete_outputs_for_one_hundred_calls() {
+            let mut llm = test_llm();
+            let prompts = [Prompt::TokenIds(vec![1])];
+            let params = [SamplingParams {
+                max_tokens: 1,
+                ..SamplingParams::default()
+            }];
+
+            for expected_request_id in 0..100 {
+                let outputs = llm.generate(&prompts, &params).unwrap();
+                assert_eq!(outputs.len(), 1);
+                assert_eq!(outputs[0].request_id, expected_request_id);
+                assert_eq!(outputs[0].token_ids, vec![42]);
+                assert!(outputs[0].finished);
+            }
+        }
+    }
+
+    mod generate_batch_order {
+        use super::*;
+
+        #[test]
+        fn mixed_batch_stays_in_input_order_when_requests_finish_out_of_order() {
+            let mut llm = test_llm();
+            let warmup_prompts = [Prompt::TokenIds(vec![99])];
+            let warmup_params = [SamplingParams {
+                max_tokens: 1,
+                ..SamplingParams::default()
+            }];
+            llm.generate(&warmup_prompts, &warmup_params).unwrap();
+
+            let prompts = [
+                Prompt::TokenIds(vec![1]),
+                Prompt::TokenIds(vec![2, 3, 4]),
+                Prompt::TokenIds(vec![5, 6]),
+            ];
+            let params = [3, 1, 2].map(|max_tokens| SamplingParams {
+                max_tokens,
+                ..SamplingParams::default()
+            });
+
+            let outputs = llm.generate(&prompts, &params).unwrap();
+
+            assert_eq!(outputs.len(), prompts.len());
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|output| output.request_id)
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|output| output.token_ids.len())
+                    .collect::<Vec<_>>(),
+                vec![3, 1, 2]
+            );
+            assert!(outputs.iter().all(|output| output.finished));
+        }
+    }
+
+    mod generate_errors {
+        use super::*;
+
+        #[test]
+        fn model_execution_failure_is_returned_as_an_error() {
+            let mut llm = test_llm_with_forward_failure(true);
+            let error = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[SamplingParams {
+                        max_tokens: 1,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("injected model execution failure"));
         }
     }
 }
