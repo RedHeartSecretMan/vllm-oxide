@@ -55,7 +55,7 @@ use serde::Deserialize;
 use crate::config::{is_hf_hub_offline, Source};
 
 mod model_identity;
-pub(crate) use model_identity::ResolvedModel;
+pub use model_identity::{ModelIdentity, ResolvedModel};
 
 /// Mmap one or more `*.safetensors` files and return a candle
 /// [`ShardedVarBuilder`] over them.
@@ -111,12 +111,20 @@ pub fn load_weights_vb(
     device: &Device,
 ) -> Result<VarBuilder<'static>> {
     let paths = resolve_paths(&source)?;
+    var_builder_from_paths(&paths, dtype, device, "requested source")
+}
+
+fn var_builder_from_paths(
+    paths: &[PathBuf],
+    dtype: DType,
+    device: &Device,
+    description: &str,
+) -> Result<VarBuilder<'static>> {
     if paths.is_empty() {
-        return Err(anyhow!(
-            "resolved zero safetensors shards from the requested source"
-        ));
+        return Err(anyhow!("{description} resolved zero safetensors shards"));
     }
-    let tensors = unsafe { MmapedSafetensors::multi(&paths)? };
+    let tensors = unsafe { MmapedSafetensors::multi(paths) }
+        .with_context(|| format!("mapping safetensors for {description}"))?;
     let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
     Ok(VarBuilderArgs::new_with_args(backend, dtype, device))
 }
@@ -124,29 +132,16 @@ pub fn load_weights_vb(
 /// Build a candle [`VarBuilder`] from the already-resolved artifact paths and
 /// dtype. This is the construction path used by model factories: it cannot
 /// re-resolve a local path or follow a moving Hub revision.
-pub(crate) fn load_resolved_weights_vb(
+pub fn load_resolved_weights_vb(
     resolved: &ResolvedModel,
     device: &Device,
 ) -> Result<VarBuilder<'static>> {
-    if resolved.weight_paths().is_empty() {
-        return Err(anyhow!(
-            "model identity `{}` resolved zero safetensors shards",
-            resolved.identity()
-        ));
-    }
-    let tensors =
-        unsafe { MmapedSafetensors::multi(resolved.weight_paths()) }.with_context(|| {
-            format!(
-                "mapping safetensors for model identity `{}`",
-                resolved.identity()
-            )
-        })?;
-    let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
-    Ok(VarBuilderArgs::new_with_args(
-        backend,
+    var_builder_from_paths(
+        resolved.weight_paths(),
         resolved.dtype(),
         device,
-    ))
+        &format!("model identity `{}`", resolved.identity()),
+    )
 }
 
 pub(crate) fn validate_model_dtype(dtype: DType, origin: &str) -> Result<DType> {

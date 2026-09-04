@@ -8,17 +8,14 @@ use candle_nn::{Module, VarBuilder};
 use serde::Deserialize;
 
 use crate::attention::{build_prefill_metadata, AttentionContext, PagedKVCache};
-use crate::config::{default_dtype_from_config_json, Source};
 use crate::layers::activation::silu_and_mul;
 use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
 use crate::layers::rmsnorm::RMSNorm;
 use crate::layers::rope::RotaryEmbedding;
-use crate::loader::{
-    load_resolved_weights_vb, load_weights_vb, validate_model_dtype, ResolvedModel,
-};
+use crate::loader::{load_resolved_weights_vb, ResolvedModel};
 
-use super::registry::{BuiltModel, ModelEntry, ResolvedModelEntry};
+use super::registry::{BuiltModel, ModelEntry};
 use crate::causal_lm::CausalLM;
 
 fn default_rope_theta() -> f32 {
@@ -339,20 +336,6 @@ impl Qwen3ForCausalLM {
         })
     }
     pub fn build(
-        config_json: &[u8],
-        source: Source,
-        device: &Device,
-        max_model_len: usize,
-    ) -> Result<BuiltModel> {
-        let dtype = validate_model_dtype(
-            default_dtype_from_config_json(config_json)?,
-            "model config dtype",
-        )?;
-        let vb = load_weights_vb(source, dtype, device)?;
-        Self::build_with(config_json, vb, dtype, device, max_model_len)
-    }
-
-    fn build_resolved(
         resolved: &ResolvedModel,
         device: &Device,
         max_model_len: usize,
@@ -360,16 +343,6 @@ impl Qwen3ForCausalLM {
         let config_json = resolved.config_json();
         let dtype = resolved.dtype();
         let vb = load_resolved_weights_vb(resolved, device)?;
-        Self::build_with(config_json, vb, dtype, device, max_model_len)
-    }
-
-    fn build_with(
-        config_json: &[u8],
-        vb: VarBuilder,
-        dtype: candle_core::DType,
-        device: &Device,
-        max_model_len: usize,
-    ) -> Result<BuiltModel> {
         let config: Qwen3Config =
             serde_json::from_slice(config_json).map_err(|e| anyhow!("Qwen3Config: {e}"))?;
         if max_model_len > config.max_position_embeddings {
@@ -419,7 +392,6 @@ impl CausalLM for Qwen3ForCausalLM {
 }
 
 inventory::submit! { ModelEntry { arch: "Qwen3ForCausalLM", factory: Qwen3ForCausalLM::build } }
-inventory::submit! { ResolvedModelEntry { arch: "Qwen3ForCausalLM", factory: Qwen3ForCausalLM::build_resolved } }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -516,25 +488,9 @@ mod tests {
         )
         .unwrap();
 
-        let built = Qwen3ForCausalLM::build_resolved(&resolved, &Device::Cpu, 8).unwrap();
+        let built = Qwen3ForCausalLM::build(&resolved, &Device::Cpu, 8).unwrap();
         let cache = built.attn_ctx.paged_kv.lock().unwrap();
 
         assert_eq!(cache.dtype(), candle_core::DType::F16);
-    }
-
-    #[test]
-    fn public_factory_rejects_float32_before_loading_weights() {
-        let config = br#"{"torch_dtype":"float32"}"#;
-
-        let error = Qwen3ForCausalLM::build(
-            config,
-            Source::Local(std::path::PathBuf::from("/weights-must-not-be-read")),
-            &Device::Cpu,
-            8,
-        )
-        .err()
-        .expect("F32 must fail before loading weights");
-
-        assert!(format!("{error:#}").contains("model config dtype F32 is unsupported"));
     }
 }

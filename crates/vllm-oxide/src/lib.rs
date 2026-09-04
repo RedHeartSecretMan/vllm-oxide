@@ -36,7 +36,9 @@ pub use config::{
     default_dtype, default_dtype_from_config_json, is_hf_hub_offline, is_offline_value, HFConfig,
     Source, HF_HUB_OFFLINE_ENV,
 };
-pub use loader::{load_weights, load_weights_vb};
+pub use loader::{
+    load_resolved_weights_vb, load_weights, load_weights_vb, ModelIdentity, ResolvedModel,
+};
 
 pub use causal_lm::CausalLM;
 pub use models::registry::{BuiltModel, ModelEntry};

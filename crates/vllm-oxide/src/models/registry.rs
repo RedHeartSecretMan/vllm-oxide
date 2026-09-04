@@ -3,17 +3,12 @@ use candle_core::Device;
 use serde::Deserialize;
 
 use crate::attention::AttentionContext;
-use crate::config::Source;
 use crate::loader::ResolvedModel;
 
 use crate::causal_lm::CausalLM;
 
-pub type ModelFactory = fn(
-    config_json: &[u8],
-    source: Source,
-    device: &Device,
-    max_model_len: usize,
-) -> Result<BuiltModel>;
+pub type ModelFactory =
+    fn(resolved: &ResolvedModel, device: &Device, max_model_len: usize) -> Result<BuiltModel>;
 
 pub struct ModelEntry {
     pub arch: &'static str,
@@ -22,31 +17,21 @@ pub struct ModelEntry {
 
 inventory::collect!(ModelEntry);
 
-pub(crate) type ResolvedModelFactory =
-    fn(resolved: &ResolvedModel, device: &Device, max_model_len: usize) -> Result<BuiltModel>;
-
-pub(crate) struct ResolvedModelEntry {
-    pub(crate) arch: &'static str,
-    pub(crate) factory: ResolvedModelFactory,
-}
-
-inventory::collect!(ResolvedModelEntry);
-
 pub struct BuiltModel {
     pub model: Box<dyn CausalLM>,
     pub attn_ctx: AttentionContext,
 }
 
 /// Query the factory for an already-resolved model without performing I/O.
-pub(crate) fn resolved_factory(config_json: &[u8]) -> Result<ResolvedModelFactory> {
+pub(crate) fn resolved_factory(config_json: &[u8]) -> Result<ModelFactory> {
     let arch = read_architecture(config_json)?;
-    inventory::iter::<ResolvedModelEntry>()
+    inventory::iter::<ModelEntry>()
         .find(|entry| entry.arch == arch)
         .map(|entry| entry.factory)
         .ok_or_else(|| {
             unknown_architecture(
                 &arch,
-                inventory::iter::<ResolvedModelEntry>().map(|entry| entry.arch),
+                inventory::iter::<ModelEntry>().map(|entry| entry.arch),
             )
         })
 }

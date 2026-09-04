@@ -19,7 +19,7 @@ use crate::config::{default_dtype_from_config_json, Source};
 
 /// Stable identity shared by every artifact consumed during one construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ModelIdentity {
+pub enum ModelIdentity {
     /// One canonical local directory used for every artifact lookup.
     Local { root: PathBuf },
     /// One Hub repository pinned to an immutable commit.
@@ -185,7 +185,7 @@ impl HubAccess for OfflineHubAccess {
 
 /// A source resolved once into an immutable identity and concrete artifacts.
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedModel {
+pub struct ResolvedModel {
     identity: ModelIdentity,
     config_path: PathBuf,
     config_json: Vec<u8>,
@@ -392,15 +392,15 @@ impl ResolvedModel {
         })
     }
 
-    pub(crate) fn identity(&self) -> &ModelIdentity {
+    pub fn identity(&self) -> &ModelIdentity {
         &self.identity
     }
 
-    pub(crate) fn config_path(&self) -> &Path {
+    pub fn config_path(&self) -> &Path {
         &self.config_path
     }
 
-    pub(crate) fn config_json(&self) -> &[u8] {
+    pub fn config_json(&self) -> &[u8] {
         &self.config_json
     }
 
@@ -409,15 +409,15 @@ impl ResolvedModel {
         self.generation_config_json.as_deref()
     }
 
-    pub(crate) fn tokenizer_path(&self) -> &Path {
+    pub fn tokenizer_path(&self) -> &Path {
         &self.tokenizer_path
     }
 
-    pub(crate) fn weight_paths(&self) -> &[PathBuf] {
+    pub fn weight_paths(&self) -> &[PathBuf] {
         &self.weight_paths
     }
 
-    pub(crate) fn dtype(&self) -> DType {
+    pub fn dtype(&self) -> DType {
         self.dtype
     }
 
@@ -869,6 +869,28 @@ mod tests {
 
         assert!(message.contains("requested dtype F64"), "got: {message}");
         assert!(message.contains("BF16, F16"), "got: {message}");
+    }
+
+    #[test]
+    fn unsupported_model_config_dtype_fails_with_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            br#"{"torch_dtype":"float32","eos_token_id":7}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(tmp.path().join("model.safetensors"), b"").unwrap();
+
+        let error =
+            ResolvedModel::resolve(Source::Local(tmp.path().to_path_buf()), None).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(
+            message.contains("model config dtype F32 is unsupported"),
+            "got: {message}"
+        );
+        assert!(message.contains("local model"), "got: {message}");
     }
 
     #[test]
