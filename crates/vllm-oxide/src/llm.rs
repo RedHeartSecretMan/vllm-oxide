@@ -73,7 +73,7 @@ pub struct LLM {
     device: Device,
 }
 
-/// Build a registered model from one resolved source identity.
+/// Build a registered model from one `ResolvedModel`.
 pub fn build_model(source: Source, device: &Device, max_model_len: usize) -> Result<BuiltModel> {
     let resolved_model = ResolvedModel::resolve(source, None)?;
     build_resolved_model(&resolved_model, device, max_model_len)
