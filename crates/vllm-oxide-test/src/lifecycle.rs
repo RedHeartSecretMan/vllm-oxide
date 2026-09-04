@@ -369,7 +369,13 @@ mod tests {
 
     fn test_manifest() -> Manifest {
         serde_json::from_value(json!({
-            "schema_version": 3,
+            "schema_version": 4,
+            "product_version": "v0.2.0",
+            "golden_version": "goldens-v0.2",
+            "archive": {
+                "filename": "goldens-v0.2.tar.gz",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
             "generated_at": "2026-09-04T00:00:00Z",
             "model": {
                 "id": "model", "revision": "rev", "arch": "arch",

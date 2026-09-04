@@ -9,13 +9,16 @@ from golden_gen.config import (
     ARCH,
     ATTN_IMPLEMENTATION,
     CANONICAL_MAX_TOKENS,
+    GOLDEN_VERSION,
     MODEL_DTYPE,
     MODEL_ID,
     MODEL_REVISION,
+    PRODUCT_VERSION,
     REGRESSION_MAX_TOKENS,
     VOCAB_SIZE,
 )
 from golden_gen.schema import (
+    ArchiveInfo,
     BaselineCalibration,
     DiscoveredFixture,
     ExpectedFixture,
@@ -82,6 +85,7 @@ def build_manifest(
     fixtures: list[FixtureMetadata],
     baseline_calibration: BaselineCalibration,
     *,
+    archive: ArchiveInfo,
     tolerance_policy: TolerancePolicy,
     expected_fixtures: list[ExpectedFixture],
     generated_at: datetime | None = None,
@@ -102,7 +106,10 @@ def build_manifest(
         generated_at = datetime.now(UTC)
 
     return Manifest(
-        schema_version=3,
+        schema_version=4,
+        product_version=PRODUCT_VERSION,
+        golden_version=GOLDEN_VERSION,
+        archive=archive,
         generated_at=generated_at,
         model=ModelInfo(
             id=MODEL_ID,

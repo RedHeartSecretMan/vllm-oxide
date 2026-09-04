@@ -1,3 +1,4 @@
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -14,12 +15,19 @@ from golden_gen.calibrate import (
 )
 from golden_gen.config import VOCAB_SIZE
 from golden_gen.io import save_fixture
-from golden_gen.manifest import build_manifest, read_manifest, write_manifest
+from golden_gen.manifest import build_manifest as _build_manifest
+from golden_gen.manifest import read_manifest, write_manifest
 from golden_gen.schema import (
+    ArchiveInfo,
     BaselineCalibration,
     ExpectedFixture,
     FixtureMetadata,
     TolerancePolicy,
+)
+
+build_manifest = partial(
+    _build_manifest,
+    archive=ArchiveInfo(filename="goldens-v0.2.tar.gz", sha256="a" * 64),
 )
 
 
@@ -253,6 +261,9 @@ class TestCalibrateFromFixtures:
             baseline_calibration=tolerance,
         )
         write_manifest(manifest, tmp_path / "manifest.json")
+        archive_path = tmp_path / "goldens-v0.2.tar.gz"
+        archive_path.write_bytes(b"immutable archive bytes")
+        archive_before = archive_path.read_bytes()
 
         exit_code = cli.main(
             [
@@ -273,6 +284,7 @@ class TestCalibrateFromFixtures:
         )
 
         assert exit_code == 0
+        assert archive_path.read_bytes() == archive_before
         calibrated = read_manifest(tmp_path / "manifest.json")
         assert calibrated.calibrated_fixtures == ["canonical_01.vllm"]
         assert calibrated.tolerance_policy.version == "same-prefix-v1"

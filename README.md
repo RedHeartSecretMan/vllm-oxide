@@ -244,7 +244,7 @@ The release gate validates the Rust engine's numerical output against golden fix
 # L1 reference-token / near-tie classification + L2 logits comparison
 cargo run --release -p vllm_oxide_test --features cuda -- \
     --model-path /path/to/Qwen3-0.6B \
-    --release-tag goldens-v0.1
+    --release-tag goldens-v0.2
 ```
 
 **What it checks:**
@@ -260,11 +260,15 @@ Golden fixtures are produced by `tools/golden-gen/` (Python), which runs two ora
 - **Reference oracle**: transformers (BF16, `output_logits=True`, `attn_implementation=sdpa`)
 - **Baseline oracle**: vLLM (BF16, records calibration observations only)
 
-The schema-v3 manifest records the versioned Tolerance policy separately
+The schema-v4 manifest records the `v0.2.0` / `goldens-v0.2` compatibility,
+the deterministic fixture archive identity, and the versioned Tolerance policy separately
 from baseline calibration observations. Baseline evidence cannot override a
 reference-oracle failure.
 
-Fixtures are stored as GitHub Release assets (tag: `goldens-v0.1`), not in git. See [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md) for the full strategy.
+The `goldens-v0.2` GitHub Release has exactly two assets: `manifest.json` and
+`goldens-v0.2.tar.gz`. Fixtures appear only inside that checksum-verified archive,
+never as individual assets or in git. See [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md)
+and [ADR-0010](docs/adr/0010-golden-release-asset-contract.md).
 
 ### CI green vs numerically validated
 

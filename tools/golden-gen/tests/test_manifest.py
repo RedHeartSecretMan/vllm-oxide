@@ -1,10 +1,19 @@
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
 from pydantic import ValidationError
 
-from golden_gen.manifest import build_manifest, get_oracle_versions, read_manifest, write_manifest
+from golden_gen.manifest import (
+    build_manifest as _build_manifest,
+)
+from golden_gen.manifest import (
+    get_oracle_versions,
+    read_manifest,
+    write_manifest,
+)
 from golden_gen.schema import (
+    ArchiveInfo,
     BaselineCalibration,
     ExpectedFixture,
     FixtureMetadata,
@@ -14,6 +23,10 @@ from golden_gen.schema import (
 )
 
 MODEL_REVISION = "7e4ae267688d671ddfca3122e4528ee980cf3234"
+build_manifest = partial(
+    _build_manifest,
+    archive=ArchiveInfo(filename="goldens-v0.2.tar.gz", sha256="a" * 64),
+)
 
 
 def same_prefix_policy() -> TolerancePolicy:
@@ -86,7 +99,7 @@ class TestManifest:
             num_tokens=1,
             logits_dtype="float32",
             logits_shape=(1, 151936),
-            sha256="abc123",
+            sha256="a" * 64,
             filename="canonical_99.transformers.safetensors",
         )
 
@@ -267,7 +280,7 @@ class TestManifest:
             num_tokens=1,
             logits_dtype="float32",
             logits_shape=(0, 0),
-            sha256="abc123",
+            sha256="a" * 64,
             filename="canonical_01.transformers.safetensors",
         )
         tolerance = BaselineCalibration(
@@ -293,7 +306,7 @@ class TestManifest:
             num_tokens=1,
             logits_dtype="float32",
             logits_shape=(1, 151936),
-            sha256="abc123",
+            sha256="a" * 64,
             filename="canonical_01.transformers.safetensors",
         )
         tolerance = BaselineCalibration(
@@ -344,7 +357,7 @@ class TestManifest:
                 num_tokens=64,
                 logits_dtype="float32",
                 logits_shape=(64, 151936),
-                sha256="abc123",
+                sha256="a" * 64,
                 filename="canonical_01.transformers.safetensors",
             )
         ]
@@ -355,7 +368,10 @@ class TestManifest:
             baseline_calibration=tolerance,
             generated_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
-        assert manifest.schema_version == 3
+        assert manifest.schema_version == 4
+        assert manifest.product_version == "v0.2.0"
+        assert manifest.golden_version == "goldens-v0.2"
+        assert manifest.archive.filename == "goldens-v0.2.tar.gz"
         assert manifest.model.id == "Qwen/Qwen3-0.6B"
         assert manifest.model.arch == "Qwen3ForCausalLM"
         assert manifest.model.vocab_size == 151936
@@ -380,7 +396,7 @@ class TestManifest:
                 num_tokens=64,
                 logits_dtype="float32",
                 logits_shape=(64, 151936),
-                sha256="abc123",
+                sha256="a" * 64,
                 filename="canonical_01.transformers.safetensors",
             )
         ]
@@ -395,7 +411,7 @@ class TestManifest:
         write_manifest(manifest, path)
         restored = read_manifest(path)
         assert restored.model.id == manifest.model.id
-        assert restored.fixtures[0].sha256 == "abc123"
+        assert restored.fixtures[0].sha256 == "a" * 64
 
     def test_get_oracle_versions(self):
         versions = get_oracle_versions()

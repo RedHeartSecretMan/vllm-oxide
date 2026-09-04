@@ -1,10 +1,12 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from golden_gen.schema import (
+    ArchiveInfo,
     BaselineCalibration,
     ExpectedFixture,
     FixtureMetadata,
@@ -182,7 +184,7 @@ class TestFixtureMetadata:
             num_tokens=64,
             logits_dtype="float32",
             logits_shape=(64, 151936),
-            sha256="abc123",
+            sha256="a" * 64,
             filename="canonical_01.transformers.safetensors",
         )
         assert meta.oracle == "transformers"
@@ -196,8 +198,21 @@ class TestFixtureMetadata:
                 num_tokens=64,
                 logits_dtype="bfloat16",  # type: ignore[arg-type]
                 logits_shape=(64, 151936),
-                sha256="abc123",
+                sha256="a" * 64,
                 filename="test.safetensors",
+            )
+
+    def test_noncanonical_sha256_is_rejected(self):
+        with pytest.raises(ValidationError, match="sha256"):
+            FixtureMetadata(
+                prompt_id="canonical_01",
+                category="canonical",
+                oracle="transformers",
+                num_tokens=1,
+                logits_dtype="float32",
+                logits_shape=(1, 151936),
+                sha256="ABC123",
+                filename="canonical_01.transformers.safetensors",
             )
 
 
@@ -215,6 +230,69 @@ class TestBaselineCalibration:
 
 
 class TestManifest:
+    def test_shared_manifest_v4_fixture_is_compatible(self):
+        path = Path(__file__).parent / "fixtures" / "manifest-v4.json"
+
+        manifest = Manifest.from_json(path)
+
+        assert manifest.schema_version == 4
+        assert manifest.archive.sha256 == "a" * 64
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("schema_version", 5),
+            ("product_version", "v0.3.0"),
+            ("golden_version", "goldens-v0.3"),
+        ],
+    )
+    def test_asset_contract_upgrade_is_rejected(self, field, value):
+        path = Path(__file__).parent / "fixtures" / "manifest-v4.json"
+        data = json.loads(path.read_text())
+        data[field] = value
+
+        with pytest.raises(ValidationError, match=field):
+            Manifest.model_validate(data)
+
+    @pytest.mark.parametrize(
+        "field",
+        ["schema_version", "product_version", "golden_version", "archive"],
+    )
+    def test_missing_asset_contract_field_is_rejected(self, field):
+        path = Path(__file__).parent / "fixtures" / "manifest-v4.json"
+        data = json.loads(path.read_text())
+        del data[field]
+
+        with pytest.raises(ValidationError, match=field):
+            Manifest.model_validate(data)
+
+    def test_case_colliding_fixture_names_are_rejected(self):
+        path = Path(__file__).parent / "fixtures" / "manifest-v4.json"
+        data = json.loads(path.read_text())
+        for fixture in list(data["expected_fixtures"]):
+            duplicate = dict(fixture)
+            duplicate["fixture_id"] = duplicate["fixture_id"].replace(
+                "canonical_01", "CANONICAL_01"
+            )
+            duplicate["prompt_id"] = "CANONICAL_01"
+            duplicate["filename"] = duplicate["filename"].replace("canonical_01", "CANONICAL_01")
+            data["expected_fixtures"].append(duplicate)
+
+        with pytest.raises(ValidationError, match="case-colliding"):
+            Manifest.model_validate(data)
+
+    @pytest.mark.parametrize(
+        ("filename", "sha256"),
+        [
+            ("fixtures.tar.gz", "a" * 64),
+            ("goldens-v0.2.tar.gz", "A" * 64),
+            ("goldens-v0.2.tar.gz", "abc"),
+        ],
+    )
+    def test_noncanonical_archive_identity_is_rejected(self, filename, sha256):
+        with pytest.raises(ValidationError):
+            ArchiveInfo(filename=filename, sha256=sha256)  # type: ignore[arg-type]
+
     def test_build_and_roundtrip(self, tmp_path):
         calibration = BaselineCalibration(
             candidate_atol=0.01,
@@ -229,7 +307,7 @@ class TestManifest:
             num_tokens=64,
             logits_dtype="float32",
             logits_shape=(64, 151936),
-            sha256="abc123",
+            sha256="a" * 64,
             filename="canonical_01.transformers.safetensors",
         )
         expected = [
@@ -257,7 +335,10 @@ class TestManifest:
             ),
         ]
         manifest = Manifest(
-            schema_version=3,
+            schema_version=4,
+            product_version="v0.2.0",
+            golden_version="goldens-v0.2",
+            archive=ArchiveInfo(filename="goldens-v0.2.tar.gz", sha256="a" * 64),
             generated_at=datetime.now(UTC),
             model=ModelInfo(
                 id="Qwen/Qwen3-0.6B",
@@ -289,8 +370,11 @@ class TestManifest:
         path = tmp_path / "manifest.json"
         manifest.to_json(path)
         restored = Manifest.from_json(path)
-        assert restored.schema_version == 3
+        assert restored.schema_version == 4
+        assert restored.product_version == "v0.2.0"
+        assert restored.golden_version == "goldens-v0.2"
+        assert restored.archive.filename == "goldens-v0.2.tar.gz"
         assert len(restored.fixtures) == 1
-        assert restored.fixtures[0].sha256 == "abc123"
+        assert restored.fixtures[0].sha256 == "a" * 64
         assert restored.baseline_calibration.candidate_atol == 0.01
         assert restored.tolerance_policy.version == "same-prefix-v1"

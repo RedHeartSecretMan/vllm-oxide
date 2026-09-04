@@ -18,7 +18,7 @@ generator (`tools/golden-gen/`):
 | **L2** | Same-prefix logits tensor comparison (absolute tolerance) | Always |
 | **L3** | Per-layer activations (debug only) | `--debug` flag |
 
-Before any GPU comparison, a CPU preflight matches the schema-v3 manifest to
+Before any GPU comparison, a CPU preflight matches the schema-v4 manifest to
 all canonical, flattened batch, and regression prompts; verifies asset names,
 SHA-256 digests, tensor sets, dtypes, and shapes; and classifies the two oracle
 roles. Only Transformers reference artifacts feed correctness comparisons.
@@ -46,7 +46,7 @@ cargo run --release -p vllm_oxide_test -- \
 ```bash
 cargo run --release -p vllm_oxide_test -- \
     --model-path /path/to/Qwen3-0.6B \
-    --release-tag goldens-v0.1 \
+    --release-tag goldens-v0.2 \
     --cache-dir /tmp/vllm-oxide-goldens
 ```
 
@@ -79,6 +79,24 @@ Golden fixtures are described by a `manifest.json` (produced by
 - **Baseline calibration**: observed oracle differences and methodology,
   reported separately from reference correctness
 - **Fixtures**: per-file metadata including SHA-256 hashes
+- **Asset identity**: schema `4`, product `v0.2.0`, golden tag
+  `goldens-v0.2`, and the SHA-256 identity of `goldens-v0.2.tar.gz`
+
+The release contains exactly `manifest.json` and `goldens-v0.2.tar.gz`; it does
+not contain individual fixture assets. The downloader requires the requested
+tag to equal the manifest golden version, verifies the complete archive before
+exposure, and installs to
+`<cache-dir>/goldens-v0.2/<archive-sha256>`. A complete existing immutable
+install is reused. An incomplete or modified existing install is rejected and
+never overwritten.
+
+Archive paths and types are checked from raw USTAR headers. Absolute, nested,
+`.`/`..`, backslash, non-ASCII, duplicate, undeclared, link, directory, device,
+FIFO, non-USTAR, oversized, malformed, and checksum-mismatched entries fail
+closed. Extraction occurs in a unique sibling staging directory; only a fully
+verified fixture set and standalone manifest become visible through one rename.
+Failures clean only their unpublished staging directory, preserving older
+installs. Concurrent installers verify and reuse the winning rename.
 
 The report includes exact `expected`, `discovered`, `generated`, `compared`,
 `missing`, `unexpected`, `skipped`, and `failed` totals. Release acceptance is
@@ -143,7 +161,7 @@ crates/vllm-oxide-test/
     ├── types.rs       # Manifest schema types (matches Python schema.py)
     ├── manifest.rs    # Manifest parsing + fixture loading
     ├── lifecycle.rs   # Discovery, asset preflight, and exact coverage accounting
-    ├── download.rs    # GitHub Release asset download + SHA-256 verification
+    ├── download.rs    # exact-two download + verified atomic archive installation
     ├── l1.rs          # L1: token reference match + explicit near-tie classification
     ├── l2.rs          # L2: same-prefix logits comparison (absolute tolerance)
     ├── l3.rs          # L3: per-layer activations (debug-only, skeleton)

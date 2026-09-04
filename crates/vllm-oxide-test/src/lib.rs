@@ -31,6 +31,6 @@ pub use lifecycle::LifecycleTracker;
 pub use manifest::{load_fixture, parse_manifest, parse_manifest_bytes};
 pub use report::{print_report, ComparisonReport, LifecycleTotals};
 pub use types::{
-    BaselineCalibration, ExpectedFixture, FixtureData, FixtureFamily, FixtureMetadata, Manifest,
-    OracleRole, RequiredComparison, TolerancePolicy,
+    ArchiveInfo, BaselineCalibration, ExpectedFixture, FixtureData, FixtureFamily, FixtureMetadata,
+    Manifest, OracleRole, RequiredComparison, TolerancePolicy,
 };

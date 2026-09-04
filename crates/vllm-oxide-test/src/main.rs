@@ -5,7 +5,7 @@
 //!     --manifest /path/to/goldens/manifest.json
 //!
 //! vllm-oxide-test --model-path /path/to/Qwen3-0.6B \
-//!     --release-tag goldens-v0.1 --cache-dir /tmp/goldens
+//!     --release-tag goldens-v0.2 --cache-dir /tmp/goldens
 //! ```
 
 use std::path::PathBuf;

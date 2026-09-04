@@ -243,7 +243,7 @@ cargo test
 # L1 参考 token / near-tie 分类 + L2 logits 比较
 cargo run --release -p vllm_oxide_test --features cuda -- \
     --model-path /path/to/Qwen3-0.6B \
-    --release-tag goldens-v0.1
+    --release-tag goldens-v0.2
 ```
 
 **验证内容：**
@@ -259,10 +259,15 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 - **参考预言机**：transformers（BF16，`output_logits=True`，`attn_implementation=sdpa`）
 - **基线预言机**：vLLM（BF16，仅记录校准观察）
 
-schema-v3 manifest 将版本化的容差策略与基线校准观察分开记录；
+schema-v4 manifest 记录 `v0.2.0` / `goldens-v0.2` 兼容关系、确定性夹具归档身份，
+并将版本化的容差策略与基线校准观察分开记录；
 基线证据不能覆盖参考预言机失败。
 
-夹具作为 GitHub Release 资产（标签：`goldens-v0.1`）存储，不在 git 中。完整策略见 [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md)。
+`goldens-v0.2` GitHub Release 严格只有 `manifest.json` 与
+`goldens-v0.2.tar.gz` 两个资产。夹具只存在于经过 checksum 验证的归档内，
+不会作为单独资产上传，也不进入 git。完整策略见
+[ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md) 与
+[ADR-0010](docs/adr/0010-golden-release-asset-contract.md)。
 
 ### CI 绿色与数值验证
 

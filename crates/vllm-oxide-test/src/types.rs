@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub schema_version: u32,
+    pub product_version: String,
+    pub golden_version: String,
+    pub archive: ArchiveInfo,
     pub generated_at: String,
     pub model: ModelInfo,
     pub oracle_versions: OracleVersions,
@@ -23,6 +26,14 @@ pub struct Manifest {
     /// Baseline fixture identifiers successfully consumed by calibration.
     #[serde(default)]
     pub calibrated_fixtures: Vec<String>,
+}
+
+/// Identity of the sole compressed fixture archive release asset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveInfo {
+    pub filename: String,
+    pub sha256: String,
 }
 
 /// Contract for one oracle artifact required by the release manifest.

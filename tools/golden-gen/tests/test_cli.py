@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -63,6 +64,7 @@ class TestCLI:
         assert "Generate golden fixtures" in result.stdout
         assert "generate" in result.stdout
         assert "calibrate" in result.stdout
+        assert "bundle" in result.stdout
 
     def test_generate_help(self):
         result = subprocess.run(
@@ -91,6 +93,30 @@ class TestCLI:
         assert "--tolerance-policy-rationale" in result.stdout
         assert "--tolerance-policy-evidence" in result.stdout
 
+    def test_bundle_command_uses_the_local_publisher_seam(self, tmp_path, monkeypatch):
+        fixture_dir = tmp_path / "fixtures"
+        release_dir = tmp_path / "release"
+        observed = []
+
+        def fake_publish(source, destination):
+            observed.append((source, destination))
+            return destination
+
+        monkeypatch.setattr(cli, "publish_release_bundle", fake_publish)
+
+        exit_code = cli.main(
+            [
+                "bundle",
+                "--fixture-dir",
+                str(fixture_dir),
+                "--release-dir",
+                str(release_dir),
+            ]
+        )
+
+        assert exit_code == 0
+        assert observed == [(fixture_dir, release_dir)]
+
     def test_dry_run_produces_manifest(self, tmp_path):
         """generate --dry-run should produce a fake manifest + fixtures."""
         result = subprocess.run(
@@ -116,7 +142,15 @@ class TestCLI:
 
         with open(manifest_path) as f:
             manifest = json.load(f)
-        assert manifest["schema_version"] == 3
+        assert manifest["schema_version"] == 4
+        assert manifest["product_version"] == "v0.2.0"
+        assert manifest["golden_version"] == "goldens-v0.2"
+        archive_path = tmp_path / "output" / "goldens-v0.2.tar.gz"
+        assert archive_path.is_file()
+        assert manifest["archive"] == {
+            "filename": "goldens-v0.2.tar.gz",
+            "sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        }
         assert manifest["tolerance_policy"] == {
             "version": "same-prefix-v1",
             "dtype": "bfloat16",

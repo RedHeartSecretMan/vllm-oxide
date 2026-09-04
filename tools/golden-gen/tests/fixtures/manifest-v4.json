@@ -1,0 +1,99 @@
+{
+  "schema_version": 4,
+  "product_version": "v0.2.0",
+  "golden_version": "goldens-v0.2",
+  "archive": {
+    "filename": "goldens-v0.2.tar.gz",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "generated_at": "2026-09-05T00:00:00Z",
+  "model": {
+    "id": "Qwen/Qwen3-0.6B",
+    "revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+    "arch": "Qwen3ForCausalLM",
+    "dtype": "bfloat16",
+    "vocab_size": 151936
+  },
+  "oracle_versions": {
+    "transformers": "5.0.0",
+    "vllm": "0.26.0"
+  },
+  "generation": {
+    "canonical_max_tokens": 64,
+    "regression_max_tokens": 32,
+    "temperature": 0.0,
+    "attn_implementation": "sdpa"
+  },
+  "tolerance_policy": {
+    "version": "same-prefix-v1",
+    "dtype": "bfloat16",
+    "kernel": "sdpa",
+    "l1_near_tie_max_abs_logit_gap": 0.02,
+    "l2_atol": 0.01,
+    "rationale": "Reviewed cross-language fixture",
+    "evidence": [
+      "test:manifest-v4"
+    ]
+  },
+  "baseline_calibration": {
+    "candidate_atol": 0.01,
+    "observed_max_abs_diff": 0.005,
+    "calibration_factor": 2.0,
+    "method": "cross-language test"
+  },
+  "expected_fixtures": [
+    {
+      "fixture_id": "canonical_01.transformers",
+      "prompt_id": "canonical_01",
+      "family": "canonical",
+      "model_revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+      "dtype": "bfloat16",
+      "oracle": "transformers",
+      "oracle_role": "reference",
+      "required_comparison": "l1_l2",
+      "filename": "canonical_01.transformers.safetensors"
+    },
+    {
+      "fixture_id": "canonical_01.vllm",
+      "prompt_id": "canonical_01",
+      "family": "canonical",
+      "model_revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+      "dtype": "bfloat16",
+      "oracle": "vllm",
+      "oracle_role": "baseline",
+      "required_comparison": "calibration",
+      "filename": "canonical_01.vllm.safetensors"
+    }
+  ],
+  "fixtures": [
+    {
+      "prompt_id": "canonical_01",
+      "category": "canonical",
+      "oracle": "transformers",
+      "num_tokens": 1,
+      "logits_dtype": "float32",
+      "logits_shape": [
+        1,
+        151936
+      ],
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "filename": "canonical_01.transformers.safetensors"
+    },
+    {
+      "prompt_id": "canonical_01",
+      "category": "canonical",
+      "oracle": "vllm",
+      "num_tokens": 1,
+      "logits_dtype": "float32",
+      "logits_shape": [
+        1,
+        151936
+      ],
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "filename": "canonical_01.vllm.safetensors"
+    }
+  ],
+  "calibrated_fixtures": [
+    "canonical_01.vllm"
+  ]
+}

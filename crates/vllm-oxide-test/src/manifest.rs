@@ -25,11 +25,26 @@ pub fn parse_manifest_bytes(content: &[u8], source: &str) -> Result<Manifest> {
 }
 
 fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
-    if manifest.schema_version != 3 {
+    if manifest.schema_version != 4 {
         anyhow::bail!(
-            "unsupported manifest schema_version {}; expected 3",
+            "unsupported manifest schema_version {}; expected 4",
             manifest.schema_version
         );
+    }
+    if manifest.product_version != "v0.2.0" {
+        anyhow::bail!("unsupported product version: {}", manifest.product_version);
+    }
+    if manifest.golden_version != "goldens-v0.2" {
+        anyhow::bail!("unsupported golden version: {}", manifest.golden_version);
+    }
+    if manifest.archive.filename != "goldens-v0.2.tar.gz" {
+        anyhow::bail!(
+            "unsupported golden archive filename: {}",
+            manifest.archive.filename
+        );
+    }
+    if !is_lowercase_sha256(&manifest.archive.sha256) {
+        anyhow::bail!("archive sha256 must be 64 lowercase hexadecimal characters");
     }
     if manifest.model.dtype != "bfloat16" || manifest.generation.attn_implementation != "sdpa" {
         anyhow::bail!("golden manifest requires the Transformers BF16 SDPA reference oracle");
@@ -77,6 +92,7 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
         anyhow::bail!("manifest model identity is incomplete");
     }
     let mut expected_ids = HashSet::new();
+    let mut portable_filenames = HashSet::new();
     let mut roles_by_prompt: HashMap<&str, HashSet<OracleRole>> = HashMap::new();
     let mut families_by_prompt: HashMap<&str, HashSet<FixtureFamily>> = HashMap::new();
     for expected in &manifest.expected_fixtures {
@@ -107,6 +123,9 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
                 "non-canonical fixture identifier or filename: {}",
                 expected.fixture_id
             );
+        }
+        if !portable_filenames.insert(expected.filename.to_ascii_lowercase()) {
+            anyhow::bail!("case-colliding fixture filename: {}", expected.filename);
         }
         if expected.model_revision != manifest.model.revision
             || expected.dtype != manifest.model.dtype
@@ -189,6 +208,12 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
         })
         .collect();
     for fixture in &manifest.fixtures {
+        if !is_lowercase_sha256(&fixture.sha256) {
+            anyhow::bail!(
+                "fixture {} sha256 must be 64 lowercase hexadecimal characters",
+                fixture.filename
+            );
+        }
         let key = (
             fixture.prompt_id.as_str(),
             &fixture.oracle,
@@ -225,6 +250,13 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Load a single `.safetensors` fixture file into a `FixtureData`.
@@ -391,7 +423,13 @@ mod tests {
 
     fn valid_manifest_json() -> Value {
         json!({
-            "schema_version": 3,
+            "schema_version": 4,
+            "product_version": "v0.2.0",
+            "golden_version": "goldens-v0.2",
+            "archive": {
+                "filename": "goldens-v0.2.tar.gz",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
             "generated_at": "2026-09-04T00:00:00Z",
             "model": {
                 "id": "Qwen/Qwen3-0.6B",
@@ -449,6 +487,139 @@ mod tests {
             "fixtures": [],
             "calibrated_fixtures": []
         })
+    }
+
+    #[test]
+    fn shared_python_manifest_v4_fixture_is_compatible() {
+        let bytes = include_bytes!("../../../tools/golden-gen/tests/fixtures/manifest-v4.json");
+
+        let manifest =
+            super::parse_manifest_bytes(bytes, "shared Python manifest fixture").unwrap();
+
+        assert_eq!(manifest.schema_version, 4);
+        assert_eq!(manifest.archive.sha256, "a".repeat(64));
+    }
+
+    #[test]
+    fn schema_v4_asset_contract_is_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let mut manifest = valid_manifest_json();
+        manifest["schema_version"] = json!(4);
+        manifest["product_version"] = json!("v0.2.0");
+        manifest["golden_version"] = json!("goldens-v0.2");
+        manifest["archive"] = json!({
+            "filename": "goldens-v0.2.tar.gz",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let parsed = parse_manifest(&path).unwrap();
+
+        assert_eq!(parsed.schema_version, 4);
+        assert_eq!(parsed.product_version, "v0.2.0");
+        assert_eq!(parsed.golden_version, "goldens-v0.2");
+        assert_eq!(parsed.archive.filename, "goldens-v0.2.tar.gz");
+    }
+
+    #[test]
+    fn unsupported_product_golden_and_archive_contracts_are_rejected() {
+        let cases = [
+            (
+                "product_version",
+                json!("v0.3.0"),
+                "unsupported product version",
+            ),
+            (
+                "golden_version",
+                json!("goldens-v0.3"),
+                "unsupported golden version",
+            ),
+            (
+                "archive.filename",
+                json!("fixtures.tar.gz"),
+                "unsupported golden archive filename",
+            ),
+            (
+                "archive.sha256",
+                json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                "64 lowercase hexadecimal",
+            ),
+        ];
+        for (field, value, expected_error) in cases {
+            let mut manifest = valid_manifest_json();
+            if let Some(archive_field) = field.strip_prefix("archive.") {
+                manifest["archive"][archive_field] = value;
+            } else {
+                manifest[field] = value;
+            }
+
+            let error = super::parse_manifest_bytes(
+                &serde_json::to_vec(&manifest).unwrap(),
+                "version rejection test",
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(error.contains(expected_error), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn noncanonical_fixture_checksum_is_rejected() {
+        let mut manifest = valid_manifest_json();
+        manifest["fixtures"] = json!([{
+            "prompt_id": "canonical_01",
+            "category": "canonical",
+            "oracle": "transformers",
+            "num_tokens": 1,
+            "logits_dtype": "float32",
+            "logits_shape": [1, 151_936],
+            "sha256": "ABC123",
+            "filename": "canonical_01.transformers.safetensors"
+        }]);
+
+        let error = super::parse_manifest_bytes(
+            &serde_json::to_vec(&manifest).unwrap(),
+            "fixture checksum test",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("64 lowercase hexadecimal"), "{error}");
+    }
+
+    #[test]
+    fn case_colliding_fixture_names_are_rejected() {
+        let mut manifest = valid_manifest_json();
+        let duplicates: Vec<_> = manifest["expected_fixtures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fixture| {
+                let mut duplicate = fixture.clone();
+                for field in ["fixture_id", "prompt_id", "filename"] {
+                    duplicate[field] = json!(duplicate[field]
+                        .as_str()
+                        .unwrap()
+                        .replace("canonical_01", "CANONICAL_01"));
+                }
+                duplicate
+            })
+            .collect();
+        manifest["expected_fixtures"]
+            .as_array_mut()
+            .unwrap()
+            .extend(duplicates);
+
+        let error = super::parse_manifest_bytes(
+            &serde_json::to_vec(&manifest).unwrap(),
+            "case collision test",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("case-colliding"), "{error}");
     }
 
     #[test]
@@ -626,7 +797,7 @@ mod tests {
             "num_tokens": 1,
             "logits_dtype": "float32",
             "logits_shape": [1, 151_936],
-            "sha256": "abc123",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "filename": "canonical_99.transformers.safetensors"
         }]);
         std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();

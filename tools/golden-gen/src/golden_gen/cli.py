@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from golden_gen.assets import build_fixture_archive, publish_release_bundle
 from golden_gen.calibrate import (
     calibrate_from_fixtures,
     validate_calibration_coverage,
@@ -102,6 +103,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evidence identifier or URI; repeat for every reviewed source",
     )
 
+    bundle = subparsers.add_parser(
+        "bundle",
+        help="Build the exact two-file local release bundle from calibrated fixtures",
+    )
+    bundle.add_argument(
+        "--fixture-dir",
+        type=Path,
+        required=True,
+        help="Directory containing schema-v4 manifest and declared fixtures",
+    )
+    bundle.add_argument(
+        "--release-dir",
+        type=Path,
+        required=True,
+        help="New independent directory to contain only the two release assets",
+    )
+
     return parser
 
 
@@ -113,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_generate(args)
     elif args.command == "calibrate":
         return _run_calibrate(args)
+    elif args.command == "bundle":
+        return _run_bundle(args)
     else:
         parser.print_help()
         return 1
@@ -264,17 +284,39 @@ def _run_generate(args: argparse.Namespace) -> int:
             rationale="pending reviewed policy selection",
             evidence=[],
         )
+    for fixture in all_fixtures:
+        staged_path = staging_dir / fixture.filename
+        if staged_path.exists():
+            continue
+        source_path = output_dir / fixture.filename
+        if not source_path.is_file() or source_path.is_symlink():
+            print(f"ERROR: regular existing fixture not found at {source_path}", file=sys.stderr)
+            staging.cleanup()
+            return 1
+        staged_path.hardlink_to(source_path)
+    staged_archive_path = staging_dir / "goldens-v0.2.tar.gz"
+    try:
+        archive = build_fixture_archive(staging_dir, all_fixtures, staged_archive_path)
+    except (OSError, ValueError) as error:
+        print(f"ERROR: fixture archive build failed: {error}", file=sys.stderr)
+        staging.cleanup()
+        return 1
+
     manifest = build_manifest(
         fixtures=all_fixtures,
         baseline_calibration=baseline_calibration,
+        archive=archive,
         tolerance_policy=tolerance_policy,
         expected_fixtures=expected_fixtures,
     )
     manifest_path = output_dir / "manifest.json"
     staged_manifest_path = staging_dir / "manifest.json"
     write_manifest(manifest, staged_manifest_path)
+    generated_filenames = {f"{fixture_id}.safetensors" for fixture_id in generated_this_run}
     for fixture_path in staging_dir.glob("*.safetensors"):
-        fixture_path.replace(output_dir / fixture_path.name)
+        if fixture_path.name in generated_filenames:
+            fixture_path.replace(output_dir / fixture_path.name)
+    staged_archive_path.replace(output_dir / archive.filename)
     staged_manifest_path.replace(manifest_path)
     staging.cleanup()
     print(f"Manifest written to {manifest_path}")
@@ -292,6 +334,16 @@ def _run_generate(args: argparse.Namespace) -> int:
             "`golden-gen calibrate --help` for the required reviewed inputs."
         )
 
+    return 0
+
+
+def _run_bundle(args: argparse.Namespace) -> int:
+    try:
+        release_dir = publish_release_bundle(Path(args.fixture_dir), Path(args.release_dir))
+    except (OSError, ValueError) as error:
+        print(f"ERROR: release bundle failed: {error}", file=sys.stderr)
+        return 1
+    print(f"Release bundle written to {release_dir}")
     return 0
 
 

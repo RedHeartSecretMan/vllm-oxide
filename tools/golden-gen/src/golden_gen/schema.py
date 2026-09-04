@@ -83,7 +83,7 @@ class FixtureMetadata(BaseModel):
     num_tokens: int = Field(gt=0)
     logits_dtype: Literal["float32"]
     logits_shape: tuple[int, int]
-    sha256: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     filename: str
 
 
@@ -133,6 +133,15 @@ class GenerationConfig(BaseModel):
     attn_implementation: str
 
 
+class ArchiveInfo(BaseModel):
+    """Identity of the sole compressed fixture archive release asset."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    filename: Literal["goldens-v0.2.tar.gz"]
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ManifestEntry(BaseModel):
     """A single entry in a manifest: a (prompt_id, oracle) fixture file."""
 
@@ -151,7 +160,10 @@ class Manifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4]
+    product_version: Literal["v0.2.0"]
+    golden_version: Literal["goldens-v0.2"]
+    archive: ArchiveInfo
     generated_at: datetime
     model: ModelInfo
     oracle_versions: OracleVersions
@@ -180,6 +192,7 @@ class Manifest(BaseModel):
         fixture_ids = [entry.fixture_id for entry in self.expected_fixtures]
         if len(fixture_ids) != len(set(fixture_ids)):
             raise ValueError("duplicate expected fixture identifier")
+        portable_filenames: set[str] = set()
         for entry in self.expected_fixtures:
             if not entry.prompt_id.replace("_", "").replace("-", "").isalnum() or not (
                 entry.prompt_id.isascii()
@@ -190,6 +203,10 @@ class Manifest(BaseModel):
                 raise ValueError(
                     f"non-canonical fixture identifier or filename: {entry.fixture_id}"
                 )
+            portable_filename = entry.filename.lower()
+            if portable_filename in portable_filenames:
+                raise ValueError(f"case-colliding fixture filename: {entry.filename}")
+            portable_filenames.add(portable_filename)
             if entry.model_revision != self.model.revision or entry.dtype != self.model.dtype:
                 raise ValueError(
                     f"fixture {entry.fixture_id} model revision or dtype does not match manifest"
