@@ -840,7 +840,7 @@ mod tests {
                 vec![0],
                 vec![],
                 vec![],
-                vec![0, 0, 0],
+                vec![0, 1, 2, 3, 4, 5, 6, 7],
                 vec![0],
                 vec![0, 0],
                 vec![0],
@@ -857,6 +857,11 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .allocation_identity();
+            assert_eq!(
+                sampler.cuda_workspace.as_ref().unwrap().history_capacity(),
+                8,
+                "no-op penalty rows must not inflate or upload history workspace"
+            );
             let second = sampler.forward(&logits, &params, &histories).unwrap();
             assert_eq!(
                 sampler

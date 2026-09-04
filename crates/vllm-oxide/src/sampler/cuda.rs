@@ -146,20 +146,23 @@ impl Workspace {
             return Ok(());
         }
         let new_capacity = next_capacity(required)?;
-        self.history_tokens = Tensor::zeros(new_capacity, DType::U32, &self.device).map_err(
-            |error| {
+        let history_tokens =
+            Tensor::zeros(new_capacity, DType::U32, &self.device).map_err(|error| {
                 Error::msg(format!(
                     "sampler CUDA workspace growth failed for history tokens ({new_capacity}): {error}"
                 ))
-            },
-        )?;
-        self.history_counts = Tensor::zeros(new_capacity, DType::U32, &self.device).map_err(
-            |error| {
+            })?;
+        let history_counts =
+            Tensor::zeros(new_capacity, DType::U32, &self.device).map_err(|error| {
                 Error::msg(format!(
                     "sampler CUDA workspace growth failed for history counts ({new_capacity}): {error}"
                 ))
-            },
-        )?;
+            })?;
+        // Commit the grown pair atomically only after both allocations
+        // succeed. A failed second allocation leaves the reusable workspace
+        // and its recorded capacity internally consistent for retry.
+        self.history_tokens = history_tokens;
+        self.history_counts = history_counts;
         self.history_capacity = new_capacity;
         Ok(())
     }
@@ -176,6 +179,11 @@ impl Workspace {
             + (2 * std::mem::size_of::<u32>())
             + self.temp_storage.elem_count()
             + (self.history_capacity * std::mem::size_of::<u32>() * 2)
+    }
+
+    #[cfg(test)]
+    pub(super) fn history_capacity(&self) -> usize {
+        self.history_capacity
     }
 }
 
@@ -237,20 +245,22 @@ fn prepare_batch(
             .repetition_penalties
             .push(params.repetition_penalty);
 
-        let mut counts = BTreeMap::<u32, u32>::new();
-        for &token in history {
-            if token < vocab_u32 {
-                let count = counts.entry(token).or_default();
-                *count = count.checked_add(1).ok_or_else(|| {
-                    Error::msg(format!(
-                        "sampler CUDA adapter: row {row} history count overflow for token {token}"
-                    ))
-                })?;
+        if params.has_penalties() && !history.is_empty() {
+            let mut counts = BTreeMap::<u32, u32>::new();
+            for &token in history {
+                if token < vocab_u32 {
+                    let count = counts.entry(token).or_default();
+                    *count = count.checked_add(1).ok_or_else(|| {
+                        Error::msg(format!(
+                            "sampler CUDA adapter: row {row} history count overflow for token {token}"
+                        ))
+                    })?;
+                }
             }
-        }
-        for (token, count) in counts {
-            prepared.history_tokens.push(token);
-            prepared.history_counts.push(count);
+            for (token, count) in counts {
+                prepared.history_tokens.push(token);
+                prepared.history_counts.push(count);
+            }
         }
         prepared
             .history_offsets
