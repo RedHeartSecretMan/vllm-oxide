@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "3215b3b7b8518b6341deacbaa768cd0c2679beeb"
+      "blob_oid": "077eeb0982433b1147d51ff3217a9209b868ef31"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -44,6 +44,10 @@
     {
       "path": "docs/adr/0009-sampling-params-validation-and-diagnostics.md",
       "blob_oid": "e9e46d6f32d8c35f302276558623ed6a59592f96"
+    },
+    {
+      "path": "docs/adr/0010-golden-release-asset-contract.md",
+      "blob_oid": "39a3da72dd217ecde4335f940757d5776efe1f69"
     }
   ]
 }

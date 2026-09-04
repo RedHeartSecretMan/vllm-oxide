@@ -124,8 +124,12 @@ _Avoid_: engine config, runtime options.
 ## Correctness
 
 **Golden fixture**:
-A content-addressed `.safetensors` file produced by the Python harness (`tools/golden-gen/`) running two oracle engines (transformers + vLLM) on fixed prompts. Used for L1 (token-sequence exact match) and L2 (logits tensor comparison) validation of the Rust engine. Stored as GitHub Release assets, NOT in git mainline.
+A content-addressed `.safetensors` file produced by the Python harness (`tools/golden-gen/`) running two oracle engines (transformers + vLLM) on fixed prompts. Used for L1 (token-sequence exact match) and L2 (logits tensor comparison) validation of the Rust engine. Published only inside a `Golden asset bundle`, never as an individual asset or in git mainline.
 _Avoid_: reference output, expected output, snapshot, oracle output.
+
+**Golden asset bundle**:
+The immutable release pair containing one standalone manifest and one compressed archive of every declared `Golden fixture`. It is the only published transport for a golden version; individual fixture release assets are outside the contract.
+_Avoid_: fixture pack, golden package, per-fixture assets.
 
 **Reference oracle**:
 The authoritative correctness target: Transformers BF16 with `output_logits=True` and `attn_implementation=sdpa`. A reference-oracle failure cannot be overridden by baseline evidence.
