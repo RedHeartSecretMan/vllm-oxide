@@ -145,7 +145,7 @@ fn compare_reference_case(
     let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
     let (n_steps, vocab_size) =
         generated_logits_geometry(logits.dims(), logits_vals.len(), manifest.model.vocab_size)?;
-    let generated_tokens = extract_greedy_tokens(&logits_vals, n_steps, vocab_size);
+    let generated_tokens = extract_greedy_tokens(&logits_vals, n_steps, vocab_size)?;
 
     let (l1, l2) = match case.metadata.category {
         PromptCategory::Canonical => (
@@ -209,7 +209,11 @@ fn generated_logits_geometry(
 ///
 /// `logits_vals` is a row-major flat array of shape `[n_steps * vocab_size]`.
 /// Returns one token id per step.
-fn extract_greedy_tokens(logits_vals: &[f32], n_steps: usize, vocab_size: usize) -> Vec<u32> {
+fn extract_greedy_tokens(
+    logits_vals: &[f32],
+    n_steps: usize,
+    vocab_size: usize,
+) -> Result<Vec<u32>> {
     let mut tokens = Vec::with_capacity(n_steps);
     for step in 0..n_steps {
         let start = step * vocab_size;
@@ -219,6 +223,9 @@ fn extract_greedy_tokens(logits_vals: &[f32], n_steps: usize, vocab_size: usize)
         // vocab size ≤ 200k; truncation impossible
         #[allow(clippy::cast_possible_truncation)]
         for (j, &val) in logits_vals[start..end].iter().enumerate() {
+            if !val.is_finite() {
+                anyhow::bail!("non-finite generated logit at step {step}, token {j}");
+            }
             if val > max_val {
                 max_val = val;
                 max_idx = j as u32;
@@ -226,7 +233,7 @@ fn extract_greedy_tokens(logits_vals: &[f32], n_steps: usize, vocab_size: usize)
         }
         tokens.push(max_idx);
     }
-    tokens
+    Ok(tokens)
 }
 
 #[cfg(test)]
@@ -239,15 +246,22 @@ mod tests {
         // 2 steps × 4 vocab: row 0 → argmax at idx 2 (val 0.9),
         // row 1 → argmax at idx 0 (val 0.7).
         let logits: Vec<f32> = vec![0.1, 0.2, 0.9, 0.3, 0.7, 0.5, 0.1, 0.4];
-        let tokens = extract_greedy_tokens(&logits, 2, 4);
+        let tokens = extract_greedy_tokens(&logits, 2, 4).unwrap();
         assert_eq!(tokens, vec![2, 0]);
     }
 
     #[test]
     fn argmax_single_step() {
         let logits: Vec<f32> = vec![0.1, 0.8, 0.3];
-        let tokens = extract_greedy_tokens(&logits, 1, 3);
+        let tokens = extract_greedy_tokens(&logits, 1, 3).unwrap();
         assert_eq!(tokens, vec![1]);
+    }
+
+    #[test]
+    fn regression_argmax_rejects_non_finite_logits() {
+        let error = extract_greedy_tokens(&[f32::NAN, 1.0, 0.0], 1, 3).unwrap_err();
+
+        assert!(error.to_string().contains("non-finite generated logit"));
     }
 
     #[test]
