@@ -55,5 +55,6 @@ pub(crate) mod engine;
 pub(crate) mod layers;
 pub(crate) mod llm;
 pub(crate) mod loader;
+pub(crate) mod model_identity;
 pub(crate) mod models;
 pub(crate) mod sampler;

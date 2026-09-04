@@ -60,6 +60,7 @@ pub struct Scheduler {
     running: VecDeque<Sequence>,
     max_num_batched_tokens: usize,
     max_num_seqs: usize,
+    eos_token_ids: Vec<u32>,
     /// Fraction of GPU memory reserved for the KV cache pool.
     /// Used by EngineCore to compute pool size; the scheduler itself
     /// does not allocate the pool.
@@ -79,11 +80,27 @@ impl Scheduler {
         max_num_seqs: usize,
         gpu_memory_utilization: f32,
     ) -> Self {
+        Self::new_with_eos_token_ids(
+            max_num_batched_tokens,
+            max_num_seqs,
+            gpu_memory_utilization,
+            Vec::new(),
+        )
+    }
+
+    /// Create a scheduler whose stop condition uses model-resolved EOS ids.
+    pub fn new_with_eos_token_ids(
+        max_num_batched_tokens: usize,
+        max_num_seqs: usize,
+        gpu_memory_utilization: f32,
+        eos_token_ids: Vec<u32>,
+    ) -> Self {
         Self {
             waiting: VecDeque::new(),
             running: VecDeque::new(),
             max_num_batched_tokens,
             max_num_seqs,
+            eos_token_ids,
             gpu_memory_utilization,
             next_seq_id: 0,
             next_request_id: 0,
@@ -358,7 +375,7 @@ impl Scheduler {
             if let Some(token_id) = executed.sampled_token {
                 sequence.append_token(token_id);
                 let hit_max_tokens = sequence.num_completion_tokens() >= sequence.max_tokens;
-                let hit_eos = token_id == EOS_TOKEN_ID && !sequence.ignore_eos;
+                let hit_eos = self.eos_token_ids.contains(&token_id) && !sequence.ignore_eos;
                 if hit_max_tokens || hit_eos {
                     sequence.status = SequenceStatus::Finished;
                     finished_sequence_ids.push(sequence.seq_id);
@@ -598,12 +615,6 @@ pub struct RequestOutput {
     pub finished: bool,
 }
 
-/// End-of-sequence token id (used as a sentinel for the standard EOS token).
-/// The actual EOS id depends on the model's tokenizer, but the scheduler
-/// uses this constant for the stop-condition check. The engine loop
-/// verifies against the model-specific value — see `EngineCore::step()`.
-pub const EOS_TOKEN_ID: u32 = 151_645; // Qwen3 default EOS = <|im_end|>
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -615,6 +626,8 @@ mod tests {
     use crate::attention::PagedKVCache;
     use crate::engine::sequence::BLOCK_SIZE;
     use std::sync::{Arc, Mutex};
+
+    const TEST_EOS_TOKEN_ID: u32 = 777;
 
     fn fake_cache() -> Arc<Mutex<PagedKVCache>> {
         Arc::new(Mutex::new(
@@ -639,7 +652,12 @@ mod tests {
     }
 
     fn make_scheduler() -> Scheduler {
-        Scheduler::with_defaults()
+        Scheduler::new_with_eos_token_ids(
+            DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            DEFAULT_MAX_NUM_SEQS,
+            DEFAULT_GPU_MEMORY_UTILIZATION,
+            vec![TEST_EOS_TOKEN_ID],
+        )
     }
 
     fn make_kv_mgr(num_blocks: usize) -> KvCacheManager {
@@ -1003,7 +1021,7 @@ mod tests {
             let plan = s.plan_step(&mut kv).unwrap().unwrap();
 
             let outputs = s
-                .apply_step_result(&result_for_plan(&plan, EOS_TOKEN_ID), &mut kv)
+                .apply_step_result(&result_for_plan(&plan, TEST_EOS_TOKEN_ID), &mut kv)
                 .unwrap();
             assert_eq!(outputs.len(), 1);
             assert!(outputs[0].finished);
@@ -1040,10 +1058,40 @@ mod tests {
             let plan = s.plan_step(&mut kv).unwrap().unwrap();
 
             let outputs = s
-                .apply_step_result(&result_for_plan(&plan, EOS_TOKEN_ID), &mut kv)
+                .apply_step_result(&result_for_plan(&plan, TEST_EOS_TOKEN_ID), &mut kv)
                 .unwrap();
             assert!(outputs.is_empty(), "ignore_eos should not finish on EOS");
             assert_eq!(s.num_running(), 1);
+        }
+
+        #[test]
+        fn configured_model_eos_ids_control_completion() {
+            let mut scheduler = Scheduler::new_with_eos_token_ids(16_384, 512, 0.9, vec![7, 8]);
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![1, 2, 3], make_params(64));
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            let outputs = scheduler
+                .apply_step_result(&result_for_plan(&plan, 8), &mut kv)
+                .unwrap();
+
+            assert_eq!(outputs.len(), 1);
+            assert!(outputs[0].finished);
+        }
+
+        #[test]
+        fn unrelated_former_qwen_eos_value_does_not_finish() {
+            let mut scheduler = Scheduler::new_with_eos_token_ids(16_384, 512, 0.9, vec![7]);
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![1, 2, 3], make_params(64));
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            let outputs = scheduler
+                .apply_step_result(&result_for_plan(&plan, 151_645), &mut kv)
+                .unwrap();
+
+            assert!(outputs.is_empty());
+            assert_eq!(scheduler.num_running(), 1);
         }
     }
 

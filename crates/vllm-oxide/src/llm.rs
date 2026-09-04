@@ -12,14 +12,15 @@ use candle_core::{DType, Device};
 use tokenizers::Tokenizer as HFTokenizer;
 
 use crate::attention::PagedKVCache;
-use crate::config::{default_dtype_from_config_json, Source};
+use crate::config::Source;
 use crate::engine::{
     scheduler::{
         DEFAULT_GPU_MEMORY_UTILIZATION, DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS,
     },
     EngineCore, KvCacheManager, RequestOutput, Scheduler,
 };
-use crate::models::registry::{build as build_model, BuiltModel};
+use crate::model_identity::ResolvedModel;
+use crate::models::registry::{build_resolved as build_model, BuiltModel};
 use crate::sampler::{Sampler, SamplingParams};
 
 /// Construction-time configuration for `LLM::new`.
@@ -67,6 +68,7 @@ pub enum Prompt {
 pub struct LLM {
     engine: EngineCore,
     tokenizer: HFTokenizer,
+    _resolved_model: ResolvedModel,
     _paged_kv: Arc<Mutex<PagedKVCache>>,
     device: Device,
 }
@@ -92,9 +94,10 @@ impl LLM {
         #[cfg(feature = "cuda")]
         validate_sm_version(&device)?;
 
-        let config_bytes = read_config_json(&source)?;
+        let resolved_model = ResolvedModel::resolve(source, options.dtype)?;
+        let config_bytes = resolved_model.config_json();
 
-        let max_pos = read_max_position_embeddings(&config_bytes)?;
+        let max_pos = read_max_position_embeddings(config_bytes)?;
         if options.max_model_len > max_pos {
             bail!(
                 "max_model_len ({}) exceeds the model's max_position_embeddings ({}) — \
@@ -104,15 +107,22 @@ impl LLM {
             );
         }
 
-        let dtype = options
-            .dtype
-            .or_else(|| default_dtype_from_config_json(&config_bytes).ok())
-            .unwrap_or(DType::BF16);
+        let dtype = resolved_model.dtype();
 
-        tracing::info!(?dtype, "loading model");
+        tracing::info!(?dtype, identity = %resolved_model.identity(), "loading model");
+
+        let tokenizer = resolved_model.load_tokenizer()?;
+        let special_token_ids = resolved_model.special_token_ids(&tokenizer)?;
+        tracing::debug!(
+            config = %resolved_model.config_path().display(),
+            tokenizer = %resolved_model.tokenizer_path().display(),
+            bos_token_id = ?special_token_ids.bos(),
+            pad_token_id = ?special_token_ids.pad(),
+            "validated resolved model artifact contract"
+        );
 
         let BuiltModel { model, attn_ctx } =
-            build_model(source.clone(), &device, options.max_model_len)?;
+            build_model(&resolved_model, &device, options.max_model_len)?;
 
         #[cfg(feature = "cuda")]
         let num_gpu_blocks =
@@ -143,10 +153,11 @@ impl LLM {
             )?;
         }
 
-        let scheduler = Scheduler::new(
+        let scheduler = Scheduler::new_with_eos_token_ids(
             options.max_num_batched_tokens,
             options.max_num_seqs,
             options.gpu_memory_utilization,
+            special_token_ids.eos().to_vec(),
         );
 
         let kv_cache_manager = KvCacheManager::new(num_gpu_blocks, 256, attn_ctx.paged_kv.clone());
@@ -162,8 +173,6 @@ impl LLM {
             device.clone(),
         );
 
-        // Load tokenizer.
-        let tokenizer = load_tokenizer(&source)?;
         tracing::info!(
             vocab_size = tokenizer.get_vocab_size(true),
             "tokenizer loaded"
@@ -172,6 +181,7 @@ impl LLM {
         Ok(Self {
             engine,
             tokenizer,
+            _resolved_model: resolved_model,
             _paged_kv: attn_ctx.paged_kv,
             device,
         })
@@ -336,43 +346,6 @@ fn tokenize_prompt(prompt: &Prompt, tokenizer: &HFTokenizer) -> Result<Vec<u32>>
     }
 }
 
-/// Read `config.json` bytes from a `Source`.
-fn read_config_json(source: &Source) -> Result<Vec<u8>> {
-    match source {
-        Source::Local(dir) => {
-            let path = dir.join("config.json");
-            std::fs::read(&path)
-                .with_context(|| format!("reading config.json from {}", path.display()))
-        }
-        Source::Hub { repo, revision } => {
-            let rev = revision.as_deref().unwrap_or("main");
-            if crate::config::is_hf_hub_offline() {
-                let cache = hf_hub::Cache::from_env();
-                let rh = cache.repo(hf_hub::Repo::with_revision(
-                    repo.clone(),
-                    hf_hub::RepoType::Model,
-                    rev.to_string(),
-                ));
-                rh.get("config.json")
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "HF_HUB_OFFLINE=1 and config.json for `{repo}` not found in local cache"
-                        )
-                    })
-                    .and_then(|p| std::fs::read(p).map_err(Into::into))
-            } else {
-                let api = hf_hub::api::sync::ApiBuilder::new().build()?;
-                let rh = api.repo(hf_hub::Repo::with_revision(
-                    repo.clone(),
-                    hf_hub::RepoType::Model,
-                    rev.to_string(),
-                ));
-                std::fs::read(rh.get("config.json")?).map_err(Into::into)
-            }
-        }
-    }
-}
-
 /// Extract `max_position_embeddings` from config.json bytes.
 fn read_max_position_embeddings(config_json: &[u8]) -> Result<usize> {
     #[derive(serde::Deserialize)]
@@ -384,44 +357,6 @@ fn read_max_position_embeddings(config_json: &[u8]) -> Result<usize> {
     parsed
         .max_position_embeddings
         .ok_or_else(|| anyhow!("config.json has no `max_position_embeddings` field"))
-}
-
-/// Load the `tokenizer.json` from the model source.
-fn load_tokenizer(source: &Source) -> Result<HFTokenizer> {
-    let path = match source {
-        Source::Local(dir) => {
-            let p = dir.join("tokenizer.json");
-            if !p.exists() {
-                bail!("tokenizer.json not found at {}", p.display());
-            }
-            p
-        }
-        Source::Hub { repo, revision } => {
-            let rev = revision.as_deref().unwrap_or("main");
-            if crate::config::is_hf_hub_offline() {
-                let cache = hf_hub::Cache::from_env();
-                let rh = cache.repo(hf_hub::Repo::with_revision(
-                    repo.clone(),
-                    hf_hub::RepoType::Model,
-                    rev.to_string(),
-                ));
-                rh.get("tokenizer.json").ok_or_else(|| {
-                    anyhow!("HF_HUB_OFFLINE=1 and tokenizer.json for `{repo}` not cached")
-                })?
-            } else {
-                let api = hf_hub::api::sync::ApiBuilder::new().build()?;
-                let rh = api.repo(hf_hub::Repo::with_revision(
-                    repo.clone(),
-                    hf_hub::RepoType::Model,
-                    rev.to_string(),
-                ));
-                rh.get("tokenizer.json")?
-            }
-        }
-    };
-
-    HFTokenizer::from_file(&path)
-        .map_err(|e| anyhow!("loading tokenizer from {}: {e}", path.display()))
 }
 
 /// Validate CUDA device compute capability ≥ sm_89.

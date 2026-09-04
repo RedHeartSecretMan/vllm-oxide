@@ -53,6 +53,7 @@ use candle_nn::var_builder::{
 use serde::Deserialize;
 
 use crate::config::{is_hf_hub_offline, Source};
+use crate::model_identity::ResolvedModel;
 
 /// Mmap one or more `*.safetensors` files and return a candle
 /// [`ShardedVarBuilder`] over them.
@@ -116,6 +117,34 @@ pub fn load_weights_vb(
     let tensors = unsafe { MmapedSafetensors::multi(&paths)? };
     let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
     Ok(VarBuilderArgs::new_with_args(backend, dtype, device))
+}
+
+/// Build a candle [`VarBuilder`] from the already-resolved artifact paths and
+/// dtype. This is the construction path used by model factories: it cannot
+/// re-resolve a local path or follow a moving Hub revision.
+pub(crate) fn load_resolved_weights_vb(
+    resolved: &ResolvedModel,
+    device: &Device,
+) -> Result<VarBuilder<'static>> {
+    if resolved.weight_paths().is_empty() {
+        return Err(anyhow!(
+            "model identity `{}` resolved zero safetensors shards",
+            resolved.identity()
+        ));
+    }
+    let tensors =
+        unsafe { MmapedSafetensors::multi(resolved.weight_paths()) }.with_context(|| {
+            format!(
+                "mapping safetensors for model identity `{}`",
+                resolved.identity()
+            )
+        })?;
+    let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
+    Ok(VarBuilderArgs::new_with_args(
+        backend,
+        resolved.dtype(),
+        device,
+    ))
 }
 
 /// Local-dir fallback chain: `model.safetensors.index.json` → single
@@ -522,6 +551,28 @@ mod tests {
                 load_weights(Source::Local(tmp.path().to_path_buf()), DType::F16, &device).unwrap();
             let t = vb.get((2,), "w").unwrap();
             assert_eq!(t.dtype(), DType::F16);
+        }
+
+        #[test]
+        fn resolved_model_dtype_reaches_weight_builder() {
+            let tmp = tempfile::tempdir().unwrap();
+            write_safetensors_fixture(&tmp.path().join("model.safetensors"), "w", &[1.0_f32, 2.0]);
+            std::fs::write(
+                tmp.path().join("config.json"),
+                br#"{"torch_dtype":"bfloat16","eos_token_id":1}"#,
+            )
+            .unwrap();
+            std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
+            let resolved = crate::model_identity::ResolvedModel::resolve(
+                Source::Local(tmp.path().to_path_buf()),
+                Some(DType::F16),
+            )
+            .unwrap();
+
+            let vb = load_resolved_weights_vb(&resolved, &Device::Cpu).unwrap();
+            let tensor = vb.get((2,), "w").unwrap();
+
+            assert_eq!(tensor.dtype(), DType::F16);
         }
 
         #[test]

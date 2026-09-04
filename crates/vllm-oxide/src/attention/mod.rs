@@ -103,6 +103,11 @@ impl PagedKVCache {
         self.buffer.shape().dims().to_vec()
     }
 
+    /// Storage dtype shared by every layer in this cache.
+    pub fn dtype(&self) -> DType {
+        self.buffer.dtype()
+    }
+
     pub fn num_blocks(&self) -> usize {
         self.num_blocks
     }

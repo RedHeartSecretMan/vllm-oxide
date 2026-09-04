@@ -8,13 +8,13 @@ use candle_nn::{Module, VarBuilder};
 use serde::Deserialize;
 
 use crate::attention::{build_prefill_metadata, AttentionContext, PagedKVCache};
-use crate::config::{default_dtype_from_config_json, Source};
 use crate::layers::activation::silu_and_mul;
 use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
 use crate::layers::rmsnorm::RMSNorm;
 use crate::layers::rope::RotaryEmbedding;
-use crate::loader::load_weights_vb;
+use crate::loader::load_resolved_weights_vb;
+use crate::model_identity::ResolvedModel;
 
 use super::registry::{BuiltModel, ModelEntry};
 use crate::causal_lm::CausalLM;
@@ -337,11 +337,11 @@ impl Qwen3ForCausalLM {
         })
     }
     pub fn build(
-        config_json: &[u8],
-        source: Source,
+        resolved: &ResolvedModel,
         device: &Device,
         max_model_len: usize,
     ) -> Result<BuiltModel> {
+        let config_json = resolved.config_json();
         let config: Qwen3Config =
             serde_json::from_slice(config_json).map_err(|e| anyhow!("Qwen3Config: {e}"))?;
         if max_model_len > config.max_position_embeddings {
@@ -351,8 +351,8 @@ impl Qwen3ForCausalLM {
                 config.max_position_embeddings
             );
         }
-        let dtype = default_dtype_from_config_json(config_json)?;
-        let vb = load_weights_vb(source, dtype, device)?;
+        let dtype = resolved.dtype();
+        let vb = load_resolved_weights_vb(resolved, device)?;
         let paged_kv = Arc::new(Mutex::new(PagedKVCache::new(
             config.num_hidden_layers,
             100,
@@ -398,6 +398,36 @@ inventory::submit! { ModelEntry { arch: "Qwen3ForCausalLM", factory: Qwen3ForCau
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn write_minimal_weights(path: &std::path::Path) {
+        let embedding_bytes: Vec<u8> = [0.0_f32; 10]
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        let norm_bytes: Vec<u8> = [1.0_f32; 2]
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        let embedding = safetensors::tensor::TensorView::new(
+            safetensors::Dtype::F32,
+            vec![5, 2],
+            &embedding_bytes,
+        )
+        .unwrap();
+        let norm =
+            safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![2], &norm_bytes)
+                .unwrap();
+        safetensors::tensor::serialize_to_file(
+            [
+                ("model.embed_tokens.weight", embedding),
+                ("model.norm.weight", norm),
+            ],
+            &None,
+            path,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn deserialises_qwen3_06b_config() {
         let json = r#"{"architectures":["Qwen3ForCausalLM"],"attention_bias":false,"head_dim":128,
@@ -427,5 +457,41 @@ mod tests {
     #[test]
     fn qwen3_registered() {
         assert!(inventory::iter::<ModelEntry>().any(|e| e.arch == "Qwen3ForCausalLM"));
+    }
+
+    #[test]
+    fn resolved_dtype_reaches_model_and_initial_cache_construction() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            br#"{
+                "architectures":["Qwen3ForCausalLM"],
+                "torch_dtype":"bfloat16",
+                "eos_token_id":2,
+                "hidden_size":2,
+                "num_hidden_layers":0,
+                "num_attention_heads":1,
+                "num_key_value_heads":1,
+                "intermediate_size":2,
+                "vocab_size":5,
+                "rms_norm_eps":0.000001,
+                "max_position_embeddings":16,
+                "hidden_act":"silu",
+                "tie_word_embeddings":true
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
+        write_minimal_weights(&tmp.path().join("model.safetensors"));
+        let resolved = crate::model_identity::ResolvedModel::resolve(
+            crate::config::Source::Local(tmp.path().to_path_buf()),
+            Some(candle_core::DType::F16),
+        )
+        .unwrap();
+
+        let built = Qwen3ForCausalLM::build(&resolved, &Device::Cpu, 8).unwrap();
+        let cache = built.attn_ctx.paged_kv.lock().unwrap();
+
+        assert_eq!(cache.dtype(), candle_core::DType::F16);
     }
 }
