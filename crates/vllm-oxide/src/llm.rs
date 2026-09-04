@@ -527,6 +527,27 @@ mod tests {
         physical_tokens: HashMap<usize, u32>,
     }
 
+    fn cached_token_at(
+        physical_tokens: &HashMap<usize, u32>,
+        block_table: &[i32],
+        block_size: usize,
+        logical_position: usize,
+    ) -> candle_core::Result<u32> {
+        let block_id = *block_table
+            .get(logical_position / block_size)
+            .ok_or_else(|| candle_core::Error::Msg("cache block table is too short".into()))?;
+        let block_id = usize::try_from(block_id)
+            .map_err(|_| candle_core::Error::Msg("cache block id is negative".into()))?;
+        let physical_slot = block_id
+            .checked_mul(block_size)
+            .and_then(|base| base.checked_add(logical_position % block_size))
+            .ok_or_else(|| candle_core::Error::Msg("cache physical slot overflow".into()))?;
+        physical_tokens
+            .get(&physical_slot)
+            .copied()
+            .ok_or_else(|| candle_core::Error::Msg("read an unwritten cache slot".into()))
+    }
+
     impl CausalFingerprintModel {
         fn push_fingerprint(fingerprint: u8, token_id: u32) -> u8 {
             let fingerprint = u32::from(fingerprint)
@@ -534,33 +555,6 @@ mod tests {
                 .wrapping_add(token_id.wrapping_add(1))
                 % 97;
             u8::try_from(fingerprint).unwrap()
-        }
-
-        fn paged_token(
-            &self,
-            block_table: &[i32],
-            block_size: usize,
-            logical_position: usize,
-        ) -> candle_core::Result<u32> {
-            let block_id = *block_table
-                .get(logical_position / block_size)
-                .ok_or_else(|| {
-                    candle_core::Error::Msg("causal model block table is too short".into())
-                })?;
-            let block_id = usize::try_from(block_id)
-                .map_err(|_| candle_core::Error::Msg("causal model block id is negative".into()))?;
-            let physical_slot = block_id
-                .checked_mul(block_size)
-                .and_then(|base| base.checked_add(logical_position % block_size))
-                .ok_or_else(|| {
-                    candle_core::Error::Msg("causal model physical slot overflow".into())
-                })?;
-            self.physical_tokens
-                .get(&physical_slot)
-                .copied()
-                .ok_or_else(|| {
-                    candle_core::Error::Msg("causal model read an unwritten cache slot".into())
-                })
         }
     }
 
@@ -624,7 +618,8 @@ mod tests {
                         let context_len = key_len - query_len + query_offset + 1;
                         let mut fingerprint = 0;
                         for logical_position in 0..context_len {
-                            let token_id = self.paged_token(
+                            let token_id = cached_token_at(
+                                &self.physical_tokens,
                                 &metadata.block_table[sequence_index],
                                 block_size,
                                 logical_position,
@@ -685,48 +680,32 @@ mod tests {
                 physical_tokens.insert(slot, token_id.wrapping_add(position));
             }
 
-            let hidden = if metadata.is_prefill {
-                input_ids
-                    .iter()
-                    .zip(&positions)
-                    .map(|(&token_id, &position)| token_id.wrapping_add(position) as f32)
-                    .collect::<Vec<_>>()
-            } else {
-                let context_len = metadata
-                    .cu_seqlens_k
-                    .last()
-                    .copied()
-                    .ok_or_else(|| candle_core::Error::Msg("missing decode context".into()))?
-                    as usize;
-                let block_table = metadata
-                    .block_table
-                    .first()
-                    .ok_or_else(|| candle_core::Error::Msg("missing decode block table".into()))?;
-                let mut fingerprint = 0u32;
-                for logical_position in 0..context_len {
-                    let block_id =
-                        *block_table
-                            .get(logical_position / block_size)
-                            .ok_or_else(|| {
-                                candle_core::Error::Msg("decode block table is too short".into())
-                            })?;
-                    let block_id = usize::try_from(block_id).map_err(|_| {
-                        candle_core::Error::Msg("decode block id is negative".into())
+            let hidden =
+                if metadata.is_prefill {
+                    input_ids
+                        .iter()
+                        .zip(&positions)
+                        .map(|(&token_id, &position)| token_id.wrapping_add(position) as f32)
+                        .collect::<Vec<_>>()
+                } else {
+                    let context_len =
+                        metadata.cu_seqlens_k.last().copied().ok_or_else(|| {
+                            candle_core::Error::Msg("missing decode context".into())
+                        })? as usize;
+                    let block_table = metadata.block_table.first().ok_or_else(|| {
+                        candle_core::Error::Msg("missing decode block table".into())
                     })?;
-                    let physical_slot = block_id
-                        .checked_mul(block_size)
-                        .and_then(|base| base.checked_add(logical_position % block_size))
-                        .ok_or_else(|| {
-                            candle_core::Error::Msg("decode physical slot overflow".into())
-                        })?;
-                    fingerprint = fingerprint.wrapping_add(
-                        *physical_tokens.get(&physical_slot).ok_or_else(|| {
-                            candle_core::Error::Msg("decode read an unwritten cache slot".into())
-                        })?,
-                    );
-                }
-                vec![(fingerprint % 100) as f32]
-            };
+                    let mut fingerprint = 0u32;
+                    for logical_position in 0..context_len {
+                        fingerprint = fingerprint.wrapping_add(cached_token_at(
+                            &physical_tokens,
+                            block_table,
+                            block_size,
+                            logical_position,
+                        )?);
+                    }
+                    vec![(fingerprint % 100) as f32]
+                };
             Tensor::from_vec(hidden, (input_ids.len(), 1), &self.device)?.to_dtype(DType::F16)
         }
 

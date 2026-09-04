@@ -406,8 +406,7 @@ mod gpu_tests {
         let meta = build_decode_metadata(&[ctx_len as u32], &[vec![0]], &[ctx_len as i64]);
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let out =
-            super::flash_attn::decode_attn(&q, &k_cache, &v_cache, &meta, scale, 256).unwrap();
+        let out = super::flash_attn::paged_attn(&q, &k_cache, &v_cache, &meta, scale, 256).unwrap();
 
         assert_eq!(out.shape().dims(), &[1, num_heads, head_dim]);
         let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();
