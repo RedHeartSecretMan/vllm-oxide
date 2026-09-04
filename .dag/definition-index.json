@@ -3,11 +3,11 @@
   "inputs": [
     {
       "path": ".dag/definitions/v0.2.0-github.json",
-      "blob_oid": "373875bef41d287015fa38fc2afcad9c53dab437"
+      "blob_oid": "92e15fa7402633d1b5f6adea951b040e5f09fe79"
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "50c0000bbc424109657e6ca42004be3c7777f0a8"
+      "blob_oid": "1c4f80d583623a2a87861b597acdab42418012f3"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -15,11 +15,15 @@
     },
     {
       "path": "docs/adr/0004-engine-architecture-and-dependency-dag.md",
-      "blob_oid": "477ca66eefc1f3957cbe81775706b5a5deef04e1"
+      "blob_oid": "9ba327c6f108e9a1bd5a33832c03ee5bbc623eef"
+    },
+    {
+      "path": "docs/adr/0005-golden-generation-correctness-strategy.md",
+      "blob_oid": "ed7cdfe145f9a46bfc4f14f96a6c05a1c0d69e20"
     },
     {
       "path": "docs/adr/0006-v0.2-correctness-first-release-scope.md",
-      "blob_oid": "3ef1b489479dd694c48b403c3c9eee4cfdb28c29"
+      "blob_oid": "351432df666b2a26ba8124610d414eae2842f18a"
     }
   ]
 }

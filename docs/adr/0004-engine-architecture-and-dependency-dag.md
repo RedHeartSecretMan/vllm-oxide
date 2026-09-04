@@ -25,9 +25,9 @@ llm  (composition root — owns everything)
 - `engine/` does NOT depend on `models/` — it receives `Box<dyn CausalLM>` from
   the composition root and depends on the neutral `causal_lm.rs` contract instead.
 - `llm.rs` is the ONLY composition root that wires everything.
-- The potential `engine ↔ attention` cycle is broken: engine holds
-  `Arc<Mutex<PagedKVCache>>` and builds `AttnMetadata` from its own scheduler
-  state; `attention/` never imports `engine/`.
+- The potential `engine ↔ attention` cycle is broken: the composition root
+  supplies shared attention state, `EngineCore` consumes metadata carried by
+  its `StepPlan`, and `attention/` never imports `engine/`.
 
 ## R4: Public API surface
 
@@ -35,12 +35,13 @@ llm  (composition root — owns everything)
 default to `pub(crate)` or stricter. Downstream callers never reach below the
 re-exports curated in `lib.rs`.
 
-## EngineCore: collapsed ModelRunner
+## EngineCore coordination seam
 
-**Decision**: v0.1 has no `model_runner` sub-module. `EngineCore::step()`
-performs the full loop in one method: scheduler → tensor prep →
-`model.forward()` → sampler → KV update. This collapses V1/nano-vllm's
-`ModelRunner` separation.
+**Decision**: v0.1 collapsed V1/nano-vllm's `ModelRunner` into
+`EngineCore::step()`. In v0.2.0 the `Scheduler` instead produces one immutable
+`StepPlan`; `EngineCore` executes only that plan and returns one
+`StepResult`, which the `Scheduler` applies exactly once. Execution does not
+rediscover work by traversing mutable scheduler collections.
 
 **R5 split trigger**: Extract a separate `ModelRunner` when `step()` exceeds
 ~300 LOC or CUDA graph capture lands after v0.2.0.

@@ -30,7 +30,11 @@ _Avoid_: model interface, Model trait, CausalLM struct.
 
 **Model registry (inventory)**:
 The map from HF architecture strings (`"Qwen3ForCausalLM"`) to factory functions producing `Box<dyn CausalLM>`. Implemented as an `inventory`-distributed static registry: each model file self-registers via `inventory::submit! { ModelEntry { arch, factory } }`, and `registry.rs` is a pure query function with no model-specific knowledge. Keyed off `config.json["architectures"][0]`. Adding an architecture is purely additive (new file + `mod xxx;`), zero edits to existing files.
-_Avoid_: model loader (loader is T7's `load_weights`), dispatcher, factory table.
+_Avoid_: dispatcher, factory table.
+
+**Weight loader**:
+The internal component that resolves checkpoint artifacts and exposes their weights for model construction. The `model-loader` wording in v0.2 tracker prose names this component, not the `Model registry`.
+_Avoid_: model registry, dispatcher.
 
 **LinearSpec**:
 The neutral geometry parameter struct that `Linear<P>::from_vb` consumes — `{ in_features, out_features_per_shard, bias }`. Model code unpacks its own `Config` (e.g. `Qwen3Config`) into `LinearSpec`. Closes the ADR-0002 seam: `Linear<P>` (in shared `layers/`) stays fully model-agnostic — it never imports `models::qwen3::Qwen3Config` or any architecture-specific type.
@@ -116,27 +120,23 @@ A content-addressed `.safetensors` file produced by the Python harness (`tools/g
 _Avoid_: reference output, expected output, snapshot, oracle output.
 
 **Reference oracle**:
-The oracle used as the correctness target — `transformers` with `output_logits=True` and `attn_implementation=flash_attention_2`. vllm-oxide's L1 and L2 comparisons run against this oracle's output. It is not a "ground truth" (Qwen3-0.6B weights are BF16; BF16 computation is non-associative), but it is the single consistent reference point we measure against.
+The authoritative correctness target: Transformers BF16 with `output_logits=True` and `attn_implementation=sdpa`. A reference-oracle failure cannot be overridden by baseline evidence.
 _Avoid_: ground truth, canonical engine, expected engine.
 
 **Baseline oracle**:
-The oracle used to calibrate numerical tolerances — `vLLM` (BF16, same dtype path as vllm-oxide). The maximum per-element |transformers - vLLM| across all canonical prompts × 2.0 gives the `atol` for L2 comparison. vLLM's token output is also used to determine which L1 positions are inherently non-deterministic under BF16 (skip map).
+The vLLM BF16 run used as calibration and investigation evidence for numerical policy. It is not a second correctness oracle and cannot turn a reference mismatch into a pass.
 _Avoid_: secondary oracle, calibration oracle.
 
-**atol calibration**:
-The process of measuring `max(|transformers_logits - vllm_logits| per-element)` across all 5 canonical prompts, then multiplying by 2.0 to produce a global `atol` for L2 comparison. Runs as a separate `golden-gen calibrate` step after fixture generation. No rtol is used — the logit values of interest are large (top-k candidates), and rtol is unstable for near-zero tail logits.
-_Avoid_: tolerance derivation, threshold computation.
+**Tolerance policy**:
+The versioned, dtype- and kernel-specific numerical acceptance policy derived from observed same-prefix error distributions and recorded with its evidence and rationale.
+_Avoid_: hidden tolerance, pass-until-green threshold.
 
-**Near-tie skip (L1)**:
-When vllm-oxide's argmax token differs from the reference oracle's, the raw logits are checked: if the reference token is in the top-2 and the gap between it and the next candidate < ε (ε = atol × 2.0), the position is skipped. These are BF16 precision artifacts, not bugs. Used for canonical prompts (full logits available).
-_Avoid_: epsilon skip, close-call skip.
-
-**Skip map (L1 regression)**:
-For regression prompts (no full logits), positions where vLLM's token also differs from the reference are recorded in a skip map during calibration. vllm-oxide's L1 comparison skips these positions — they represent inherent BF16 non-determinism, not implementation bugs. No tunable hyperparameter.
-_Avoid_: exclusion set, known-mismatch list.
+**Near-tie classification (L1)**:
+A reference-token mismatch classified from the relevant same-prefix candidate logits under the versioned `Tolerance policy`. It is an explicit result, never a skipped comparison or a classification borrowed from the baseline oracle.
+_Avoid_: near-tie skip, epsilon skip, close-call skip.
 
 **Same-prefix comparison (L2)**:
-L2 logits comparison only runs on steps where vllm-oxide's token matches the reference oracle's token. Once the token sequence diverges, subsequent steps are in different computational contexts — comparing their logits produces false positives. This replaces the old `compare_l2` which compared all steps regardless of divergence.
+L2 compares logits only while the generated prefix matches the reference and stops at the first divergence. Later rows are excluded because their causal histories differ; the divergence itself remains an explicit result rather than a silent skip.
 _Avoid_: prefix-aware L2, context-aware comparison.
 
 **Release gate vs CI gate**:
