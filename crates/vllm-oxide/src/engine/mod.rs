@@ -89,21 +89,43 @@ impl EngineCore {
     ///
     /// When no work remains, returns `Ok((Vec::new(), Tensor::zeros(...)))`.
     pub fn step_with_logits(&mut self) -> Result<(Vec<RequestOutput>, Tensor)> {
-        let Some(plan) = self
-            .scheduler
-            .plan_step(&mut self.kv_cache_manager)
-            .map_err(candle_core::Error::msg)?
-        else {
+        let plan = match self.scheduler.plan_step(&mut self.kv_cache_manager) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Err(self.cleanup_failed_step(candle_core::Error::msg(error)));
+            }
+        };
+        let Some(plan) = plan else {
             let empty = Tensor::zeros((0, 0), DType::F32, &self.device)?;
             return Ok((Vec::new(), empty));
         };
 
-        let (result, logits) = self.execute_plan(&plan)?;
-        let outputs = self
+        let (result, logits) = match self.execute_plan(&plan) {
+            Ok(executed) => executed,
+            Err(error) => return Err(self.cleanup_failed_step(error)),
+        };
+        let outputs = match self
             .scheduler
             .apply_step_result(&result, &mut self.kv_cache_manager)
-            .map_err(candle_core::Error::msg)?;
+        {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                return Err(self.cleanup_failed_step(candle_core::Error::msg(error)));
+            }
+        };
         Ok((outputs, logits))
+    }
+
+    fn cleanup_failed_step(&mut self, error: candle_core::Error) -> candle_core::Error {
+        match self
+            .scheduler
+            .abort_all_requests(&mut self.kv_cache_manager)
+        {
+            Ok(()) => error,
+            Err(cleanup_error) => candle_core::Error::Msg(format!(
+                "{error}; cache ownership cleanup after engine failure also failed: {cleanup_error}"
+            )),
+        }
     }
 
     /// Execute exactly the immutable work captured in `plan`.

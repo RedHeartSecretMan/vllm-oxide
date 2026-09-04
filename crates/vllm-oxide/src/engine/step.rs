@@ -11,6 +11,7 @@ pub(crate) enum CacheOperation {
     EmptyAllocationRollback,
     AppendAllocation,
     Deallocation,
+    FailureCleanup,
 }
 
 impl std::fmt::Display for CacheOperation {
@@ -21,6 +22,7 @@ impl std::fmt::Display for CacheOperation {
             Self::EmptyAllocationRollback => f.write_str("empty allocation rollback"),
             Self::AppendAllocation => f.write_str("append allocation"),
             Self::Deallocation => f.write_str("deallocation"),
+            Self::FailureCleanup => f.write_str("failure cleanup"),
         }
     }
 }
@@ -85,7 +87,10 @@ pub(crate) struct SequenceStepPlan {
     pub(crate) request_id: usize,
     pub(crate) sequence_id: usize,
     pub(crate) phase: SequencePhase,
+    /// Exact newly scheduled model-input range. Cached prompt tokens are not
+    /// repeated here; their range is captured by `cache.cached_token_range`.
     pub(crate) token_range: Range<usize>,
+    /// Causal positions corresponding one-for-one with `token_range`.
     pub(crate) logical_positions: Range<usize>,
     pub(crate) token_budget: usize,
     pub(crate) cache: SequenceCachePlan,
@@ -98,7 +103,9 @@ pub(crate) struct SequenceStepPlan {
 /// Cache state and mappings captured for one planned sequence.
 #[derive(Debug, Clone)]
 pub(crate) struct SequenceCachePlan {
-    pub(crate) num_cached_tokens: usize,
+    /// Logical tokens already represented in paged KV before this step.
+    pub(crate) cached_token_range: Range<usize>,
+    /// Full logical KV length after the newly scheduled input is written.
     pub(crate) kv_length: usize,
     pub(crate) block_table: Vec<usize>,
     pub(crate) slot_mapping: Vec<i64>,

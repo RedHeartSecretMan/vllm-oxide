@@ -11,8 +11,8 @@
 //! information-hiding, not behavioural abstraction: its 6 public cache-ownership
 //! methods (`can_allocate`, `allocate`, `deallocate`, `can_append`,
 //! `may_append`, `hash_blocks`) remain compatibility-preserving delegations to
-//! `BlockPool`; the crate-private batch reservation translates failures into
-//! opaque [`KvCacheError`] values. `num_free_blocks` and `block_size` are
+//! `BlockPool`; crate-private batch reservation and release translate failures
+//! into opaque [`KvCacheError`] values. `num_free_blocks` and `block_size` are
 //! trivial accessors. `compute_slot_mapping` is the sole
 //! logic-carrying method
 //! (~20 LOC: logical block-table index → physical slot via
@@ -70,7 +70,7 @@ impl std::error::Error for KvCacheError {}
 /// what the Scheduler cannot see — `BlockPool`, `BlockPoolError`,
 /// physical `PagedKVCache` internals — not behavioural depth. Its six public
 /// ownership methods remain thin delegations by design; bounded batch
-/// reservation is crate-private and returns only an opaque cache error.
+/// reservation and release are crate-private and return only opaque cache errors.
 /// `compute_slot_mapping` is the sole behavioural bridge (logical
 /// block table → physical slot indices). Thinness is the design, not
 /// debt.
@@ -109,6 +109,16 @@ impl KvCacheManager {
     /// Forwarded: deallocate all blocks owned by a sequence.
     pub fn deallocate(&mut self, seq: &mut Sequence) -> Result<(), BlockPoolError> {
         self.block_pool.deallocate(seq)
+    }
+
+    /// Release a set of request-owned block tables as one transaction.
+    pub(crate) fn deallocate_batch(
+        &mut self,
+        sequences: &mut [Sequence],
+    ) -> Result<(), KvCacheError> {
+        self.block_pool
+            .deallocate_batch(sequences)
+            .map_err(KvCacheError::from)
     }
 
     /// Forwarded: check whether the pool has room for one decode append.

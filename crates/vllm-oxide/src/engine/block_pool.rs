@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher;
+use std::sync::Arc;
 
 use twox_hash::XxHash64;
 
@@ -40,13 +41,32 @@ impl std::error::Error for BlockPoolError {}
 ///
 /// Mirrors `nanovllm.engine.block_manager.Block`. `hash = -1` means
 /// unhashed (nano-vllm sentinel convention). `ref_count` tracks the number
-/// of sequences sharing this block (CoW prefix-cache semantics).
+/// of sequences sharing this block (CoW prefix-cache semantics). The private
+/// identity disambiguates collisions across the complete prefix chain.
 #[derive(Debug, Clone)]
 pub struct Block {
     pub(crate) block_id: usize,
     pub(crate) ref_count: usize,
     pub(crate) hash: i64,
     pub(crate) token_ids: Vec<u32>,
+    prefix_identity: Option<Arc<PrefixCacheIdentity>>,
+}
+
+/// Exact collision-safe identity for one cached logical prefix block.
+///
+/// Nodes share their parent through `Arc`, so retaining the complete token
+/// chain costs one block of token ids per unique node rather than copying the
+/// full prefix into every hashtable entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefixCacheIdentity {
+    parent: Option<Arc<Self>>,
+    token_ids: Vec<u32>,
+}
+
+impl PrefixCacheIdentity {
+    fn extend(parent: Option<Arc<Self>>, token_ids: Vec<u32>) -> Arc<Self> {
+        Arc::new(Self { parent, token_ids })
+    }
 }
 
 impl Block {
@@ -56,13 +76,20 @@ impl Block {
             ref_count: 0,
             hash: -1,
             token_ids: Vec::new(),
+            prefix_identity: None,
         }
     }
 
-    /// Set the hash and token_ids (called when a block is filled and hashed).
-    pub(crate) fn update(&mut self, hash: i64, token_ids: Vec<u32>) {
+    /// Set the hash, current-block tokens, and complete chained identity.
+    fn update(
+        &mut self,
+        hash: i64,
+        token_ids: Vec<u32>,
+        prefix_identity: Arc<PrefixCacheIdentity>,
+    ) {
         self.hash = hash;
         self.token_ids = token_ids;
+        self.prefix_identity = Some(prefix_identity);
     }
 
     /// Reset to allocated-but-empty state (ref_count = 1, hash = -1).
@@ -73,6 +100,7 @@ impl Block {
         self.ref_count = 1;
         self.hash = -1;
         self.token_ids = Vec::new();
+        self.prefix_identity = None;
     }
 }
 
@@ -96,7 +124,7 @@ impl Block {
 pub struct BlockPool {
     pub(crate) block_size: usize,
     pub(crate) blocks: Vec<Block>,
-    pub(crate) hash_to_block_id: HashMap<i64, usize>,
+    pub(crate) hash_to_block_id: HashMap<i64, Vec<usize>>,
     pub(crate) free_block_ids: VecDeque<usize>,
     pub(crate) used_block_ids: HashSet<usize>,
 }
@@ -154,6 +182,37 @@ impl BlockPool {
         Ok(())
     }
 
+    fn cached_block_id(&self, hash: i64, identity: &PrefixCacheIdentity) -> Option<usize> {
+        self.hash_to_block_id
+            .get(&hash)?
+            .iter()
+            .copied()
+            .find(|&block_id| {
+                self.blocks.get(block_id).is_some_and(|block| {
+                    block.hash == hash
+                        && block.prefix_identity.as_deref() == Some(identity)
+                        && block.token_ids == identity.token_ids
+                })
+            })
+    }
+
+    fn remove_cache_entry(&mut self, hash: i64, block_id: usize) {
+        let mut remove_bucket = false;
+        if let Some(block_ids) = self.hash_to_block_id.get_mut(&hash) {
+            block_ids.retain(|&cached_id| cached_id != block_id);
+            remove_bucket = block_ids.is_empty();
+        }
+        if remove_bucket {
+            self.hash_to_block_id.remove(&hash);
+        }
+    }
+
+    fn index_cache_entry(&mut self, hash: i64, block_id: usize) {
+        let block_ids = self.hash_to_block_id.entry(hash).or_default();
+        block_ids.retain(|&cached_id| cached_id != block_id);
+        block_ids.push(block_id);
+    }
+
     /// Allocate a free block and return its id.
     ///
     /// Equivalent to nano-vllm's `_allocate_block`: pops from the front of
@@ -174,29 +233,11 @@ impl BlockPool {
         self.free_block_ids.pop_front();
         // nano-vllm asserts ref_count == 0 here.
         if old_hash != -1 {
-            if let Some(&existing) = self.hash_to_block_id.get(&old_hash) {
-                if existing == block_id {
-                    self.hash_to_block_id.remove(&old_hash);
-                }
-            }
+            self.remove_cache_entry(old_hash, block_id);
         }
         self.blocks[block_id].reset();
         self.used_block_ids.insert(block_id);
         Ok(block_id)
-    }
-
-    /// Return a used block to the free list (ref_count must be 0).
-    ///
-    /// Equivalent to nano-vllm's `_deallocate_block`. Panic-free: returns
-    /// `Err` if the block is not in the used set.
-    fn deallocate_block_private(&mut self, block_id: usize) -> Result<(), BlockPoolError> {
-        if !self.used_block_ids.remove(&block_id) {
-            return Err(BlockPoolError(format!(
-                "block {block_id} is not in the used set (double-free?)"
-            )));
-        }
-        self.free_block_ids.push_back(block_id);
-        Ok(())
     }
 
     /// Check whether a sequence can be allocated and, if so, how many
@@ -206,31 +247,38 @@ impl BlockPool {
     /// `Some(num_cached_blocks)` when there is room, `None` when
     /// insufficient free blocks.
     ///
-    /// Walks `seq.num_blocks() - 1` blocks (the last block is partial and
-    /// never cached). For each block, computes the chained hash, checks
-    /// the hashtable + token_ids match. Counts how many new blocks would
-    /// be needed (fewer when a cached block is already in `used_block_ids`
-    /// — shared, counts against free only if not currently used).
+    /// Walks `seq.num_blocks() - 1` blocks. The final logical block is never
+    /// reused, even at an exact block boundary, so non-empty requests retain
+    /// new model input from which sampling can obtain a hidden state. For each
+    /// reusable block, computes the chained hash and requires
+    /// a complete chained token-identity match within its hash bucket. Counts
+    /// how many new blocks would be needed (fewer when a cached block is
+    /// already in `used_block_ids` — shared, counts against free only if not
+    /// currently used).
     pub fn can_allocate(&self, seq: &Sequence) -> Option<usize> {
         if seq.num_blocks() == 0 {
             return Some(0);
         }
         let mut h: i64 = -1;
+        let mut identity = None;
         let mut num_cached_blocks: usize = 0;
         let num_blocks = seq.num_blocks();
-        // The last block is partial — never cached.
+        // Recompute the final logical block even when it is exactly full so a
+        // non-empty request never becomes a zero-token sampling plan.
         let check_until = if num_blocks > 0 { num_blocks - 1 } else { 0 };
 
         let mut num_new_blocks = num_blocks;
         for i in 0..check_until {
             let token_ids = seq.block(i);
             h = Self::compute_hash(token_ids, h);
-            match self.hash_to_block_id.get(&h) {
-                Some(&block_id) if self.blocks[block_id].token_ids == token_ids => {
+            let next_identity = PrefixCacheIdentity::extend(identity, token_ids.to_vec());
+            match self.cached_block_id(h, &next_identity) {
+                Some(block_id) => {
                     num_cached_blocks += 1;
                     if self.used_block_ids.contains(&block_id) {
                         num_new_blocks -= 1;
                     }
+                    identity = Some(next_identity);
                 }
                 _ => break,
             }
@@ -271,14 +319,15 @@ impl BlockPool {
             )));
         }
         let mut h: i64 = -1;
+        let mut identity = None;
         let mut cached_block_ids = Vec::with_capacity(num_cached_blocks);
         let mut distinct_cached_block_ids = HashSet::with_capacity(num_cached_blocks);
         for i in 0..num_cached_blocks {
             let token_ids = seq.block(i);
             h = Self::compute_hash(token_ids, h);
-            let block_id = *self
-                .hash_to_block_id
-                .get(&h)
+            let next_identity = PrefixCacheIdentity::extend(identity, token_ids.to_vec());
+            let block_id = self
+                .cached_block_id(h, &next_identity)
                 .ok_or_else(|| BlockPoolError("cached block hash not found".to_string()))?;
             let block = self.blocks.get(block_id).ok_or_else(|| {
                 BlockPoolError(format!("cached block {block_id} is out of range"))
@@ -309,6 +358,7 @@ impl BlockPool {
                 )));
             }
             cached_block_ids.push(block_id);
+            identity = Some(next_identity);
         }
 
         let required_uncached_blocks = seq.num_blocks() - num_cached_blocks;
@@ -372,20 +422,82 @@ impl BlockPool {
     /// blocks that reach 0. Clears `seq.block_table` and resets
     /// `num_cached_tokens` to 0.
     pub fn deallocate(&mut self, seq: &mut Sequence) -> Result<(), BlockPoolError> {
-        for &block_id in seq.block_table.iter().rev() {
-            let block = &mut self.blocks[block_id];
+        self.deallocate_batch(std::slice::from_mut(seq))?;
+        Ok(())
+    }
+
+    /// Deallocate a set of sequences as one ownership transaction.
+    ///
+    /// Every block id, per-sequence table, aggregate refcount decrement, and
+    /// free/used ownership relation is validated before the first mutation.
+    pub(crate) fn deallocate_batch(
+        &mut self,
+        sequences: &mut [Sequence],
+    ) -> Result<(), BlockPoolError> {
+        let mut release_counts = HashMap::<usize, usize>::new();
+        let mut release_order = Vec::new();
+        for sequence in sequences.iter() {
+            let mut sequence_blocks = HashSet::with_capacity(sequence.block_table.len());
+            for &block_id in sequence.block_table.iter().rev() {
+                if !sequence_blocks.insert(block_id) {
+                    return Err(BlockPoolError(format!(
+                        "block {block_id} appears more than once in sequence {}",
+                        sequence.seq_id
+                    )));
+                }
+                if !release_counts.contains_key(&block_id) {
+                    release_order.push(block_id);
+                }
+                let count = release_counts.entry(block_id).or_default();
+                *count = count.checked_add(1).ok_or_else(|| {
+                    BlockPoolError(format!("block {block_id} release count overflow"))
+                })?;
+            }
+        }
+
+        for (&block_id, &release_count) in &release_counts {
+            let block = self.blocks.get(block_id).ok_or_else(|| {
+                BlockPoolError(format!(
+                    "block {block_id} is out of range during deallocation"
+                ))
+            })?;
             if block.ref_count == 0 {
                 return Err(BlockPoolError(format!(
                     "block {block_id} already has ref_count 0 (double-free?)"
                 )));
             }
-            block.ref_count -= 1;
-            if block.ref_count == 0 {
-                self.deallocate_block_private(block_id)?;
+            if block.ref_count < release_count {
+                return Err(BlockPoolError(format!(
+                    "block {block_id} ref_count {} is smaller than release count {release_count}",
+                    block.ref_count
+                )));
+            }
+            if !self.used_block_ids.contains(&block_id)
+                || self
+                    .free_block_ids
+                    .iter()
+                    .any(|&free_id| free_id == block_id)
+            {
+                return Err(BlockPoolError(format!(
+                    "block {block_id} has inconsistent deallocation ownership"
+                )));
             }
         }
-        seq.num_cached_tokens = 0;
-        seq.block_table.clear();
+
+        for block_id in release_order {
+            let release_count = release_counts[&block_id];
+            let block = &mut self.blocks[block_id];
+            block.ref_count -= release_count;
+            if block.ref_count == 0 {
+                self.used_block_ids.remove(&block_id);
+                self.free_block_ids.push_back(block_id);
+            }
+        }
+        for sequence in sequences {
+            sequence.num_cached_tokens = 0;
+            sequence.num_scheduled_tokens = 0;
+            sequence.block_table.clear();
+        }
         Ok(())
     }
 
@@ -490,19 +602,26 @@ impl BlockPool {
             return;
         }
         // Retrieve the prefix hash from the block before `start`.
-        let mut h: i64 = if start > 0 {
-            self.blocks[seq.block_table[start - 1]].hash
+        let (mut h, mut identity) = if start > 0 {
+            let prefix = &self.blocks[seq.block_table[start - 1]];
+            (prefix.hash, prefix.prefix_identity.clone())
         } else {
-            -1
+            (-1, None)
         };
 
         for i in start..end {
             let block_id = seq.block_table[i];
             let token_ids = seq.block(i).to_vec();
             h = Self::compute_hash(&token_ids, h);
+            let next_identity = PrefixCacheIdentity::extend(identity, token_ids.clone());
+            let old_hash = self.blocks[block_id].hash;
+            if old_hash != -1 && old_hash != h {
+                self.remove_cache_entry(old_hash, block_id);
+            }
             let block = &mut self.blocks[block_id];
-            block.update(h, token_ids);
-            self.hash_to_block_id.insert(h, block_id);
+            block.update(h, token_ids, next_identity.clone());
+            self.index_cache_entry(h, block_id);
+            identity = Some(next_identity);
         }
     }
 
@@ -536,6 +655,21 @@ mod tests {
                 ..crate::SamplingParams::default()
             },
         )
+    }
+
+    fn index_test_prefix(
+        pool: &mut BlockPool,
+        block_id: usize,
+        hash: i64,
+        prefix_blocks: &[Vec<u32>],
+    ) {
+        let mut identity = None;
+        for token_ids in prefix_blocks {
+            identity = Some(PrefixCacheIdentity::extend(identity, token_ids.clone()));
+        }
+        let current_tokens = prefix_blocks.last().unwrap().clone();
+        pool.blocks[block_id].update(hash, current_tokens, identity.unwrap());
+        pool.index_cache_entry(hash, block_id);
     }
 
     mod compute_hash {
@@ -642,16 +776,95 @@ mod tests {
             // Simulate that these blocks were hashed and are used.
             let b1 = pool.allocate_block_private().unwrap();
             let b2 = pool.allocate_block_private().unwrap();
-            pool.blocks[b1].update(h1, tokens_b1);
-            pool.blocks[b2].update(h2, tokens_b2);
-            pool.hash_to_block_id.insert(h1, b1);
-            pool.hash_to_block_id.insert(h2, b2);
+            index_test_prefix(&mut pool, b1, h1, std::slice::from_ref(&tokens_b1));
+            index_test_prefix(&mut pool, b2, h2, &[tokens_b1, tokens_b2]);
 
             // Sequence with 3 full blocks. Should find 2 cached, need 1 new.
             let tokens_seq: Vec<u32> = (0..(3 * 256) as u32).collect();
             let seq = make_seq(tokens_seq);
             let result = pool.can_allocate(&seq);
             assert_eq!(result, Some(2));
+        }
+
+        #[test]
+        fn hash_collision_with_same_block_tokens_does_not_cross_prefix_chains() {
+            let mut pool = BlockPool::new(12, 256);
+            let first_prefix = (0..256).collect::<Vec<u32>>();
+            let different_prefix = (2_000..2_256).collect::<Vec<u32>>();
+            let shared_second_block = (1_000..1_256).collect::<Vec<u32>>();
+
+            let mut correct_tokens = first_prefix.clone();
+            correct_tokens.extend_from_slice(&shared_second_block);
+            correct_tokens.push(9);
+            let mut correct_owner = make_seq(correct_tokens.clone());
+            pool.allocate(&mut correct_owner, 0).unwrap();
+            correct_owner.num_scheduled_tokens = 2 * 256;
+            pool.hash_blocks(&mut correct_owner);
+            let colliding_hash = pool.blocks[correct_owner.block_table[1]].hash;
+
+            let mut wrong_tokens = different_prefix.clone();
+            wrong_tokens.extend_from_slice(&shared_second_block);
+            wrong_tokens.push(10);
+            let mut wrong_owner = make_seq(wrong_tokens);
+            pool.allocate(&mut wrong_owner, 0).unwrap();
+            let wrong_second_block = wrong_owner.block_table[1];
+            pool.hash_to_block_id.remove(&colliding_hash);
+            index_test_prefix(
+                &mut pool,
+                wrong_second_block,
+                colliding_hash,
+                &[different_prefix, shared_second_block],
+            );
+
+            let target = make_seq(correct_tokens);
+
+            assert_eq!(
+                pool.can_allocate(&target),
+                Some(1),
+                "a matching hash and current block are insufficient without the complete prefix chain"
+            );
+        }
+
+        #[test]
+        fn hash_bucket_keeps_colliding_candidates_and_selects_the_exact_chain() {
+            let mut pool = BlockPool::new(12, 256);
+            let first_prefix = (0..256).collect::<Vec<u32>>();
+            let different_prefix = (2_000..2_256).collect::<Vec<u32>>();
+            let shared_second_block = (1_000..1_256).collect::<Vec<u32>>();
+
+            let mut correct_tokens = first_prefix;
+            correct_tokens.extend_from_slice(&shared_second_block);
+            correct_tokens.push(9);
+            let mut correct_owner = make_seq(correct_tokens.clone());
+            pool.allocate(&mut correct_owner, 0).unwrap();
+            correct_owner.num_scheduled_tokens = 2 * 256;
+            pool.hash_blocks(&mut correct_owner);
+            let correct_second_block = correct_owner.block_table[1];
+            let colliding_hash = pool.blocks[correct_second_block].hash;
+
+            let mut wrong_tokens = different_prefix.clone();
+            wrong_tokens.extend_from_slice(&shared_second_block);
+            wrong_tokens.push(10);
+            let mut wrong_owner = make_seq(wrong_tokens);
+            pool.allocate(&mut wrong_owner, 0).unwrap();
+            let wrong_second_block = wrong_owner.block_table[1];
+            index_test_prefix(
+                &mut pool,
+                wrong_second_block,
+                colliding_hash,
+                &[different_prefix, shared_second_block],
+            );
+            assert_eq!(pool.hash_to_block_id[&colliding_hash].len(), 2);
+
+            let mut target = make_seq(correct_tokens);
+            let cached = pool.can_allocate(&target).unwrap();
+            assert_eq!(cached, 2);
+            pool.allocate(&mut target, cached).unwrap();
+
+            assert_eq!(target.block_table[1], correct_second_block);
+            assert_ne!(target.block_table[1], wrong_second_block);
+            assert_eq!(pool.blocks[correct_second_block].ref_count, 2);
+            assert_eq!(pool.blocks[wrong_second_block].ref_count, 1);
         }
     }
 
@@ -684,8 +897,12 @@ mod tests {
             pool.allocate(&mut cached_owner, 0).unwrap();
             let cached_block = cached_owner.block_table[0];
             let prefix_hash = BlockPool::compute_hash(&prefix, -1);
-            pool.blocks[cached_block].update(prefix_hash, prefix);
-            pool.hash_to_block_id.insert(prefix_hash, cached_block);
+            index_test_prefix(
+                &mut pool,
+                cached_block,
+                prefix_hash,
+                std::slice::from_ref(&prefix),
+            );
 
             let mut target = make_seq((0..513).collect());
             let free_before = pool.num_free_blocks();
@@ -745,8 +962,7 @@ mod tests {
             pool.allocate(&mut seq_a, 0).unwrap();
             // Manually hash the block.
             let block_id = seq_a.block_table[0];
-            pool.blocks[block_id].update(h, prefix_tokens.clone());
-            pool.hash_to_block_id.insert(h, block_id);
+            index_test_prefix(&mut pool, block_id, h, std::slice::from_ref(&prefix_tokens));
             // seq_a has ref_count=1 from allocate_block_private.
 
             // Allocate seq_b with same prefix. can_allocate should find it cached.
@@ -791,6 +1007,134 @@ mod tests {
         }
 
         #[test]
+        fn validation_failure_does_not_partially_release_later_blocks() {
+            let mut pool = BlockPool::new(5, 256);
+            let mut seq = make_seq((0..257).collect());
+            pool.allocate(&mut seq, 0).unwrap();
+            let first_block = seq.block_table[0];
+            pool.blocks[first_block].ref_count = 0;
+            let free_before = pool.free_block_ids.clone();
+            let used_before = pool.used_block_ids.clone();
+            let ref_counts_before = pool
+                .blocks
+                .iter()
+                .map(|block| block.ref_count)
+                .collect::<Vec<_>>();
+            let block_table_before = seq.block_table.clone();
+
+            let error = pool.deallocate(&mut seq).unwrap_err();
+
+            assert_eq!(
+                error,
+                BlockPoolError(format!(
+                    "block {first_block} already has ref_count 0 (double-free?)"
+                ))
+            );
+            assert_eq!(pool.free_block_ids, free_before);
+            assert_eq!(pool.used_block_ids, used_before);
+            assert_eq!(
+                pool.blocks
+                    .iter()
+                    .map(|block| block.ref_count)
+                    .collect::<Vec<_>>(),
+                ref_counts_before
+            );
+            assert_eq!(seq.block_table, block_table_before);
+            assert_eq!(seq.num_cached_tokens, 0);
+        }
+
+        #[test]
+        fn batch_validation_failure_preserves_shared_and_private_refcounts() {
+            let mut pool = BlockPool::new(8, 256);
+            let mut first_tokens = (0..256).collect::<Vec<u32>>();
+            first_tokens.push(9);
+            let mut first = make_seq(first_tokens.clone());
+            pool.allocate(&mut first, 0).unwrap();
+            first.num_scheduled_tokens = 256;
+            pool.hash_blocks(&mut first);
+
+            let mut second = make_seq(first_tokens);
+            let cached = pool.can_allocate(&second).unwrap();
+            assert_eq!(cached, 1);
+            pool.allocate(&mut second, cached).unwrap();
+            let shared_block = first.block_table[0];
+            let invalid_private_block = second.block_table[1];
+            assert_eq!(pool.blocks[shared_block].ref_count, 2);
+            pool.blocks[invalid_private_block].ref_count = 0;
+            let free_before = pool.free_block_ids.clone();
+            let used_before = pool.used_block_ids.clone();
+            let ref_counts_before = pool
+                .blocks
+                .iter()
+                .map(|block| block.ref_count)
+                .collect::<Vec<_>>();
+            let mut sequences = [first, second];
+            let tables_before = sequences
+                .iter()
+                .map(|sequence| sequence.block_table.clone())
+                .collect::<Vec<_>>();
+
+            let error = pool.deallocate_batch(&mut sequences).unwrap_err();
+
+            assert_eq!(
+                error,
+                BlockPoolError(format!(
+                    "block {invalid_private_block} already has ref_count 0 (double-free?)"
+                ))
+            );
+            assert_eq!(pool.free_block_ids, free_before);
+            assert_eq!(pool.used_block_ids, used_before);
+            assert_eq!(pool.blocks[shared_block].ref_count, 2);
+            assert_eq!(
+                pool.blocks
+                    .iter()
+                    .map(|block| block.ref_count)
+                    .collect::<Vec<_>>(),
+                ref_counts_before
+            );
+            assert_eq!(
+                sequences
+                    .iter()
+                    .map(|sequence| sequence.block_table.clone())
+                    .collect::<Vec<_>>(),
+                tables_before
+            );
+        }
+
+        #[test]
+        fn batch_release_decrements_a_shared_prefix_once_per_owner() {
+            let mut pool = BlockPool::new(8, 256);
+            let mut first_tokens = (0..256).collect::<Vec<u32>>();
+            first_tokens.push(9);
+            let mut first = make_seq(first_tokens.clone());
+            pool.allocate(&mut first, 0).unwrap();
+            first.num_scheduled_tokens = 256;
+            pool.hash_blocks(&mut first);
+
+            let mut second = make_seq(first_tokens);
+            let cached = pool.can_allocate(&second).unwrap();
+            pool.allocate(&mut second, cached).unwrap();
+            let shared_block = first.block_table[0];
+            assert_eq!(pool.blocks[shared_block].ref_count, 2);
+            let mut sequences = [first, second];
+
+            pool.deallocate_batch(&mut sequences).unwrap();
+
+            assert_eq!(pool.num_free_blocks(), 8);
+            assert_eq!(pool.blocks[shared_block].ref_count, 0);
+            assert_eq!(
+                pool.free_block_ids
+                    .iter()
+                    .filter(|&&block_id| block_id == shared_block)
+                    .count(),
+                1
+            );
+            assert!(sequences
+                .iter()
+                .all(|sequence| sequence.block_table.is_empty()));
+        }
+
+        #[test]
         fn at_ref_count_zero_only() {
             let mut pool = BlockPool::new(10, 256);
             let prefix_tokens: Vec<u32> = (0..256).collect();
@@ -800,8 +1144,7 @@ mod tests {
             let mut seq_a = make_seq(prefix_tokens.clone());
             pool.allocate(&mut seq_a, 0).unwrap();
             let block_id = seq_a.block_table[0];
-            pool.blocks[block_id].update(h, prefix_tokens.clone());
-            pool.hash_to_block_id.insert(h, block_id);
+            index_test_prefix(&mut pool, block_id, h, std::slice::from_ref(&prefix_tokens));
 
             // Allocate seq_b with shared prefix.
             let mut tokens_b: Vec<u32> = prefix_tokens.clone();
@@ -848,8 +1191,7 @@ mod tests {
             let mut seq_a = make_seq(prefix_tokens.clone());
             pool.allocate(&mut seq_a, 0).unwrap();
             let block_id = seq_a.block_table[0];
-            pool.blocks[block_id].update(h, prefix_tokens.clone());
-            pool.hash_to_block_id.insert(h, block_id);
+            index_test_prefix(&mut pool, block_id, h, std::slice::from_ref(&prefix_tokens));
 
             // Seq B: allocate with shared prefix + one more token.
             let mut tokens_b: Vec<u32> = prefix_tokens.clone();

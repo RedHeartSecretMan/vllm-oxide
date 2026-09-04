@@ -296,7 +296,7 @@ impl Scheduler {
             let slot_mapping =
                 kv_mgr.compute_slot_mapping(sequence, token_range.start, token_budget);
             let cache = SequenceCachePlan {
-                num_cached_tokens: sequence.num_cached_tokens,
+                cached_token_range: 0..sequence.num_cached_tokens,
                 kv_length: token_range.end,
                 block_table: sequence.block_table.clone(),
                 slot_mapping,
@@ -334,8 +334,15 @@ impl Scheduler {
             .iter()
             .flat_map(|sequence| sequence.cache.slot_mapping.iter().copied())
             .collect::<Vec<_>>();
+        let has_cached_prefill = sequences.iter().any(|sequence| {
+            sequence.phase == SequencePhase::Prefill
+                && !sequence.cache.cached_token_range.is_empty()
+        });
+        // A same-request continuation is identified during work selection.
+        // A newly admitted prefix hit is not a continuation, but its captured
+        // cached range independently requires the same paged causal path.
         let attention = match output.phase {
-            StepPhase::Prefill if output.is_prefill_continuation => {
+            StepPhase::Prefill if output.is_prefill_continuation || has_cached_prefill => {
                 build_paged_prefill_plan_metadata(&sequences, &slot_mapping)?
             }
             StepPhase::Prefill => {
@@ -483,25 +490,54 @@ impl Scheduler {
             }
         }
 
-        for sequence_id in finished_sequence_ids {
-            // The id was collected from a running sequence above.
-            #[allow(clippy::unwrap_used)]
-            let index = self
+        if let Some(&first_finished_id) = finished_sequence_ids.first() {
+            let finished_ids = finished_sequence_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let mut finished = self
                 .running
                 .iter()
-                .position(|sequence| sequence.seq_id == sequence_id)
-                .unwrap();
-            kv_mgr
-                .deallocate(&mut self.running[index])
-                .map_err(KvCacheError::from)
-                .map_err(|source| {
-                    StepPlanError::cache(CacheOperation::Deallocation, sequence_id, source)
-                })?;
-            self.running.remove(index);
+                .filter(|sequence| finished_ids.contains(&sequence.seq_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            kv_mgr.deallocate_batch(&mut finished).map_err(|source| {
+                StepPlanError::cache(CacheOperation::Deallocation, first_finished_id, source)
+            })?;
+            self.running
+                .retain(|sequence| !finished_ids.contains(&sequence.seq_id));
         }
 
         self.in_flight = None;
         Ok(outputs)
+    }
+
+    /// Abandon every request after an engine-step failure.
+    ///
+    /// `LLM::generate` is synchronous, so a failed step invalidates the whole
+    /// active call. All block tables are released in one transaction before
+    /// queues or the in-flight plan are cleared.
+    pub(crate) fn abort_all_requests(
+        &mut self,
+        kv_mgr: &mut KvCacheManager,
+    ) -> Result<(), StepPlanError> {
+        let mut allocated = self
+            .running
+            .iter()
+            .chain(&self.waiting)
+            .filter(|sequence| !sequence.block_table.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        if !allocated.is_empty() {
+            let sequence_id = allocated[0].seq_id;
+            kv_mgr.deallocate_batch(&mut allocated).map_err(|source| {
+                StepPlanError::cache(CacheOperation::FailureCleanup, sequence_id, source)
+            })?;
+        }
+        self.running.clear();
+        self.waiting.clear();
+        self.in_flight = None;
+        Ok(())
     }
 
     /// Number of sequences currently waiting to be processed.
@@ -1048,7 +1084,7 @@ mod tests {
             assert_eq!(sequence.token_range, 0..3);
             assert_eq!(sequence.logical_positions, 0..3);
             assert_eq!(sequence.token_budget, 3);
-            assert_eq!(sequence.cache.num_cached_tokens, 0);
+            assert_eq!(sequence.cache.cached_token_range, 0..0);
             assert_eq!(sequence.cache.kv_length, 3);
             assert_eq!(sequence.cache.block_table.len(), 1);
             assert_eq!(sequence.cache.slot_mapping.len(), 3);
@@ -1079,7 +1115,7 @@ mod tests {
             assert_eq!(sequence.token_range, 2..4);
             assert_eq!(sequence.logical_positions, 2..4);
             assert_eq!(sequence.input_token_ids, vec![13, 14]);
-            assert_eq!(sequence.cache.num_cached_tokens, 2);
+            assert_eq!(sequence.cache.cached_token_range, 0..2);
             assert_eq!(sequence.cache.kv_length, 4);
             assert!(!sequence.sampling_allowed);
             assert_eq!(continuation.attention.cu_seqlens_q, vec![0, 2]);
@@ -1095,6 +1131,196 @@ mod tests {
                     .map(|&block| i32::try_from(block).unwrap())
                     .collect::<Vec<_>>()]
             );
+        }
+
+        #[test]
+        fn initial_maximal_prefix_hit_carries_paged_causal_context() {
+            let mut scheduler = make_scheduler();
+            let mut kv = make_kv_mgr(100);
+            let prompt = (0..513).collect::<Vec<u32>>();
+            scheduler.add_request(prompt.clone(), make_params(1));
+            let warmup = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            scheduler
+                .apply_step_result(&result_for_plan(&warmup, 42), &mut kv)
+                .unwrap();
+
+            scheduler.add_request(prompt, make_params(1));
+            let hit = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(hit.phase, StepPhase::Prefill);
+            assert_eq!(hit.token_budget, 1);
+            let sequence = &hit.sequences[0];
+            // "Full hit" means the maximal reusable prefix. The final logical
+            // block is deliberately recomputed so sampling has a hidden state.
+            assert_eq!(sequence.cache.cached_token_range, 0..2 * BLOCK_SIZE);
+            assert_eq!(sequence.token_range, 2 * BLOCK_SIZE..513);
+            assert_eq!(sequence.logical_positions, 2 * BLOCK_SIZE..513);
+            assert_eq!(sequence.input_token_ids, vec![512]);
+            assert_eq!(sequence.cache.kv_length, 513);
+            assert!(sequence.sampling_allowed);
+            assert_eq!(hit.attention.cu_seqlens_q, vec![0, 1]);
+            assert_eq!(hit.attention.cu_seqlens_k, vec![0, 513]);
+            assert_eq!(
+                hit.attention.block_table,
+                vec![sequence
+                    .cache
+                    .block_table
+                    .iter()
+                    .map(|&block| i32::try_from(block).unwrap())
+                    .collect::<Vec<_>>()]
+            );
+        }
+
+        #[test]
+        fn initial_full_partial_and_miss_keep_per_request_causal_mappings() {
+            let mut scheduler = make_scheduler();
+            let mut kv = make_kv_mgr(100);
+            let first_block = (0..BLOCK_SIZE as u32).collect::<Vec<_>>();
+            let second_block = (1_000..1_000 + BLOCK_SIZE as u32).collect::<Vec<_>>();
+            let alternate_second = (2_000..2_000 + BLOCK_SIZE as u32).collect::<Vec<_>>();
+            let miss_prefix = (3_000..3_000 + BLOCK_SIZE as u32).collect::<Vec<_>>();
+
+            let mut full_prompt = first_block.clone();
+            full_prompt.extend_from_slice(&second_block);
+            full_prompt.push(9);
+            scheduler.add_request(full_prompt.clone(), make_params(1));
+            let warmup = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            scheduler
+                .apply_step_result(&result_for_plan(&warmup, 42), &mut kv)
+                .unwrap();
+
+            let mut partial_prompt = first_block;
+            partial_prompt.extend_from_slice(&alternate_second);
+            partial_prompt.push(10);
+            let mut miss_prompt = miss_prefix;
+            miss_prompt.push(11);
+            scheduler.add_request(full_prompt, make_params(1));
+            scheduler.add_request(partial_prompt, make_params(1));
+            scheduler.add_request(miss_prompt, make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Prefill);
+            assert_eq!(plan.token_budget, 1 + 257 + 257);
+            assert_eq!(plan.sequences.len(), 3);
+            let expected = [
+                (2 * BLOCK_SIZE, 513, vec![9]),
+                (BLOCK_SIZE, 513, {
+                    let mut tokens = alternate_second;
+                    tokens.push(10);
+                    tokens
+                }),
+                (0, 257, {
+                    let mut tokens = (3_000..3_000 + BLOCK_SIZE as u32).collect::<Vec<_>>();
+                    tokens.push(11);
+                    tokens
+                }),
+            ];
+            for (sequence, (cached, end, input)) in plan.sequences.iter().zip(expected) {
+                assert_eq!(sequence.cache.cached_token_range, 0..cached);
+                assert_eq!(sequence.token_range, cached..end);
+                assert_eq!(sequence.logical_positions, cached..end);
+                assert_eq!(sequence.input_token_ids, input);
+                assert_eq!(sequence.cache.kv_length, end);
+                assert_eq!(
+                    sequence.cache.slot_mapping.len(),
+                    sequence.token_range.len()
+                );
+                assert!(sequence.sampling_allowed);
+            }
+            assert_eq!(plan.attention.cu_seqlens_q, vec![0, 1, 258, 515]);
+            assert_eq!(plan.attention.cu_seqlens_k, vec![0, 513, 1_026, 1_283]);
+            assert_eq!(plan.attention.block_table.len(), 3);
+            assert_eq!(
+                plan.sequences[0].cache.block_table[0], plan.sequences[1].cache.block_table[0],
+                "requests with the same first logical block must share its physical prefix block"
+            );
+            assert_eq!(
+                plan.attention.slot_mapping,
+                plan.sequences
+                    .iter()
+                    .flat_map(|sequence| sequence.cache.slot_mapping.iter().copied())
+                    .collect::<Vec<_>>()
+            );
+
+            let outputs = scheduler
+                .apply_step_result(&result_for_plan(&plan, 43), &mut kv)
+                .unwrap();
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|output| output.request_id)
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+            assert_eq!(kv.num_free_blocks(), 100);
+        }
+
+        #[test]
+        fn block_boundary_prompt_recomputes_its_final_logical_block_for_sampling() {
+            let mut scheduler = make_scheduler();
+            let mut kv = make_kv_mgr(100);
+            let prompt = (0..(2 * BLOCK_SIZE) as u32).collect::<Vec<_>>();
+            scheduler.add_request(prompt.clone(), make_params(1));
+            let warmup = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            scheduler
+                .apply_step_result(&result_for_plan(&warmup, 42), &mut kv)
+                .unwrap();
+
+            scheduler.add_request(prompt.clone(), make_params(1));
+            let hit = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let sequence = &hit.sequences[0];
+
+            assert_eq!(sequence.cache.cached_token_range, 0..BLOCK_SIZE);
+            assert_eq!(sequence.token_range, BLOCK_SIZE..2 * BLOCK_SIZE);
+            assert_eq!(sequence.logical_positions, BLOCK_SIZE..2 * BLOCK_SIZE);
+            assert_eq!(sequence.input_token_ids, prompt[BLOCK_SIZE..]);
+            assert_eq!(sequence.cache.kv_length, 2 * BLOCK_SIZE);
+            assert_eq!(hit.token_budget, BLOCK_SIZE);
+            assert!(sequence.sampling_allowed);
+            assert_eq!(hit.attention.cu_seqlens_q, vec![0, BLOCK_SIZE as u32]);
+            assert_eq!(hit.attention.cu_seqlens_k, vec![0, (2 * BLOCK_SIZE) as u32]);
+            assert_eq!(hit.attention.block_table.len(), 1);
+        }
+
+        #[test]
+        fn initial_partial_hit_becomes_continuation_without_sampling_early() {
+            let mut scheduler = make_scheduler();
+            let mut kv = make_kv_mgr(100);
+            let warm_prompt = (0..513).collect::<Vec<u32>>();
+            scheduler.add_request(warm_prompt, make_params(1));
+            let warmup = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            scheduler
+                .apply_step_result(&result_for_plan(&warmup, 42), &mut kv)
+                .unwrap();
+
+            scheduler.max_num_batched_tokens = 100;
+            let mut prompt = (0..BLOCK_SIZE as u32).collect::<Vec<_>>();
+            prompt.extend(2_000..2_344);
+            scheduler.add_request(prompt, make_params(1));
+
+            let initial_hit = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let initial = &initial_hit.sequences[0];
+            assert_eq!(initial.cache.cached_token_range, 0..BLOCK_SIZE);
+            assert_eq!(initial.token_range, BLOCK_SIZE..BLOCK_SIZE + 100);
+            assert_eq!(initial.logical_positions, initial.token_range);
+            assert_eq!(initial.cache.kv_length, BLOCK_SIZE + 100);
+            assert!(!initial.sampling_allowed);
+            assert_eq!(initial_hit.attention.block_table.len(), 1);
+            scheduler
+                .apply_step_result(&result_for_plan(&initial_hit, 43), &mut kv)
+                .unwrap();
+
+            let continuation = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let continued = &continuation.sequences[0];
+            assert_eq!(continued.cache.cached_token_range, 0..BLOCK_SIZE + 100);
+            assert_eq!(continued.token_range, BLOCK_SIZE + 100..BLOCK_SIZE + 200);
+            assert_eq!(continued.logical_positions, continued.token_range);
+            assert_eq!(continued.cache.kv_length, BLOCK_SIZE + 200);
+            assert!(!continued.sampling_allowed);
+            assert_eq!(continuation.attention.block_table.len(), 1);
+            scheduler.abort_all_requests(&mut kv).unwrap();
+            assert_eq!(kv.num_free_blocks(), 100);
         }
 
         #[test]
@@ -1304,7 +1530,7 @@ mod tests {
             assert_eq!(sequence.token_range, 3..4);
             assert_eq!(sequence.logical_positions, 3..4);
             assert_eq!(sequence.input_token_ids, vec![42]);
-            assert_eq!(sequence.cache.num_cached_tokens, 3);
+            assert_eq!(sequence.cache.cached_token_range, 0..3);
             assert_eq!(sequence.cache.kv_length, 4);
             assert_eq!(sequence.cache.slot_mapping.len(), 1);
             assert!(sequence.sampling_allowed);
@@ -2029,11 +2255,10 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![(1, 44), (2, 56)]
             );
-            assert_eq!(plan.sequences[0].cache.num_cached_tokens, 256);
-            assert!(
-                plan.attention.block_table.is_empty(),
-                "initial prefix hits remain owned by #39, not chunk continuation"
-            );
+            assert_eq!(plan.sequences[0].cache.cached_token_range, 0..256);
+            assert_eq!(plan.attention.cu_seqlens_q, vec![0, 44, 100]);
+            assert_eq!(plan.attention.cu_seqlens_k, vec![0, 300, 356]);
+            assert_eq!(plan.attention.block_table.len(), 2);
         }
 
         #[test]

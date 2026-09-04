@@ -504,6 +504,7 @@ mod tests {
     use crate::causal_lm::CausalLM;
     use crate::engine::sequence::BLOCK_SIZE;
     use candle_core::Tensor;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokenizers::models::bpe::{Vocab, BPE};
 
     struct MockModel {
@@ -525,6 +526,7 @@ mod tests {
         device: Device,
         attn_ctx: AttentionContext,
         physical_tokens: HashMap<usize, u32>,
+        fail_next: Option<Arc<AtomicBool>>,
     }
 
     fn cached_token_at(
@@ -564,6 +566,13 @@ mod tests {
             input_ids: &Tensor,
             positions: &Tensor,
         ) -> candle_core::Result<Tensor> {
+            if self
+                .fail_next
+                .as_ref()
+                .is_some_and(|fail_next| fail_next.swap(false, Ordering::SeqCst))
+            {
+                candle_core::bail!("injected prefix-cache execution failure");
+            }
             let input_ids = input_ids.to_vec1::<u32>()?;
             let positions = positions.to_vec1::<u32>()?;
             let metadata = self.attn_ctx.attn_meta.lock().unwrap().clone();
@@ -970,6 +979,7 @@ mod tests {
             device: device.clone(),
             attn_ctx: attn_ctx.clone(),
             physical_tokens: HashMap::new(),
+            fail_next: None,
         });
         let engine = EngineCore::new(
             scheduler,
@@ -984,6 +994,33 @@ mod tests {
 
     fn causal_fingerprint_test_llm(max_num_batched_tokens: usize) -> LLM {
         causal_fingerprint_test_llm_with_limits(max_num_batched_tokens, 16)
+    }
+
+    fn causal_fingerprint_test_llm_with_failure_switch() -> (LLM, Arc<AtomicBool>) {
+        let device = Device::Cpu;
+        let paged_kv = Arc::new(Mutex::new(
+            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
+        ));
+        let attn_ctx = AttentionContext {
+            paged_kv: paged_kv.clone(),
+            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+        };
+        let fail_next = Arc::new(AtomicBool::new(false));
+        let model: Box<dyn CausalLM> = Box::new(CausalFingerprintModel {
+            device: device.clone(),
+            attn_ctx: attn_ctx.clone(),
+            physical_tokens: HashMap::new(),
+            fail_next: Some(fail_next.clone()),
+        });
+        let engine = EngineCore::new(
+            Scheduler::new(1_024, 16, 0.9),
+            KvCacheManager::new(32, BLOCK_SIZE, paged_kv.clone()),
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device.clone(),
+        );
+        (finish_test_llm(engine, paged_kv, device), fail_next)
     }
 
     mod engine_options {
@@ -1116,6 +1153,131 @@ mod tests {
                 );
                 assert_eq!(mixed_outputs[input_position].text, isolated_output[0].text);
             }
+        }
+    }
+
+    mod prefix_cached_prefill {
+        use super::*;
+
+        fn deterministic_params(max_tokens: usize) -> SamplingParams {
+            SamplingParams {
+                temperature: 0.0,
+                max_tokens,
+                ignore_eos: true,
+                ..SamplingParams::default()
+            }
+        }
+
+        fn assert_same_output(actual: &RequestOutput, expected: &RequestOutput) {
+            assert_eq!(actual.request_id, expected.request_id);
+            assert_eq!(actual.token_ids, expected.token_ids);
+            assert_eq!(actual.text, expected.text);
+            assert_eq!(actual.finished, expected.finished);
+        }
+
+        #[test]
+        fn warm_prefix_hit_matches_cache_miss_control_for_the_same_request() {
+            let target = Prompt::TokenIds((0..513).collect());
+            let unrelated = Prompt::TokenIds((2_000..2_513).collect());
+            let params = deterministic_params(3);
+            let mut cache_hit = causal_fingerprint_test_llm(1_024);
+            let mut cache_miss = causal_fingerprint_test_llm(1_024);
+
+            cache_hit
+                .generate(std::slice::from_ref(&target), std::slice::from_ref(&params))
+                .unwrap();
+            cache_miss
+                .generate(
+                    std::slice::from_ref(&unrelated),
+                    std::slice::from_ref(&params),
+                )
+                .unwrap();
+
+            let hit = cache_hit
+                .generate(std::slice::from_ref(&target), std::slice::from_ref(&params))
+                .unwrap();
+            let miss = cache_miss
+                .generate(std::slice::from_ref(&target), std::slice::from_ref(&params))
+                .unwrap();
+
+            assert_eq!(hit.len(), 1);
+            assert_eq!(hit[0].request_id, 1);
+            assert_same_output(&hit[0], &miss[0]);
+            assert_eq!(cache_hit.engine.kv_cache_manager.num_free_blocks(), 32);
+            assert_eq!(cache_miss.engine.kv_cache_manager.num_free_blocks(), 32);
+        }
+
+        #[test]
+        fn mixed_full_partial_and_miss_match_isolated_cache_misses() {
+            let block_size = u32::try_from(BLOCK_SIZE).unwrap();
+            let first_block = (0..block_size).collect::<Vec<_>>();
+            let second_block = (1_000..1_000 + block_size).collect::<Vec<_>>();
+            let alternate_second = (2_000..2_000 + block_size).collect::<Vec<_>>();
+            let mut full_prompt = first_block.clone();
+            full_prompt.extend_from_slice(&second_block);
+            full_prompt.push(9);
+            let mut partial_prompt = first_block;
+            partial_prompt.extend_from_slice(&alternate_second);
+            partial_prompt.push(10);
+            let mut miss_prompt = (3_000..3_000 + block_size).collect::<Vec<_>>();
+            miss_prompt.push(11);
+            let prompts = [
+                Prompt::TokenIds(full_prompt.clone()),
+                Prompt::TokenIds(partial_prompt),
+                Prompt::TokenIds(miss_prompt),
+            ];
+            let params = [
+                deterministic_params(1),
+                deterministic_params(2),
+                deterministic_params(3),
+            ];
+            let mut mixed = causal_fingerprint_test_llm(1_024);
+            mixed
+                .generate(&[Prompt::TokenIds(full_prompt)], &[deterministic_params(1)])
+                .unwrap();
+
+            let outputs = mixed.generate(&prompts, &params).unwrap();
+
+            assert_eq!(outputs.len(), 3);
+            for (index, (prompt, params)) in prompts.iter().zip(&params).enumerate() {
+                let mut isolated = causal_fingerprint_test_llm(1_024);
+                let expected = isolated
+                    .generate(std::slice::from_ref(prompt), std::slice::from_ref(params))
+                    .unwrap();
+                assert_eq!(outputs[index].request_id, index + 1);
+                assert_eq!(outputs[index].token_ids, expected[0].token_ids);
+                assert_eq!(outputs[index].text, expected[0].text);
+                assert_eq!(outputs[index].finished, expected[0].finished);
+            }
+            assert_eq!(mixed.engine.kv_cache_manager.num_free_blocks(), 32);
+        }
+
+        #[test]
+        fn rejected_request_does_not_borrow_or_discard_cached_prefix_ownership() {
+            let mut llm = causal_fingerprint_test_llm(1_024);
+            let prompt = [Prompt::TokenIds((0..513).collect())];
+            let valid = [deterministic_params(1)];
+            llm.generate(&prompt, &valid).unwrap();
+            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+
+            let error = llm
+                .generate(
+                    &prompt,
+                    &[SamplingParams {
+                        max_tokens: 0,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap_err();
+
+            assert!(error.to_string().contains("max_tokens=0"));
+            assert!(!llm.engine.is_running());
+            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+
+            let accepted = llm.generate(&prompt, &valid).unwrap();
+            assert_eq!(accepted[0].request_id, 1);
+            assert!(accepted[0].finished);
+            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
         }
     }
 
@@ -1833,6 +1995,36 @@ mod tests {
 
     mod generate_errors {
         use super::*;
+
+        #[test]
+        fn prefix_hit_execution_failure_releases_all_ownership_and_allows_retry() {
+            let (mut llm, fail_next) = causal_fingerprint_test_llm_with_failure_switch();
+            let prompt = [Prompt::TokenIds((0..513).collect())];
+            let params = [SamplingParams {
+                temperature: 0.0,
+                max_tokens: 1,
+                ignore_eos: true,
+                ..SamplingParams::default()
+            }];
+            let warmup = llm.generate(&prompt, &params).unwrap();
+            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+
+            fail_next.store(true, Ordering::SeqCst);
+            let error = llm.generate(&prompt, &params).unwrap_err();
+
+            assert!(format!("{error:#}").contains("injected prefix-cache execution failure"));
+            assert!(!llm.engine.is_running());
+            assert_eq!(llm.engine.scheduler.num_waiting(), 0);
+            assert_eq!(llm.engine.scheduler.num_running(), 0);
+            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+
+            let retry = llm.generate(&prompt, &params).unwrap();
+            assert_eq!(retry[0].request_id, 2);
+            assert_eq!(retry[0].token_ids, warmup[0].token_ids);
+            assert_eq!(retry[0].text, warmup[0].text);
+            assert!(retry[0].finished);
+            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+        }
 
         #[test]
         fn model_execution_failure_is_returned_as_an_error() {
