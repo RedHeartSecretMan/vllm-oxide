@@ -22,6 +22,7 @@ use candle_core::{DType, Device, Result, Tensor};
 
 use crate::attention::AttentionContext;
 use crate::causal_lm::CausalLM;
+use crate::sampler::selected_token_ids_to_host;
 use crate::Sampler;
 use crate::SamplingParams;
 
@@ -183,10 +184,21 @@ impl EngineCore {
         } else {
             let refs = sample_hiddens.iter().collect::<Vec<_>>();
             let logits = self.model.compute_logits(&Tensor::stack(&refs, 0)?)?;
-            let sampled = self
+            let sampled_device = self
                 .sampler
-                .forward(&logits, &sampling_params, &token_histories)?
-                .to_vec1::<u32>()?;
+                .forward(&logits, &sampling_params, &token_histories)
+                .map_err(|error| {
+                    candle_core::Error::msg(format!(
+                        "sampling failed for {}: {error}",
+                        sampling_diagnostics(plan)
+                    ))
+                })?;
+            let sampled = selected_token_ids_to_host(&sampled_device).map_err(|error| {
+                candle_core::Error::msg(format!(
+                    "selected-token transfer failed for {}: {error}",
+                    sampling_diagnostics(plan)
+                ))
+            })?;
             (sampled, logits.to_dtype(DType::F32)?)
         };
 
@@ -219,6 +231,20 @@ impl EngineCore {
     }
 }
 
+fn sampling_diagnostics(plan: &StepPlan) -> String {
+    plan.sequences
+        .iter()
+        .filter(|sequence| sequence.sampling_allowed)
+        .map(|sequence| {
+            format!(
+                "request_id={}, sampling_params={:?}",
+                sequence.request_id, sequence.sampling_params
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -245,6 +271,10 @@ mod tests {
         device: Device,
     }
 
+    struct InvalidSamplingLogitsModel {
+        device: Device,
+    }
+
     impl CausalLM for RecordingModel {
         fn forward(&mut self, input_ids: &Tensor, _positions: &Tensor) -> Result<Tensor> {
             self.seen_input_ids
@@ -261,6 +291,24 @@ mod tests {
                 logits[row * 100 + 42] = 100.0;
             }
             Tensor::from_vec(logits, (rows, 100), &self.device)
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+    }
+
+    impl CausalLM for InvalidSamplingLogitsModel {
+        fn forward(&mut self, input_ids: &Tensor, _positions: &Tensor) -> Result<Tensor> {
+            Tensor::zeros((input_ids.dim(0)?, 64), DType::F32, &self.device)
+        }
+
+        fn compute_logits(&self, _hidden_states: &Tensor) -> Result<Tensor> {
+            Tensor::zeros(100, DType::F32, &self.device)
         }
 
         fn vocab_size(&self) -> usize {
@@ -456,6 +504,52 @@ mod tests {
         assert_eq!(result.sequences[0].request_id, 0);
         assert_eq!(result.sequences[0].sequence_id, 0);
         assert_eq!(result.sequences[0].sampled_token, Some(42));
+    }
+
+    #[test]
+    fn sampling_tensor_error_retains_request_context() {
+        let device = Device::Cpu;
+        let mut scheduler = Scheduler::with_defaults();
+        let attn_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        scheduler.add_request(
+            vec![11],
+            SamplingParams {
+                temperature: 0.75,
+                top_k: Some(8),
+                top_p: Some(0.9),
+                presence_penalty: 0.25,
+                frequency_penalty: -0.5,
+                repetition_penalty: 1.25,
+                ..SamplingParams::default()
+            },
+        );
+        let mut engine = EngineCore::new(
+            scheduler,
+            kv_mgr,
+            Box::new(InvalidSamplingLogitsModel {
+                device: device.clone(),
+            }),
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device,
+        );
+
+        let error = engine.step().unwrap_err().to_string();
+
+        assert!(error.contains("sampling failed"));
+        assert!(error.contains("request_id=0"));
+        assert!(error.contains("temperature: 0.75"));
+        assert!(error.contains("top_k: Some(8)"));
+        assert!(error.contains("top_p: Some(0.9)"));
+        assert!(error.contains("presence_penalty: 0.25"));
+        assert!(error.contains("frequency_penalty: -0.5"));
+        assert!(error.contains("repetition_penalty: 1.25"));
+        assert!(!error.contains("sequence_id"));
+        assert!(!engine.is_running());
     }
 
     #[test]

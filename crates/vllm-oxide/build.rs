@@ -9,6 +9,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("cargo:rerun-if-changed=kernels/reshape_and_cache.cu");
     println!("cargo:rerun-if-changed=kernels/copy_blocks.cu");
+    println!("cargo:rerun-if-changed=kernels/sampler.cu");
 
     let lib = out_dir.join("libvllmoxidekernels.a");
 

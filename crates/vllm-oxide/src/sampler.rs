@@ -6,7 +6,10 @@
 //! top-p nucleus → Gumbel-max sample. Each row of the `[batch, vocab]` logits
 //! tensor is sampled independently; batch-mates with different
 //! `SamplingParams.temperature` (or `top_k` / `top_p`) compose correctly in
-//! one `Sampler::forward` call.
+//! one `Sampler::forward` call. CPU tensors use the reference host adapter;
+//! CUDA tensors dispatch fail-closed to the device adapter, whose reusable
+//! workspace keeps logits, filtering, and token choice on the GPU. Normal
+//! generation transfers only the resulting `[batch]` U32 token tensor.
 //!
 //! # Divergence from nano-vllm
 //!
@@ -20,8 +23,80 @@
 use std::fmt;
 
 use candle_core::{DType, Error as CandleError, Result, Tensor};
+#[cfg(feature = "cuda")]
+use rand::RngCore;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Gumbel};
+
+#[cfg(feature = "cuda")]
+mod cuda;
+
+#[cfg(test)]
+use std::cell::RefCell;
+
+/// Host-transfer categories that are observable in sampler tests. The
+/// instrumentation sits at the transfer seam rather than inspecting Candle
+/// internals, so CUDA regression tests can distinguish the forbidden
+/// full-vocabulary path from the permitted selected-token copy.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostTransfer {
+    FullLogits { elements: usize },
+    SelectedTokens { elements: usize },
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_TRANSFERS: RefCell<Vec<HostTransfer>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_host_transfer(transfer: HostTransfer) {
+    HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().push(transfer));
+}
+
+#[cfg(not(test))]
+fn record_full_logits_host_transfer(_elements: usize) {}
+
+#[cfg(test)]
+fn record_full_logits_host_transfer(elements: usize) {
+    record_host_transfer(HostTransfer::FullLogits { elements });
+}
+
+fn full_logits_to_host(logits: &Tensor) -> Result<Vec<f32>> {
+    record_full_logits_host_transfer(logits.elem_count());
+    logits.to_vec1::<f32>()
+}
+
+#[cfg(not(test))]
+fn record_selected_tokens_host_transfer(_elements: usize) {}
+
+#[cfg(test)]
+fn record_selected_tokens_host_transfer(elements: usize) {
+    record_host_transfer(HostTransfer::SelectedTokens { elements });
+}
+
+/// The one normal-generation device-to-host seam: a compact `[batch]` tensor
+/// of selected token identifiers. Keeping this operation named and
+/// instrumented makes accidental full-logit transfers regression-testable.
+pub(crate) fn selected_token_ids_to_host(token_ids: &Tensor) -> Result<Vec<u32>> {
+    record_selected_tokens_host_transfer(token_ids.elem_count());
+    token_ids.to_vec1::<u32>()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SamplingExecution {
+    Host,
+    Device,
+}
+
+fn sampling_execution(is_cuda: bool) -> SamplingExecution {
+    if is_cuda {
+        SamplingExecution::Device
+    } else {
+        SamplingExecution::Host
+    }
+}
 
 /// Per-prompt sampling configuration. `Default` is **greedy** — `temperature
 /// = 0` and `top_k = None`, which is the deterministic path used by golden
@@ -237,6 +312,8 @@ impl std::error::Error for SamplingParamsValidationError {}
 /// acceptable.
 pub struct Sampler {
     rng: rand::rngs::StdRng,
+    #[cfg(feature = "cuda")]
+    cuda_workspace: Option<cuda::Workspace>,
 }
 
 impl Sampler {
@@ -246,6 +323,8 @@ impl Sampler {
     pub fn new_with_seed(seed: u64) -> Self {
         Self {
             rng: rand::rngs::StdRng::seed_from_u64(seed),
+            #[cfg(feature = "cuda")]
+            cuda_workspace: None,
         }
     }
 
@@ -291,6 +370,55 @@ impl Sampler {
             )));
         }
 
+        if sampling_execution(logits.device().is_cuda()) == SamplingExecution::Device {
+            return self.forward_cuda(logits, params, token_history, batch);
+        }
+
+        self.forward_host(logits, params, token_history, batch, vocab)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn forward_cuda(
+        &mut self,
+        logits: &Tensor,
+        params: &[SamplingParams],
+        token_history: &[Vec<u32>],
+        batch: usize,
+    ) -> Result<Tensor> {
+        // Consume exactly one scalar seed per row, including greedy rows. A
+        // batch-mate changing sampling mode therefore cannot shift another
+        // row's random stream within this call.
+        let row_seeds = (0..batch).map(|_| self.rng.next_u64()).collect::<Vec<_>>();
+        cuda::sample(
+            logits,
+            params,
+            token_history,
+            &row_seeds,
+            &mut self.cuda_workspace,
+        )
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn forward_cuda(
+        &mut self,
+        _logits: &Tensor,
+        _params: &[SamplingParams],
+        _token_history: &[Vec<u32>],
+        _batch: usize,
+    ) -> Result<Tensor> {
+        Err(CandleError::msg(
+            "sampler.forward: CUDA tensor requires the crate `cuda` feature",
+        ))
+    }
+
+    fn forward_host(
+        &mut self,
+        logits: &Tensor,
+        params: &[SamplingParams],
+        token_history: &[Vec<u32>],
+        batch: usize,
+        vocab: usize,
+    ) -> Result<Tensor> {
         let device = logits.device();
         let mut out_ids = Vec::with_capacity(batch);
 
@@ -301,7 +429,8 @@ impl Sampler {
         // tests pin the contract.
         for row in 0..batch {
             let row_tensor = logits.get(row)?;
-            let sampled = self.sample_row(&row_tensor, &params[row], &token_history[row], vocab)?;
+            let sampled =
+                self.sample_row_host(&row_tensor, &params[row], &token_history[row], vocab)?;
             // Vocabulary size is bounded by u32::MAX in every realistic model
             // (Qwen3 vocab is ~150k); the cast preserves all valid token ids.
             #[allow(clippy::cast_possible_truncation)]
@@ -318,13 +447,11 @@ impl Sampler {
     /// short-circuits skip the temperature/top-k/top-p/sample path entirely
     /// (they would all reduce to argmax anyway).
     ///
-    /// Implementation pulls the row to host (`to_vec1::<f32>()`) and does
-    /// the penalty / top-k / top-p / Gumbel math in pure Rust. This is
-    /// obviously correct (trivially batch-independent, no scatter op
-    /// needed) and matches the spec's "picks whichever composes cleanly
-    /// with candle ops" guidance. A fused GPU pipeline is the v0.2 path
-    /// once property tests pin the contract.
-    fn sample_row(
+    /// The CPU adapter pulls the row to host (`to_vec1::<f32>()`) and keeps
+    /// the independently validated reference implementation in pure Rust.
+    /// CUDA never calls this method; its private adapter implements the same
+    /// ordered pipeline in project kernels without a full-logit D2H copy.
+    fn sample_row_host(
         &mut self,
         logits_1d: &Tensor,
         params: &SamplingParams,
@@ -334,7 +461,7 @@ impl Sampler {
         // Step 1: upcast to F32 then pull to host. nano-vllm parity — BF16
         // logits lose precision under low-temperature softmax scaling.
         let logits_f32 = logits_1d.to_dtype(DType::F32)?;
-        let mut buf = logits_f32.to_vec1::<f32>()?;
+        let mut buf = full_logits_to_host(&logits_f32)?;
 
         // Step 2: apply penalties (additive presence/frequency, multiplicative
         // repetition) BEFORE temperature scaling — issue #17 acceptance
@@ -537,6 +664,416 @@ fn mask_top_p(buf: &mut [f32], p: f32) {
 mod tests {
     use super::*;
     use candle_core::Device;
+
+    mod host_transfer_seam {
+        use super::*;
+
+        #[test]
+        fn legacy_sampler_records_one_full_vocabulary_host_transfer() {
+            HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
+
+            let logits =
+                Tensor::from_vec(vec![1.0_f32, 3.0, 2.0, 0.0], (1, 4), &Device::Cpu).unwrap();
+            let mut sampler = Sampler::new_with_seed(0);
+            sampler
+                .forward(
+                    &logits,
+                    std::slice::from_ref(&SamplingParams::default()),
+                    &[Vec::new()],
+                )
+                .unwrap();
+
+            let observed = HOST_TRANSFERS.with(|transfers| transfers.borrow().clone());
+            assert_eq!(
+                observed,
+                vec![HostTransfer::FullLogits { elements: 4 }],
+                "the base sampler must expose its full-vocabulary host copy at the seam"
+            );
+        }
+
+        #[test]
+        fn cuda_dispatch_is_device_resident() {
+            assert_eq!(
+                sampling_execution(true),
+                SamplingExecution::Device,
+                "CUDA sampling must not enter the full-logits host path"
+            );
+        }
+
+        #[test]
+        fn selected_token_transfer_is_distinct_from_full_logits() {
+            HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
+
+            let token_ids = Tensor::from_vec(vec![7_u32, 11], 2, &Device::Cpu).unwrap();
+            assert_eq!(selected_token_ids_to_host(&token_ids).unwrap(), vec![7, 11]);
+
+            let observed = HOST_TRANSFERS.with(|transfers| transfers.borrow().clone());
+            assert_eq!(observed, vec![HostTransfer::SelectedTokens { elements: 2 }]);
+        }
+
+        #[test]
+        fn validation_error_records_no_host_transfer() {
+            HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
+
+            let logits =
+                Tensor::from_vec(vec![1.0_f32, 3.0, 2.0, 0.0], (1, 4), &Device::Cpu).unwrap();
+            let mut sampler = Sampler::new_with_seed(0);
+            let error = sampler.forward(&logits, &[], &[Vec::new()]).unwrap_err();
+
+            assert!(error.to_string().contains("params.len()"));
+            let observed = HOST_TRANSFERS.with(|transfers| transfers.borrow().clone());
+            assert!(observed.is_empty(), "error path must not report a transfer");
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    mod cuda_device {
+        use super::*;
+
+        fn cuda() -> Device {
+            Device::new_cuda(0).unwrap()
+        }
+
+        fn repeat_row(row: &[f32], draws: usize, device: &Device) -> Tensor {
+            let values = (0..draws)
+                .flat_map(|_| row.iter().copied())
+                .collect::<Vec<_>>();
+            Tensor::from_vec(values, (draws, row.len()), device).unwrap()
+        }
+
+        fn sample_repeated(
+            row: &[f32],
+            draws: usize,
+            params: &SamplingParams,
+            seed: u64,
+            device: &Device,
+        ) -> Vec<u32> {
+            let logits = repeat_row(row, draws, device);
+            let params = vec![params.clone(); draws];
+            let histories = vec![Vec::new(); draws];
+            let mut sampler = Sampler::new_with_seed(seed);
+            let selected = sampler.forward(&logits, &params, &histories).unwrap();
+            selected_token_ids_to_host(&selected).unwrap()
+        }
+
+        #[test]
+        fn mixed_device_paths_are_isolated_and_transfer_only_selected_tokens() {
+            HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
+            let device = cuda();
+            let rows: [[f32; 8]; 11] = [
+                [1.0, 3.0, 2.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [1.0, 3.0, 2.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [2.0, 1.0, 0.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [2.0, 1.0, 0.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [2.0, 1.0, 0.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [10.0, 0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [0.0, 4.0, 3.0, 2.0, 1.0, -1.0, -2.0, -3.0],
+                [2.0, 1.0, 0.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [0.0, 0.5, 0.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [0.0, 0.5, 0.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+                [0.4, 0.6, 0.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+            ];
+            let logits = Tensor::from_vec(
+                rows.into_iter().flatten().collect::<Vec<_>>(),
+                (rows.len(), rows[0].len()),
+                &device,
+            )
+            .unwrap();
+            let params = vec![
+                SamplingParams::default(),
+                SamplingParams {
+                    temperature: 1.0,
+                    top_k: Some(1),
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    presence_penalty: 2.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    frequency_penalty: 1.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    repetition_penalty: 4.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    temperature: 1.0,
+                    top_p: Some(0.5),
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    temperature: 1.0,
+                    top_k: Some(2),
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    repetition_penalty: 0.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    presence_penalty: -1.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    frequency_penalty: -0.4,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    repetition_penalty: 0.5,
+                    ..SamplingParams::default()
+                },
+            ];
+            let histories = vec![
+                vec![],
+                vec![],
+                vec![0],
+                vec![0, 0],
+                vec![0],
+                vec![],
+                vec![],
+                vec![0, 0, 0],
+                vec![0],
+                vec![0, 0],
+                vec![0],
+            ];
+            let mut sampler = Sampler::new_with_seed(7);
+
+            let selected = sampler.forward(&logits, &params, &histories).unwrap();
+            assert!(
+                HOST_TRANSFERS.with(|transfers| transfers.borrow().is_empty()),
+                "device sampling must not transfer logits"
+            );
+            let workspace_identity = sampler
+                .cuda_workspace
+                .as_ref()
+                .unwrap()
+                .allocation_identity();
+            let second = sampler.forward(&logits, &params, &histories).unwrap();
+            assert_eq!(
+                sampler
+                    .cuda_workspace
+                    .as_ref()
+                    .unwrap()
+                    .allocation_identity(),
+                workspace_identity,
+                "same device/vocabulary/history capacity must reuse scratch"
+            );
+            drop(second);
+
+            let ids = selected_token_ids_to_host(&selected).unwrap();
+            assert_eq!(&ids[..6], &[1, 1, 1, 1, 1, 0]);
+            assert!(matches!(ids[6], 1 | 2));
+            assert_eq!(ids[7], 0, "repetition_penalty=0 must remain a no-op");
+            assert_eq!(
+                &ids[8..],
+                &[0, 0, 0],
+                "negative additive and sub-one repetition penalties must encourage the seen token"
+            );
+            let observed = HOST_TRANSFERS.with(|transfers| transfers.borrow().clone());
+            assert_eq!(
+                observed,
+                vec![HostTransfer::SelectedTokens {
+                    elements: rows.len()
+                }]
+            );
+
+            HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
+            let invalid = SamplingParams {
+                temperature: 1.0,
+                top_p: Some(0.0),
+                ..SamplingParams::default()
+            };
+            let error = sampler
+                .forward(
+                    &logits.get(0).unwrap().unsqueeze(0).unwrap(),
+                    &[invalid],
+                    &[vec![]],
+                )
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("row 0"), "missing row context: {message}");
+            assert!(message.contains("status"), "missing CUDA status: {message}");
+            assert!(
+                HOST_TRANSFERS.with(|transfers| transfers.borrow().is_empty()),
+                "failed CUDA sampling must not fall back or transfer data"
+            );
+        }
+
+        #[test]
+        fn seeded_device_sampling_is_deterministic_and_statistically_sane() {
+            let device = cuda();
+            let probabilities = [0.7_f32, 0.2, 0.1];
+            let logits = probabilities.map(f32::ln);
+            let params = SamplingParams {
+                temperature: 1.0,
+                ..SamplingParams::default()
+            };
+            let draws = 4_096;
+            let first = sample_repeated(&logits, draws, &params, 99, &device);
+            let replay = sample_repeated(&logits, draws, &params, 99, &device);
+            assert_eq!(first, replay, "same seed and row order must replay exactly");
+
+            let two_rows = repeat_row(&logits, 2, &device);
+            let stochastic = params.clone();
+            let mut first_sampler = Sampler::new_with_seed(101);
+            let first_batch = first_sampler
+                .forward(
+                    &two_rows,
+                    &[SamplingParams::default(), stochastic.clone()],
+                    &[vec![], vec![]],
+                )
+                .unwrap();
+            let first_batch = selected_token_ids_to_host(&first_batch).unwrap();
+            let mut second_sampler = Sampler::new_with_seed(101);
+            let second_batch = second_sampler
+                .forward(
+                    &two_rows,
+                    &[
+                        SamplingParams {
+                            temperature: 1.0,
+                            top_k: Some(2),
+                            ..SamplingParams::default()
+                        },
+                        stochastic,
+                    ],
+                    &[vec![], vec![]],
+                )
+                .unwrap();
+            let second_batch = selected_token_ids_to_host(&second_batch).unwrap();
+            assert_eq!(
+                first_batch[1], second_batch[1],
+                "one row changing sampling mode must not shift another row's scalar seed"
+            );
+
+            let mut counts = [0_usize; 3];
+            for token in first {
+                counts[token as usize] += 1;
+            }
+            for (token, expected) in probabilities.into_iter().enumerate() {
+                let observed = counts[token] as f64 / draws as f64;
+                assert!(
+                    (observed - f64::from(expected)).abs() < 0.05,
+                    "token {token}: expected {expected}, observed {observed}"
+                );
+            }
+
+            let nucleus_probabilities = [0.6_f32, 0.25, 0.1, 0.05];
+            let nucleus_logits = nucleus_probabilities.map(f32::ln);
+            let nucleus_params = SamplingParams {
+                temperature: 1.0,
+                top_p: Some(0.8),
+                ..SamplingParams::default()
+            };
+            let nucleus = sample_repeated(&nucleus_logits, 2_048, &nucleus_params, 17, &device);
+            assert!(nucleus.iter().all(|&token| matches!(token, 0 | 1)));
+            assert!(nucleus.contains(&0) && nucleus.contains(&1));
+            let token_zero_fraction =
+                nucleus.iter().filter(|&&token| token == 0).count() as f64 / nucleus.len() as f64;
+            assert!((token_zero_fraction - (0.6 / 0.85)).abs() < 0.07);
+
+            let minimal_params = SamplingParams {
+                temperature: 1.0,
+                top_p: Some(0.59),
+                ..SamplingParams::default()
+            };
+            let minimal = sample_repeated(&nucleus_logits, 256, &minimal_params, 18, &device);
+            assert!(
+                minimal.iter().all(|&token| token == 0),
+                "minimal nucleus must stop after its first probability crosses p"
+            );
+
+            let tied = sample_repeated(
+                &[0.0, 0.0, 0.0, -20.0],
+                1_024,
+                &SamplingParams {
+                    temperature: 1.0,
+                    top_k: Some(2),
+                    ..SamplingParams::default()
+                },
+                23,
+                &device,
+            );
+            assert!(tied.iter().all(|&token| token < 3));
+            assert!((0_u32..3).all(|token| tied.contains(&token)));
+
+            let uniform = sample_repeated(
+                &[20.0, 2.0, -4.0, -30.0],
+                2_048,
+                &SamplingParams {
+                    temperature: f32::INFINITY,
+                    top_k: Some(usize::MAX),
+                    ..SamplingParams::default()
+                },
+                29,
+                &device,
+            );
+            let mut uniform_counts = [0_usize; 4];
+            for token in uniform {
+                uniform_counts[token as usize] += 1;
+            }
+            for (token, count) in uniform_counts.into_iter().enumerate() {
+                let fraction = count as f64 / 2_048.0;
+                assert!(
+                    (fraction - 0.25).abs() < 0.06,
+                    "uniform token {token}: observed {fraction}"
+                );
+            }
+        }
+
+        #[test]
+        fn qwen_vocabulary_filtering_reuses_bounded_workspace_without_full_d2h() {
+            const QWEN3_VOCAB_SIZE: usize = 151_936;
+            HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
+            let device = cuda();
+            let values = (0..QWEN3_VOCAB_SIZE)
+                .map(|token| -(token as f32) * 0.0001)
+                .collect::<Vec<_>>();
+            let logits = Tensor::from_vec(values, (1, QWEN3_VOCAB_SIZE), &device)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let params = SamplingParams {
+                temperature: 0.7,
+                top_k: Some(50),
+                top_p: Some(0.9),
+                ..SamplingParams::default()
+            };
+            let mut sampler = Sampler::new_with_seed(31);
+
+            let selected = sampler
+                .forward(&logits, std::slice::from_ref(&params), &[vec![]])
+                .unwrap();
+            let workspace = sampler.cuda_workspace.as_ref().unwrap();
+            let identity = workspace.allocation_identity();
+            assert!(workspace.allocated_bytes() < 64 * 1024 * 1024);
+            assert!(
+                HOST_TRANSFERS.with(|transfers| transfers.borrow().is_empty()),
+                "Qwen-sized filtering must remain entirely on device"
+            );
+            let token = selected_token_ids_to_host(&selected).unwrap()[0];
+            assert!(token < 50, "top-k result {token} escaped the retained set");
+
+            drop(
+                sampler
+                    .forward(&logits, std::slice::from_ref(&params), &[vec![]])
+                    .unwrap(),
+            );
+            assert_eq!(
+                sampler
+                    .cuda_workspace
+                    .as_ref()
+                    .unwrap()
+                    .allocation_identity(),
+                identity
+            );
+            assert_eq!(
+                HOST_TRANSFERS.with(|transfers| transfers.borrow().clone()),
+                vec![HostTransfer::SelectedTokens { elements: 1 }]
+            );
+        }
+    }
 
     mod sampling_params {
         use super::*;
