@@ -17,7 +17,7 @@ Multiple sub-projections (Q/K/V for attention, or gate/up for SwiGLU MLP) concat
 _Avoid_: packed projection, merged matmul.
 
 **TP seam**:
-The abstraction boundary where future tensor-parallelism wiring (NCCL communicator, all-reduce, all-gather) attaches without rewriting model code. In v0.1 the seam lives in the `ParallelStyle` trait + `TpConfig` enum; `TpConfig::Single` is the zero-cost identity path, `TpConfig::Sharded` is the named-but-unimplemented v0.2 contract.
+The abstraction boundary where future tensor-parallelism wiring can attach without rewriting model code. `TpConfig::Single` is the supported identity path; `TpConfig::Sharded` names a feasibility seam, not supported v0.2.0 TP/NCCL behavior.
 _Avoid_: TP interface, parallelism hook.
 
 **Paged attention**:
@@ -25,7 +25,7 @@ An attention computation that reads K/V from a paged block cache (fixed-size blo
 _Avoid_: paged KV cache attention, block attention.
 
 **CausalLM (trait)**:
-The engine-facing model contract in v0.1 — `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits` + `vocab_size()` + `device()`. Defined in neutral `src/causal_lm.rs` (outside `models/`) so that `engine/` and `models/` can both depend on it without either depending on the other. Returned by the registry as `Box<dyn CausalLM>`; EngineCore holds one stable type regardless of architecture. `forward` returns hidden_states (not logits) so prefill can skip lm_head projection on non-last tokens; `compute_logits` is called separately when sampling. v0.2 adds new tasks via new independent traits (`SequenceClassifier`, `Embedder`), not by overloading `CausalLM`.
+The engine-facing contract for causal text generation. New task families use independent traits rather than overloading `CausalLM`; v0.2.0 remains limited to causal generation.
 _Avoid_: model interface, Model trait, CausalLM struct.
 
 **Model registry (inventory)**:
@@ -36,10 +36,10 @@ _Avoid_: model loader (loader is T7's `load_weights`), dispatcher, factory table
 The neutral geometry parameter struct that `Linear<P>::from_vb` consumes — `{ in_features, out_features_per_shard, bias }`. Model code unpacks its own `Config` (e.g. `Qwen3Config`) into `LinearSpec`. Closes the ADR-0002 seam: `Linear<P>` (in shared `layers/`) stays fully model-agnostic — it never imports `models::qwen3::Qwen3Config` or any architecture-specific type.
 _Avoid_: layer config, linear config, projection shape.
 
-## Engine (v0.1 — single-GPU, offline)
+## Engine (single-GPU, offline)
 
 **EngineCore**:
-The in-process engine that collapses V1's `ModelRunner` (ADR-0004 micro-decision). Owns `Scheduler`, `BlockPool`, `KVCacheManager`, `Box<dyn CausalLM>`, `Sampler`, `Arc<Mutex<PagedKVCache>>`. `step()` runs the full loop: scheduler → tensor prep → `model.forward()` → sampler → KV update. No async, no ZMQ, no CUDA graph capture in v0.1.
+The in-process, single-GPU execution engine for one `StepPlan`. It returns one `StepResult`; lifecycle and scheduling decisions remain owned by the `Scheduler`.
 _Avoid_: model runner (collapsed into EngineCore for single-GPU scope).
 
 **BlockPool**:
@@ -60,11 +60,19 @@ _Avoid_: block-to-slot mapper (undersells the seam — the value is what
 it hides, not what it maps).
 
 **Scheduler**:
-Token-level scheduling with `waiting`/`running` deques. One `schedule()` step is either pure-prefill or pure-decode. Chunked prefill applies only to the first sequence in a step. Preemption is recompute-only (deallocate + requeue front of `waiting`). `postprocess()` updates block hashes, advances `num_cached_tokens`, and finalises sequences on EOS or `max_tokens`.
+The sole owner of request lifecycle, admission, fairness, token and cache budgets, preemption, progress detection, and application of `StepResult`. It expresses executable work as immutable `StepPlan` values.
 _Avoid_: batch scheduler, request scheduler.
 
+**StepPlan**:
+The immutable unit of schedulable model work, naming the participating requests, exact token ranges, causal positions, cache mappings, token budget, phase, and sampling permission.
+_Avoid_: schedule output, execution batch.
+
+**StepResult**:
+The result corresponding to one `StepPlan`, applied exactly once by the `Scheduler` to advance request, cache, and completion state.
+_Avoid_: postprocess output, step output.
+
 **Sequence**:
-V1 data-model leaf tracking one request; carries `request_id`, `seq_id`, `block_table`, `num_tokens`, `num_cached_tokens`, `num_scheduled_tokens`, `is_prefill`, `last_token`, plus attached sampling scalars. `SequenceStatus { Waiting, Running, Finished }`. The former 1:1 `SequenceGroup` wrapper was absorbed (n>1 sampling deferred to v0.2 will reintroduce grouping deliberately).
+The scheduler-owned lifecycle state for one request. Multi-candidate (`n > 1`) sampling remains deferred beyond v0.2.0 and would reintroduce grouping only when that capability exists.
 _Avoid_: SequenceGroup (absorbed), request wrapper.
 
 **PagedKVCache**:
@@ -72,8 +80,12 @@ The physical GPU buffer shaped `[2, num_layers, num_blocks, 256, num_kv_heads, h
 _Avoid_: block cache buffer, GPU cache pool.
 
 **AttnMetadata**:
-Flash-attention metadata carrying `cu_seqlens_q`/`cu_seqlens_k` (flash-attn cumulative convention, NOT vLLM `context_lens` convention — T10 finding honoured). The conversion from scheduler convention lives in a `build_paged_metadata` helper inside the attention backend.
-_Avoid_: attention context, batch metadata.
+The logical attention description for one scheduled step, including cumulative lengths, slot mappings, and block tables. It is prepared once into an `AttentionContext`, not rebuilt independently by each layer.
+_Avoid_: batch metadata.
+
+**AttentionContext**:
+The device-ready attention state shared across all model layers participating in one `StepPlan`. It owns the prepared form of `AttnMetadata` for that step.
+_Avoid_: attention bundle, per-layer metadata.
 
 ## API surface
 

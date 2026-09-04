@@ -17,8 +17,8 @@ declared projection style matches the layer's expected layout.
 
 **TP seam (v0.1)**: `slice_for_rank` ships the identity default
 (`Cow::Borrowed`, zero-cost). `reduce_output` is identity (no NCCL). v0.2
-overrides per style with real GQA math for `QkvMerged`, 2-way split for
-`GateUpMerged`, dim-1 narrow for `Row`.
+keeps this as a feasibility seam without runtime TP/NCCL support; any real
+per-style sharding implementation is deferred beyond v0.2.0 (ADR-0006).
 
 **Considered Options**:
 - Runtime enum dispatch (rejected): per-forward match on style incurs a branch

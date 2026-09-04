@@ -43,7 +43,7 @@ performs the full loop in one method: scheduler → tensor prep →
 `ModelRunner` separation.
 
 **R5 split trigger**: Extract a separate `ModelRunner` when `step()` exceeds
-~300 LOC or CUDA graph capture lands (v0.2).
+~300 LOC or CUDA graph capture lands after v0.2.0.
 
 ## Micro-decisions
 
@@ -51,8 +51,9 @@ performs the full loop in one method: scheduler → tensor prep →
   re-exported at the crate root without pulling in the engine.
 - **M2**: `Sequence` (carrying its own `request_id`) is the V1 data-model leaf —
   the scheduler's working set. The former 1:1 `SequenceGroup` wrapper was
-  absorbed because it added delegation without depth; n>1 sampling (v0.2) will
-  reintroduce grouping deliberately if/when the capability exists.
+  absorbed because it added delegation without depth; n>1 sampling remains
+  beyond v0.2.0 and will reintroduce grouping deliberately if/when the
+  capability exists.
 - **M3**: `KvCacheManager` is a deliberate information-hiding adapter
   (structural seam, not computational module). Its 6 delegations + 1
   bridge method are the intended final shape. Thinness is the design,
@@ -61,8 +62,8 @@ performs the full loop in one method: scheduler → tensor prep →
 **Consequences**:
 - New modules must fit the DAG; cyclic imports are a design error, not a
   refactor opportunity.
-- TP wiring in v0.2 adds to `layers/parallel.rs` trait impls and
-  `attention/` NCCL hooks — no engine-level restructuring expected.
+- Runtime TP/NCCL wiring is deferred beyond v0.2.0; the existing
+  `layers/parallel.rs` feasibility seam remains unsupported (ADR-0006).
 - `engine/` receives its model as a trait object, keeping it decoupled from
   architecture-specific code.
 

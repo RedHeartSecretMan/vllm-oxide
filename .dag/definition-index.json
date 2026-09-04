@@ -3,7 +3,23 @@
   "inputs": [
     {
       "path": ".dag/definitions/v0.2.0-github.json",
-      "blob_oid": "8213aef41c7032910ce283c1e9fbcb2f253efcfd"
+      "blob_oid": "373875bef41d287015fa38fc2afcad9c53dab437"
+    },
+    {
+      "path": "CONTEXT.md",
+      "blob_oid": "50c0000bbc424109657e6ca42004be3c7777f0a8"
+    },
+    {
+      "path": "docs/adr/0001-parametric-parallel-layers.md",
+      "blob_oid": "07720d1a434a9a9c3bc188ebf9c34ae16018ff28"
+    },
+    {
+      "path": "docs/adr/0004-engine-architecture-and-dependency-dag.md",
+      "blob_oid": "477ca66eefc1f3957cbe81775706b5a5deef04e1"
+    },
+    {
+      "path": "docs/adr/0006-v0.2-correctness-first-release-scope.md",
+      "blob_oid": "3ef1b489479dd694c48b403c3c9eee4cfdb28c29"
     }
   ]
 }
