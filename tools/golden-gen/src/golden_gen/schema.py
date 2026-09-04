@@ -164,6 +164,8 @@ class Manifest(BaseModel):
 
     @model_validator(mode="after")
     def generated_fixtures_match_expectations(self) -> Self:
+        if self.model.dtype != "bfloat16" or self.generation.attn_implementation != "sdpa":
+            raise ValueError("golden manifest requires the Transformers BF16 SDPA reference oracle")
         if (
             self.tolerance_policy.dtype != self.model.dtype
             or self.tolerance_policy.kernel != self.generation.attn_implementation

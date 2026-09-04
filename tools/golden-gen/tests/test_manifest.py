@@ -143,6 +143,32 @@ class TestManifest:
         with pytest.raises(ValidationError, match="schema_version"):
             Manifest.model_validate(manifest)
 
+    @pytest.mark.parametrize("invalid_scope", ["dtype", "kernel"])
+    def test_reference_contract_must_remain_bf16_sdpa(self, invalid_scope):
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+        manifest = build_manifest(
+            fixtures=[],
+            expected_fixtures=expected_pair(),
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=tolerance,
+        ).model_dump()
+        if invalid_scope == "dtype":
+            manifest["model"]["dtype"] = "float32"
+            manifest["tolerance_policy"]["dtype"] = "float32"
+            for expected in manifest["expected_fixtures"]:
+                expected["dtype"] = "float32"
+        else:
+            manifest["generation"]["attn_implementation"] = "eager"
+            manifest["tolerance_policy"]["kernel"] = "eager"
+
+        with pytest.raises(ValidationError, match="BF16 SDPA reference oracle"):
+            Manifest.model_validate(manifest)
+
     def test_legacy_regression_skip_map_is_rejected(self):
         tolerance = BaselineCalibration(
             candidate_atol=0.01,

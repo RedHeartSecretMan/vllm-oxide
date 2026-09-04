@@ -31,6 +31,9 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
             manifest.schema_version
         );
     }
+    if manifest.model.dtype != "bfloat16" || manifest.generation.attn_implementation != "sdpa" {
+        anyhow::bail!("golden manifest requires the Transformers BF16 SDPA reference oracle");
+    }
     let policy = &manifest.tolerance_policy;
     if policy.version != "same-prefix-v1" {
         anyhow::bail!("unsupported tolerance policy version: {}", policy.version);
@@ -519,6 +522,37 @@ mod tests {
         let error = parse_manifest(&path).unwrap_err().to_string();
 
         assert!(error.contains("scope does not match"), "{error}");
+    }
+
+    #[test]
+    fn self_consistent_non_bf16_reference_contract_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let mut manifest = valid_manifest_json();
+        manifest["model"]["dtype"] = json!("float32");
+        manifest["tolerance_policy"]["dtype"] = json!("float32");
+        for expected in manifest["expected_fixtures"].as_array_mut().unwrap() {
+            expected["dtype"] = json!("float32");
+        }
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let error = parse_manifest(&path).unwrap_err().to_string();
+
+        assert!(error.contains("BF16 SDPA reference oracle"), "{error}");
+    }
+
+    #[test]
+    fn self_consistent_non_sdpa_reference_contract_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let mut manifest = valid_manifest_json();
+        manifest["generation"]["attn_implementation"] = json!("eager");
+        manifest["tolerance_policy"]["kernel"] = json!("eager");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let error = parse_manifest(&path).unwrap_err().to_string();
+
+        assert!(error.contains("BF16 SDPA reference oracle"), "{error}");
     }
 
     #[test]
