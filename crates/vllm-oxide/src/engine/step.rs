@@ -1,8 +1,29 @@
 use std::ops::Range;
 
 use crate::attention::AttnMetadata;
-use crate::engine::BlockPoolError;
+use crate::engine::kv_cache_manager::KvCacheError;
 use crate::SamplingParams;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheOperation {
+    Allocation,
+    AllocationRollback,
+    EmptyAllocationRollback,
+    AppendAllocation,
+    Deallocation,
+}
+
+impl std::fmt::Display for CacheOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allocation => f.write_str("allocation"),
+            Self::AllocationRollback => f.write_str("allocation rollback"),
+            Self::EmptyAllocationRollback => f.write_str("empty allocation rollback"),
+            Self::AppendAllocation => f.write_str("append allocation"),
+            Self::Deallocation => f.write_str("deallocation"),
+        }
+    }
+}
 
 /// Execution phase for one immutable engine step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,10 +101,10 @@ pub(crate) enum StepPlanError {
         plan_id: u64,
         reason: String,
     },
-    CacheOperation {
-        operation: &'static str,
+    Cache {
+        operation: CacheOperation,
         sequence_id: usize,
-        source: BlockPoolError,
+        source: KvCacheError,
     },
     NoProgress {
         waiting_sequences: usize,
@@ -99,11 +120,11 @@ impl StepPlanError {
     }
 
     pub(crate) fn cache(
-        operation: &'static str,
+        operation: CacheOperation,
         sequence_id: usize,
-        source: BlockPoolError,
+        source: KvCacheError,
     ) -> Self {
-        Self::CacheOperation {
+        Self::Cache {
             operation,
             sequence_id,
             source,
@@ -131,7 +152,7 @@ impl std::fmt::Display for StepPlanError {
             Self::ResultMismatch { plan_id, reason } => {
                 write!(f, "step result {plan_id} does not match its plan: {reason}")
             }
-            Self::CacheOperation {
+            Self::Cache {
                 operation,
                 sequence_id,
                 source,
@@ -152,4 +173,11 @@ impl std::fmt::Display for StepPlanError {
     }
 }
 
-impl std::error::Error for StepPlanError {}
+impl std::error::Error for StepPlanError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cache { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}

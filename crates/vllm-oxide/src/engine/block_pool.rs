@@ -141,6 +141,19 @@ impl BlockPool {
         hasher.finish() as i64
     }
 
+    fn validate_free_block(&self, block_id: usize) -> Result<(), BlockPoolError> {
+        let block = self
+            .blocks
+            .get(block_id)
+            .ok_or_else(|| BlockPoolError(format!("free block id {block_id} is out of range")))?;
+        if block.ref_count != 0 || self.used_block_ids.contains(&block_id) {
+            return Err(BlockPoolError(format!(
+                "free block {block_id} has inconsistent ownership"
+            )));
+        }
+        Ok(())
+    }
+
     /// Allocate a free block and return its id.
     ///
     /// Equivalent to nano-vllm's `_allocate_block`: pops from the front of
@@ -156,21 +169,14 @@ impl BlockPool {
             .free_block_ids
             .front()
             .ok_or_else(|| BlockPoolError("no free blocks available".to_string()))?;
-        let block = self
-            .blocks
-            .get(block_id)
-            .ok_or_else(|| BlockPoolError(format!("free block id {block_id} is out of range")))?;
-        if block.ref_count != 0 || self.used_block_ids.contains(&block_id) {
-            return Err(BlockPoolError(format!(
-                "free block {block_id} has inconsistent ownership"
-            )));
-        }
+        self.validate_free_block(block_id)?;
+        let old_hash = self.blocks[block_id].hash;
         self.free_block_ids.pop_front();
         // nano-vllm asserts ref_count == 0 here.
-        if block.hash != -1 {
-            if let Some(&existing) = self.hash_to_block_id.get(&block.hash) {
+        if old_hash != -1 {
+            if let Some(&existing) = self.hash_to_block_id.get(&old_hash) {
                 if existing == block_id {
-                    self.hash_to_block_id.remove(&block.hash);
+                    self.hash_to_block_id.remove(&old_hash);
                 }
             }
         }
@@ -328,17 +334,12 @@ impl BlockPool {
         }
         let mut distinct_new_block_ids = HashSet::with_capacity(new_block_ids.len());
         for &block_id in &new_block_ids {
-            let block = self.blocks.get(block_id).ok_or_else(|| {
-                BlockPoolError(format!("free block id {block_id} is out of range"))
-            })?;
-            if !distinct_new_block_ids.insert(block_id)
-                || block.ref_count != 0
-                || self.used_block_ids.contains(&block_id)
-            {
+            if !distinct_new_block_ids.insert(block_id) {
                 return Err(BlockPoolError(format!(
                     "free block {block_id} has inconsistent ownership"
                 )));
             }
+            self.validate_free_block(block_id)?;
         }
 
         for block_id in cached_block_ids {
@@ -388,21 +389,76 @@ impl BlockPool {
         Ok(())
     }
 
-    /// Check whether the pool has enough free blocks for the next
-    /// append: if the next token starts a new block, we need 1 free block.
-    pub fn can_append(&self, seq: &Sequence) -> bool {
-        let need_new_block = usize::from(seq.num_tokens % self.block_size == 1);
-        self.free_block_ids.len() >= need_new_block
+    /// Check whether the pool can reserve every missing block for a decode batch.
+    pub fn can_append(&self, sequences: &[&Sequence]) -> bool {
+        let mut required_blocks = 0usize;
+        for sequence in sequences {
+            let Some(missing_blocks) = sequence
+                .num_blocks()
+                .checked_sub(sequence.block_table.len())
+            else {
+                return false;
+            };
+            if missing_blocks > 1 {
+                return false;
+            }
+            let Some(total) = required_blocks.checked_add(missing_blocks) else {
+                return false;
+            };
+            required_blocks = total;
+        }
+        self.free_block_ids.len() >= required_blocks
     }
 
-    /// Allocate a new block if the next append starts a new block
-    /// (`num_tokens % block_size == 1`).
+    /// Allocate any blocks needed by a decode batch as one transaction.
     ///
-    /// Mirrors nano-vllm's `BlockManager.may_append`.
-    pub fn may_append(&mut self, seq: &mut Sequence) -> Result<(), BlockPoolError> {
-        if seq.num_tokens % self.block_size == 1 {
+    /// Every required free block is validated before ownership changes. An
+    /// error therefore leaves both the pool and every sequence unchanged.
+    pub fn may_append(&mut self, sequences: &mut [Sequence]) -> Result<(), BlockPoolError> {
+        let mut append_indices = Vec::new();
+        for (index, sequence) in sequences.iter().enumerate() {
+            let missing_blocks = sequence
+                .num_blocks()
+                .checked_sub(sequence.block_table.len())
+                .ok_or_else(|| {
+                    BlockPoolError(format!(
+                        "sequence {} has more allocated than required blocks",
+                        sequence.seq_id
+                    ))
+                })?;
+            if missing_blocks > 1 {
+                return Err(BlockPoolError(format!(
+                    "sequence {} is missing {missing_blocks} blocks before append",
+                    sequence.seq_id
+                )));
+            }
+            if missing_blocks == 1 {
+                append_indices.push(index);
+            }
+        }
+
+        if self.free_block_ids.len() < append_indices.len() {
+            return Err(BlockPoolError("no free blocks available".to_string()));
+        }
+        let candidate_block_ids = self
+            .free_block_ids
+            .iter()
+            .take(append_indices.len())
+            .copied()
+            .collect::<Vec<_>>();
+        let mut distinct_block_ids = HashSet::with_capacity(candidate_block_ids.len());
+        for block_id in candidate_block_ids {
+            if !distinct_block_ids.insert(block_id) {
+                return Err(BlockPoolError(format!(
+                    "free block {block_id} has inconsistent ownership"
+                )));
+            }
+            self.validate_free_block(block_id)?;
+        }
+
+        for sequence_index in append_indices {
             let block_id = self.allocate_block_private()?;
-            seq.block_table.push(block_id);
+            sequences[sequence_index].block_table.push(block_id);
         }
         Ok(())
     }
@@ -807,14 +863,15 @@ mod tests {
 
         #[test]
         fn requires_free_only_at_block_boundary() {
-            let pool = BlockPool::new(1, 256);
+            let mut pool = BlockPool::new(2, 256);
             let mut seq = make_seq((0..256).collect());
-            // 256 tokens → 1 block. num_tokens % 256 == 0 → need_new_block=0 → can_append.
-            assert!(pool.can_append(&seq));
-            // 257 tokens: num_tokens % 256 == 1 → need_new_block=1 → needs 1 free.
+            pool.allocate(&mut seq, 0).unwrap();
+            // The prompt's one required block is already reserved.
+            assert!(pool.can_append(&[&seq]));
+            // Appending token 257 requires the one remaining free block.
             seq.append_token(42);
             assert_eq!(seq.num_tokens, 257);
-            assert!(pool.can_append(&seq));
+            assert!(pool.can_append(&[&seq]));
         }
 
         #[test]
@@ -822,12 +879,12 @@ mod tests {
             // Pool with 1 block, fully used.
             let mut pool = BlockPool::new(1, 256);
             // Allocate the only block to a seq.
-            let mut seq = make_seq(vec![1u32]);
+            let mut seq = make_seq((0..256).collect());
             pool.allocate(&mut seq, 0).unwrap();
-            // seq has 1 token, 1 block allocated. free=0.
+            seq.append_token(42);
             assert_eq!(pool.num_free_blocks(), 0);
-            // num_tokens=1, 1%256=1 → needs new block, but free=0.
-            assert!(!pool.can_append(&seq));
+            // Token 257 needs a second block, but none is free.
+            assert!(!pool.can_append(&[&seq]));
         }
     }
 
@@ -835,7 +892,33 @@ mod tests {
         use super::*;
 
         #[test]
-        fn appends_only_at_boundary() {
+        fn later_failure_leaves_every_sequence_and_block_unmodified() {
+            let mut pool = BlockPool::new(4, 256);
+            let mut first = make_seq((0..256).collect());
+            let mut second = make_seq((1_000..1_256).collect());
+            pool.allocate(&mut first, 0).unwrap();
+            pool.allocate(&mut second, 0).unwrap();
+            first.append_token(42);
+            second.append_token(43);
+            let first_blocks = first.block_table.clone();
+            let second_blocks = second.block_table.clone();
+            pool.free_block_ids = VecDeque::from([2, usize::MAX]);
+            let mut sequences = [first, second];
+
+            let error = pool.may_append(&mut sequences).unwrap_err();
+
+            assert_eq!(
+                error,
+                BlockPoolError(format!("free block id {} is out of range", usize::MAX))
+            );
+            assert_eq!(sequences[0].block_table, first_blocks);
+            assert_eq!(sequences[1].block_table, second_blocks);
+            assert_eq!(pool.free_block_ids, VecDeque::from([2, usize::MAX]));
+            assert_eq!(pool.used_block_ids.len(), 2);
+        }
+
+        #[test]
+        fn does_not_duplicate_an_already_reserved_boundary_block() {
             let mut pool = BlockPool::new(5, 256);
             let mut seq = make_seq((0..257).collect()); // 257 tokens → 2 blocks
                                                         // Allocate the 2 blocks.
@@ -843,19 +926,10 @@ mod tests {
             assert_eq!(seq.block_table.len(), 2);
             let initial_free = pool.num_free_blocks();
 
-            // num_tokens=257, 257%256=1 → may_append should add a block.
-            pool.may_append(&mut seq).unwrap();
-            assert_eq!(seq.block_table.len(), 3);
-            assert_eq!(pool.num_free_blocks(), initial_free - 1);
-
-            // num_tokens is still 257 (no append_token call).
-            // After may_append added a block, calling again should be idempotent
-            // since num_tokens hasn't changed.
-            // 257 % 256 == 1 still → another block would be added.
-            // So we need to actually append to change num_tokens.
-
-            // Reset by deallocating and checking.
-            pool.deallocate(&mut seq).unwrap();
+            // Both blocks are already reserved, so the batch transaction is a no-op.
+            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
+            assert_eq!(seq.block_table.len(), 2);
+            assert_eq!(pool.num_free_blocks(), initial_free);
         }
 
         #[test]
@@ -866,7 +940,7 @@ mod tests {
             assert_eq!(seq.block_table.len(), 1);
             // 256 % 256 == 0 → no append.
             let free_before = pool.num_free_blocks();
-            pool.may_append(&mut seq).unwrap();
+            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
             assert_eq!(seq.block_table.len(), 1);
             assert_eq!(pool.num_free_blocks(), free_before);
         }
@@ -882,14 +956,14 @@ mod tests {
             seq.append_token(42);
             assert_eq!(seq.num_tokens, 257);
             let free_before = pool.num_free_blocks();
-            pool.may_append(&mut seq).unwrap();
+            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
             assert_eq!(seq.block_table.len(), 2);
             assert_eq!(pool.num_free_blocks(), free_before - 1);
 
             // Now num_tokens=258. 258%256=2 → no append.
             seq.append_token(43);
             let free_before2 = pool.num_free_blocks();
-            pool.may_append(&mut seq).unwrap();
+            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
             assert_eq!(seq.block_table.len(), 2);
             assert_eq!(pool.num_free_blocks(), free_before2);
         }

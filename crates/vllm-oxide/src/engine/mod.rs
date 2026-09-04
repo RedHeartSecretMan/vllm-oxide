@@ -31,8 +31,8 @@ pub use scheduler::{RequestOutput, Scheduler};
 pub use sequence::{Sequence, SequenceStatus};
 
 pub(crate) use step::{
-    SequenceCachePlan, SequenceStepPlan, SequenceStepResult, StepPhase, StepPlan, StepPlanError,
-    StepResult,
+    CacheOperation, SequenceCachePlan, SequenceStepPlan, SequenceStepResult, StepPhase, StepPlan,
+    StepPlanError, StepResult,
 };
 
 /// In-process engine core — collapses V1/nano-vllm's `ModelRunner` (ADR-0004).

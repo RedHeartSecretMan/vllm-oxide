@@ -8,11 +8,12 @@
 //! # Design: deliberate structural adapter
 //!
 //! This module is **not** deep (see ADR-0004 M3). The value is
-//! information-hiding, not behavioural abstraction: 6 of its public
+//! information-hiding, not behavioural abstraction: its 6 cache-ownership
 //! methods (`can_allocate`, `allocate`, `deallocate`, `can_append`,
-//! `may_append`, `hash_blocks`) are one-line delegations to
-//! `BlockPool`; `num_free_blocks` and `block_size` are trivial
-//! accessors. `compute_slot_mapping` is the sole logic-carrying method
+//! `may_append`, `hash_blocks`) delegate to `BlockPool` while translating
+//! failures into opaque [`KvCacheError`] values; `num_free_blocks` and
+//! `block_size` are trivial accessors. `compute_slot_mapping` is the sole
+//! logic-carrying method
 //! (~20 LOC: logical block-table index → physical slot via
 //! `block_id * block_size + intra_offset`, `-1` sentinel for
 //! out-of-range).
@@ -37,6 +38,26 @@ use crate::attention::PagedKVCache;
 use crate::engine::block_pool::{BlockPool, BlockPoolError};
 use crate::engine::sequence::Sequence;
 
+/// Opaque cache-ownership error returned across the Scheduler seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvCacheError {
+    message: String,
+}
+
+impl From<BlockPoolError> for KvCacheError {
+    fn from(source: BlockPoolError) -> Self {
+        Self { message: source.0 }
+    }
+}
+
+impl std::fmt::Display for KvCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KV cache: {}", self.message)
+    }
+}
+
+impl std::error::Error for KvCacheError {}
+
 /// Scheduler-facing seam over the block pool and physical paged KV cache.
 ///
 /// Constructed by `EngineCore` (#21) with the shared `PagedKVCache` and
@@ -47,12 +68,12 @@ use crate::engine::sequence::Sequence;
 /// **Adapter, not computational module.** The value of this module is
 /// what the Scheduler cannot see — `BlockPool`, `BlockPoolError`,
 /// physical `PagedKVCache` internals — not behavioural depth. Six of
-/// its methods are one-line delegations by design;
+/// its methods are thin delegations plus opaque error translation by design;
 /// `compute_slot_mapping` is the sole behavioural bridge (logical
 /// block table → physical slot indices). Thinness is the design, not
 /// debt.
 pub struct KvCacheManager {
-    pub(crate) block_pool: BlockPool,
+    block_pool: BlockPool,
     paged_kv: Arc<Mutex<PagedKVCache>>,
     block_size: usize,
 }
@@ -79,23 +100,27 @@ impl KvCacheManager {
         &mut self,
         seq: &mut Sequence,
         num_cached_blocks: usize,
-    ) -> Result<(), BlockPoolError> {
-        self.block_pool.allocate(seq, num_cached_blocks)
+    ) -> Result<(), KvCacheError> {
+        self.block_pool
+            .allocate(seq, num_cached_blocks)
+            .map_err(KvCacheError::from)
     }
 
     /// Forwarded: deallocate all blocks owned by a sequence.
-    pub fn deallocate(&mut self, seq: &mut Sequence) -> Result<(), BlockPoolError> {
-        self.block_pool.deallocate(seq)
+    pub fn deallocate(&mut self, seq: &mut Sequence) -> Result<(), KvCacheError> {
+        self.block_pool.deallocate(seq).map_err(KvCacheError::from)
     }
 
-    /// Forwarded: check whether the pool has room for a decode append.
-    pub fn can_append(&self, seq: &Sequence) -> bool {
-        self.block_pool.can_append(seq)
+    /// Forwarded: check whether the pool has room for a decode batch.
+    pub fn can_append(&self, sequences: &[&Sequence]) -> bool {
+        self.block_pool.can_append(sequences)
     }
 
-    /// Forwarded: allocate a block if the next append crosses a boundary.
-    pub fn may_append(&mut self, seq: &mut Sequence) -> Result<(), BlockPoolError> {
-        self.block_pool.may_append(seq)
+    /// Forwarded: allocate decode-append blocks as one transaction.
+    pub fn may_append(&mut self, sequences: &mut [Sequence]) -> Result<(), KvCacheError> {
+        self.block_pool
+            .may_append(sequences)
+            .map_err(KvCacheError::from)
     }
 
     /// Forwarded: hash filled blocks since the last call.
@@ -158,6 +183,7 @@ impl std::fmt::Debug for KvCacheManager {
 #[allow(clippy::unwrap_used, clippy::identity_op, clippy::needless_range_loop)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     /// Create a minimal `PagedKVCache` for tests. CPU-only, tiny shape.
     fn fake_cache() -> Arc<Mutex<PagedKVCache>> {
@@ -222,15 +248,44 @@ mod tests {
             let mut seq = make_seq((0..256).collect());
             mgr.allocate(&mut seq, 0).unwrap();
             // 256 tokens → num_tokens % 256 == 0 → no new block needed.
-            assert!(mgr.can_append(&seq));
+            assert!(mgr.can_append(&[&seq]));
             let blocks_before = seq.block_table.len();
-            mgr.may_append(&mut seq).unwrap();
+            mgr.may_append(std::slice::from_mut(&mut seq)).unwrap();
             assert_eq!(seq.block_table.len(), blocks_before);
             // After append_token: num_tokens=257 → 257%256=1 → needs new block.
             seq.append_token(42);
-            assert!(mgr.can_append(&seq));
-            mgr.may_append(&mut seq).unwrap();
+            assert!(mgr.can_append(&[&seq]));
+            mgr.may_append(std::slice::from_mut(&mut seq)).unwrap();
             assert_eq!(seq.block_table.len(), blocks_before + 1);
+        }
+
+        #[test]
+        fn append_batch_failure_is_opaque_and_transactional() {
+            let cache = fake_cache();
+            let mut mgr = KvCacheManager::new(4, 256, cache);
+            let mut first = make_seq((0..256).collect());
+            let mut second = make_seq((1_000..1_256).collect());
+            mgr.allocate(&mut first, 0).unwrap();
+            mgr.allocate(&mut second, 0).unwrap();
+            first.append_token(42);
+            second.append_token(43);
+            let first_blocks = first.block_table.clone();
+            let second_blocks = second.block_table.clone();
+            mgr.block_pool.free_block_ids = VecDeque::from([2, usize::MAX]);
+            let mut sequences = [first, second];
+
+            let error = mgr.may_append(&mut sequences).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!("KV cache: free block id {} is out of range", usize::MAX)
+            );
+            assert_eq!(sequences[0].block_table, first_blocks);
+            assert_eq!(sequences[1].block_table, second_blocks);
+            assert_eq!(
+                mgr.block_pool.free_block_ids,
+                VecDeque::from([2, usize::MAX])
+            );
         }
 
         #[test]

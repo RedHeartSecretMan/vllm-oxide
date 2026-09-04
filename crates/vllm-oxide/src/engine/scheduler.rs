@@ -19,7 +19,8 @@ use crate::attention::{build_decode_metadata, build_prefill_metadata};
 use crate::engine::kv_cache_manager::KvCacheManager;
 use crate::engine::sequence::{Sequence, SequenceStatus};
 use crate::engine::{
-    SequenceCachePlan, SequenceStepPlan, StepPhase, StepPlan, StepPlanError, StepResult,
+    CacheOperation, SequenceCachePlan, SequenceStepPlan, StepPhase, StepPlan, StepPlanError,
+    StepResult,
 };
 use crate::SamplingParams;
 
@@ -148,7 +149,7 @@ impl Scheduler {
     /// 4. If `running` is empty and `waiting` is non-empty: **prefill**
     ///    step — schedule waiting sequences within the global budget.
     fn select_work(&mut self, kv_mgr: &mut KvCacheManager) -> Result<WorkSelection, StepPlanError> {
-        self.preempt_if_needed(kv_mgr);
+        self.preempt_if_needed(kv_mgr)?;
 
         // Chunked prefill continuation: running sequences that still need
         // more prompt tokens before they can decode.
@@ -407,7 +408,11 @@ impl Scheduler {
                 .iter()
                 .position(|sequence| sequence.seq_id == sequence_id)
                 .unwrap();
-            let _ = kv_mgr.deallocate(&mut self.running[index]);
+            kv_mgr
+                .deallocate(&mut self.running[index])
+                .map_err(|source| {
+                    StepPlanError::cache(CacheOperation::Deallocation, sequence_id, source)
+                })?;
             self.running.remove(index);
         }
 
@@ -444,37 +449,38 @@ impl Scheduler {
 
     /// Preempt running sequences when there aren't enough free blocks.
     ///
-    /// The condition: if any running sequence can't `can_append` (would
-    /// need a new block but none free), preempt the last running sequence
-    /// (lowest priority). Recompute-only: deallocate blocks, requeue
-    /// at the front of waiting.
-    fn preempt_if_needed(&mut self, kv_mgr: &mut KvCacheManager) {
-        let needs_preemption = self
-            .running
-            .iter()
-            .any(|sequence| !sequence.is_prefill && !kv_mgr.can_append(sequence));
-
-        if !needs_preemption {
-            return;
+    /// If the next budget-bounded decode batch cannot reserve all required
+    /// append blocks, preempt the last running sequence (lowest priority).
+    /// Recompute-only: deallocate blocks, requeue at the front of waiting.
+    fn preempt_if_needed(&mut self, kv_mgr: &mut KvCacheManager) -> Result<(), StepPlanError> {
+        if self.running.iter().any(|sequence| sequence.is_prefill) {
+            return Ok(());
         }
 
-        while needs_preemption && !self.running.is_empty() {
-            // running is non-empty (loop guard); pop_back cannot return None
-            #[allow(clippy::unwrap_used)]
-            let mut victim = self.running.pop_back().unwrap();
-            let _ = kv_mgr.deallocate(&mut victim);
+        loop {
+            let decode_batch = self
+                .running
+                .iter()
+                .take(self.max_num_batched_tokens)
+                .collect::<Vec<_>>();
+            if kv_mgr.can_append(&decode_batch) {
+                return Ok(());
+            }
+            let Some(mut victim) = self.running.pop_back() else {
+                return Ok(());
+            };
+            let sequence_id = victim.seq_id;
+            if let Err(source) = kv_mgr.deallocate(&mut victim) {
+                self.running.push_back(victim);
+                return Err(StepPlanError::cache(
+                    CacheOperation::Deallocation,
+                    sequence_id,
+                    source,
+                ));
+            }
             victim.status = SequenceStatus::Waiting;
             victim.num_scheduled_tokens = 0;
             self.waiting.push_front(victim);
-
-            // Re-check.
-            let still_needed = self
-                .running
-                .iter()
-                .any(|sequence| !sequence.is_prefill && !kv_mgr.can_append(sequence));
-            if !still_needed {
-                break;
-            }
         }
     }
 
@@ -484,38 +490,34 @@ impl Scheduler {
         &mut self,
         kv_mgr: &mut KvCacheManager,
     ) -> Result<WorkSelection, StepPlanError> {
-        let mut remaining_budget = self.max_num_batched_tokens;
-        let mut cache_blocked = Vec::new();
-        for seq in self.running.iter_mut() {
-            seq.num_scheduled_tokens = 0;
-            if remaining_budget == 0 {
-                continue;
-            }
-            if !kv_mgr.can_append(seq) {
-                cache_blocked.push(seq.seq_id);
-                continue;
-            }
-
-            kv_mgr
-                .may_append(seq)
-                .map_err(|source| StepPlanError::cache("append allocation", seq.seq_id, source))?;
-            seq.num_scheduled_tokens = 1;
-            seq.is_prefill = false;
-            remaining_budget -= 1;
+        for sequence in &mut self.running {
+            sequence.num_scheduled_tokens = 0;
         }
 
-        let mut i = 0;
-        while i < self.running.len() {
-            if cache_blocked.contains(&self.running[i].seq_id) {
-                // i is a valid index verified by the preceding access self.running[i]
-                #[allow(clippy::unwrap_used)]
-                let mut victim = self.running.remove(i).unwrap();
-                let _ = kv_mgr.deallocate(&mut victim);
-                victim.status = SequenceStatus::Waiting;
-                self.waiting.push_front(victim);
-            } else {
-                i += 1;
+        let scheduled_count = self.running.len().min(self.max_num_batched_tokens);
+        let mut selected = Vec::with_capacity(scheduled_count);
+        for _ in 0..scheduled_count {
+            // scheduled_count is bounded by running.len().
+            #[allow(clippy::unwrap_used)]
+            selected.push(self.running.pop_front().unwrap());
+        }
+        let selected_sequence_id = selected.first().map_or(0, |sequence| sequence.seq_id);
+        if let Err(source) = kv_mgr.may_append(&mut selected) {
+            for sequence in selected.into_iter().rev() {
+                self.running.push_front(sequence);
             }
+            return Err(StepPlanError::cache(
+                CacheOperation::AppendAllocation,
+                selected_sequence_id,
+                source,
+            ));
+        }
+        for sequence in &mut selected {
+            sequence.num_scheduled_tokens = 1;
+            sequence.is_prefill = false;
+        }
+        for sequence in selected.into_iter().rev() {
+            self.running.push_front(sequence);
         }
 
         Ok(WorkSelection {
@@ -572,42 +574,53 @@ impl Scheduler {
         let mut to_schedule: Vec<(usize, usize)> = Vec::new(); // (waiting_index, n_tokens)
 
         for i in 0..self.waiting.len().min(max_running) {
-            let remaining = self.waiting[i]
+            let remaining_before_allocation = self.waiting[i]
                 .num_prompt_tokens
                 .saturating_sub(self.waiting[i].num_cached_tokens);
-            if remaining == 0 {
+            if remaining_before_allocation == 0 {
                 continue;
+            }
+            let budget = self.max_num_batched_tokens.saturating_sub(total_tokens);
+            if budget == 0 {
+                break;
             }
 
             match kv_mgr.can_allocate(&self.waiting[i]) {
                 None => break,
                 Some(num_cached) => {
-                    let budget = self.max_num_batched_tokens.saturating_sub(total_tokens);
-                    let n_tokens = remaining.min(budget);
-
-                    if n_tokens == 0 {
-                        break;
-                    }
-
                     if let Err(source) = kv_mgr.allocate(&mut self.waiting[i], num_cached) {
                         for &(allocated_index, _) in to_schedule.iter().rev() {
                             kv_mgr
                                 .deallocate(&mut self.waiting[allocated_index])
                                 .map_err(|rollback| {
                                     StepPlanError::cache(
-                                        "allocation rollback",
+                                        CacheOperation::AllocationRollback,
                                         self.waiting[allocated_index].seq_id,
                                         rollback,
                                     )
                                 })?;
                         }
                         return Err(StepPlanError::cache(
-                            "allocation",
+                            CacheOperation::Allocation,
                             self.waiting[i].seq_id,
                             source,
                         ));
                     }
 
+                    let remaining = self.waiting[i]
+                        .num_prompt_tokens
+                        .saturating_sub(self.waiting[i].num_cached_tokens);
+                    let n_tokens = remaining.min(budget);
+                    if n_tokens == 0 {
+                        kv_mgr.deallocate(&mut self.waiting[i]).map_err(|source| {
+                            StepPlanError::cache(
+                                CacheOperation::EmptyAllocationRollback,
+                                self.waiting[i].seq_id,
+                                source,
+                            )
+                        })?;
+                        continue;
+                    }
                     total_tokens += n_tokens;
                     to_schedule.push((i, n_tokens));
                 }
@@ -1058,33 +1071,6 @@ mod tests {
             assert_eq!(s.num_running(), 1);
             assert_eq!(s.num_waiting(), 1);
         }
-
-        #[test]
-        fn append_allocation_failure_is_returned_without_scheduling_work() {
-            let mut scheduler = Scheduler::new(1, 512, 0.9);
-            let mut kv = make_kv_mgr(2);
-            let mut sequence =
-                Sequence::new(0, 0, (0..BLOCK_SIZE as u32).collect(), &make_params(16));
-            kv.allocate(&mut sequence, 0).unwrap();
-            sequence.append_token(42);
-            sequence.status = SequenceStatus::Running;
-            sequence.is_prefill = false;
-            let block_table_before = sequence.block_table.clone();
-            scheduler.running.push_back(sequence);
-            kv.block_pool.free_block_ids.clear();
-            kv.block_pool.free_block_ids.push_back(usize::MAX);
-
-            let error = scheduler.plan_step(&mut kv).unwrap_err();
-
-            assert!(error
-                .to_string()
-                .contains("cache append allocation failed for sequence 0"));
-            assert_eq!(scheduler.running[0].block_table, block_table_before);
-            assert_eq!(scheduler.running[0].num_scheduled_tokens, 0);
-            assert_eq!(scheduler.num_waiting(), 0);
-            assert!(scheduler.in_flight.is_none());
-            assert_eq!(kv.block_pool.free_block_ids, VecDeque::from([usize::MAX]));
-        }
     }
 
     mod apply_step_result {
@@ -1238,6 +1224,34 @@ mod tests {
             assert_eq!(completed[0].token_ids, vec![42]);
             assert_eq!(kv.num_free_blocks(), 2);
         }
+
+        #[test]
+        fn aggregate_decode_capacity_is_reserved_before_any_append() {
+            let mut scheduler = Scheduler::new(2, 512, 0.9);
+            let mut kv = make_kv_mgr(3);
+            for sequence_id in 0..2 {
+                let mut sequence = Sequence::new(
+                    sequence_id,
+                    sequence_id,
+                    (0..BLOCK_SIZE as u32).collect(),
+                    &make_params(16),
+                );
+                kv.allocate(&mut sequence, 0).unwrap();
+                sequence.append_token(42);
+                sequence.status = SequenceStatus::Running;
+                sequence.is_prefill = false;
+                scheduler.running.push_back(sequence);
+            }
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Decode);
+            assert_eq!(plan.token_budget, 1);
+            assert_eq!(plan.sequences[0].sequence_id, 0);
+            assert_eq!(scheduler.num_running(), 1);
+            assert_eq!(scheduler.num_waiting(), 1);
+            assert_eq!(kv.num_free_blocks(), 1);
+        }
     }
 
     mod is_running {
@@ -1292,6 +1306,35 @@ mod tests {
                 .iter()
                 .all(|sequence| sequence.token_budget > 0));
             assert_eq!(scheduler.num_waiting(), 1);
+        }
+
+        #[test]
+        fn cache_hit_spends_budget_on_each_sequences_actual_uncached_work() {
+            let mut scheduler = Scheduler::new(100, 512, 0.9);
+            let mut kv = make_kv_mgr(10);
+            let shared_prompt = (0..300).collect::<Vec<u32>>();
+            scheduler.add_request(shared_prompt.clone(), make_params(1));
+            while scheduler.is_running() {
+                let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+                scheduler
+                    .apply_step_result(&result_for_plan(&plan, 42), &mut kv)
+                    .unwrap();
+            }
+
+            scheduler.add_request(shared_prompt, make_params(1));
+            scheduler.add_request((1_000..1_056).collect(), make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.token_budget, 100);
+            assert_eq!(
+                plan.sequences
+                    .iter()
+                    .map(|sequence| (sequence.sequence_id, sequence.token_budget))
+                    .collect::<Vec<_>>(),
+                vec![(1, 44), (2, 56)]
+            );
+            assert_eq!(plan.sequences[0].cache.num_cached_tokens, 256);
         }
 
         #[test]
