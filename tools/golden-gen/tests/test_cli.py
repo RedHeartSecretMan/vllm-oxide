@@ -85,6 +85,9 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert "--manifest-dir" in result.stdout
+        assert "--comparison-policy-version" in result.stdout
+        assert "--l1-near-tie-max-abs-logit-gap" in result.stdout
+        assert "--l2-atol" in result.stdout
 
     def test_dry_run_produces_manifest(self, tmp_path):
         """generate --dry-run should produce a fake manifest + fixtures."""

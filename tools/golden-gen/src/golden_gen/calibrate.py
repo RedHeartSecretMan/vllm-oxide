@@ -128,7 +128,43 @@ def pairwise_max_abs_diff(a: NDArray[np.float32], b: NDArray[np.float32]) -> flo
         raise ValueError(
             f"calibration logits require identical shapes, got {a.shape} and {b.shape}"
         )
+    if not np.isfinite(a).all() or not np.isfinite(b).all():
+        raise ValueError("calibration logits must contain only finite values")
     return float(np.abs(a - b).max())
+
+
+def same_prefix_max_abs_diff(
+    reference_logits: NDArray[np.float32],
+    baseline_logits: NDArray[np.float32],
+    reference_tokens: NDArray[np.int64],
+    baseline_tokens: NDArray[np.int64],
+) -> float:
+    """Return the maximum logit difference through the first token divergence."""
+    if reference_logits.shape != baseline_logits.shape:
+        raise ValueError(
+            "calibration logits require identical shapes, "
+            f"got {reference_logits.shape} and {baseline_logits.shape}"
+        )
+    if reference_tokens.shape != baseline_tokens.shape:
+        raise ValueError(
+            "calibration token sequences require identical shapes, "
+            f"got {reference_tokens.shape} and {baseline_tokens.shape}"
+        )
+    if reference_logits.ndim != 2 or reference_tokens.ndim != 1:
+        raise ValueError("same-prefix calibration requires rank-2 logits and rank-1 tokens")
+    if reference_logits.shape[0] != reference_tokens.shape[0]:
+        raise ValueError("calibration logits and token sequences require identical step counts")
+    if reference_tokens.size == 0:
+        raise ValueError("empty same-prefix calibration comparison set")
+
+    divergent_positions = np.flatnonzero(reference_tokens != baseline_tokens)
+    compared_steps = (
+        int(divergent_positions[0]) + 1 if divergent_positions.size > 0 else len(reference_tokens)
+    )
+    return pairwise_max_abs_diff(
+        reference_logits[:compared_steps],
+        baseline_logits[:compared_steps],
+    )
 
 
 def count_argmax_mismatches(
@@ -155,10 +191,10 @@ def count_argmax_mismatches(
 def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
     """Calibrate atol from transformers vs vllm canonical fixture pairs.
 
-    Loads canonical fixtures from manifest_dir, computes per-element
-    max absolute difference between transformers and vllm for each
-    canonical prompt, then sets atol = TOLERANCE_CALIBRATION_FACTOR *
-    max across all prompts.
+    Loads canonical fixtures from manifest_dir, computes the per-element
+    maximum only through each pair's first token divergence, then records a
+    candidate atol as TOLERANCE_CALIBRATION_FACTOR times the observed maximum.
+    This observation does not select the reference acceptance policy.
 
     Args:
         manifest_dir: Directory containing manifest.json and .safetensors fixtures.
@@ -181,9 +217,11 @@ def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
         if "logits" not in transformers_data or "logits" not in vllm_data:
             continue
 
-        max_abs = pairwise_max_abs_diff(
+        max_abs = same_prefix_max_abs_diff(
             transformers_data["logits"].astype(np.float32),
             vllm_data["logits"].astype(np.float32),
+            transformers_data["token_ids"].astype(np.int64),
+            vllm_data["token_ids"].astype(np.int64),
         )
         per_prompt_max_abs.append(max_abs)
 
@@ -192,8 +230,8 @@ def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
     observed_max_abs_diff = max(per_prompt_max_abs)
     atol = TOLERANCE_CALIBRATION_FACTOR * observed_max_abs_diff
     method = (
-        f"{TOLERANCE_CALIBRATION_FACTOR}x max pairwise per-element |diff| "
-        f"between transformers and vllm on canonical prompts"
+        f"{TOLERANCE_CALIBRATION_FACTOR}x max same-prefix per-element |diff| "
+        f"through first divergence between transformers and vllm on canonical prompts"
     )
 
     return ToleranceCalibration(

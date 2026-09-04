@@ -84,8 +84,9 @@ pub fn print_report(
         policy.version, policy.l1_near_tie_max_abs_logit_gap, policy.l2_atol,
     );
     println!(
-        "  Baseline calibration observation: fixtures={}, observed_max_abs_diff={:.2e}, method={}",
+        "  Baseline calibration observation: fixtures={}, candidate_atol={:.2e}, observed_max_abs_diff={:.2e}, method={}",
         calibrated_fixtures.len(),
+        calibration.atol,
         calibration.observed_max_abs_diff,
         calibration.method,
     );
@@ -234,6 +235,7 @@ struct JsonReferenceCorrectness<'a> {
 
 #[derive(Serialize)]
 struct JsonBaselineCalibration<'a> {
+    candidate_atol: f64,
     observed_max_abs_diff: f64,
     calibration_factor: f64,
     method: &'a str,
@@ -309,6 +311,7 @@ pub fn json_report(
             passed: report.reference_passed(),
         },
         baseline_calibration: JsonBaselineCalibration {
+            candidate_atol: calibration.atol,
             observed_max_abs_diff: calibration.observed_max_abs_diff,
             calibration_factor: calibration.calibration_factor,
             method: &calibration.method,
@@ -403,6 +406,7 @@ mod tests {
             "canonical_01.vllm"
         );
         assert_eq!(json["baseline_calibration"]["observed_max_abs_diff"], 0.005);
+        assert_eq!(json["baseline_calibration"]["candidate_atol"], 0.01);
         assert_eq!(json["overall"], false);
     }
 }

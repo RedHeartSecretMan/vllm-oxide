@@ -148,10 +148,8 @@ where
     }
 
     let total_positions = fixture.token_ids.len().max(generated_tokens.len());
-    if fixture.token_ids.len() != generated_tokens.len() {
-        if first_divergence.is_none() {
-            first_divergence = Some(n);
-        }
+    if first_divergence.is_none() && fixture.token_ids.len() != generated_tokens.len() {
+        first_divergence = Some(n);
         mismatches += 1;
     }
     let compared_positions = details.len();
@@ -306,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn near_tie_does_not_hide_a_length_mismatch() {
+    fn accepted_near_tie_excludes_the_different_prefix_suffix_length() {
         let fixture = FixtureData {
             prompt_id: "near-tie-short".into(),
             category: crate::types::PromptCategory::Canonical,
@@ -324,9 +322,10 @@ mod tests {
 
         let result = compare_l1(&fixture, &generated, Some(&logits), &make_policy()).unwrap();
 
-        assert!(!result.passed);
+        assert!(result.passed);
         assert_eq!(result.near_ties, 1);
-        assert_eq!(result.mismatches, 1);
+        assert_eq!(result.mismatches, 0);
+        assert_eq!(result.excluded_positions, 1);
     }
 
     #[test]

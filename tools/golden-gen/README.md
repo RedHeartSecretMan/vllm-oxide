@@ -52,15 +52,19 @@ Options:
 
 ```bash
 cd tools/golden-gen
-uv run python -m golden_gen calibrate --manifest-dir ./output
+uv run python -m golden_gen calibrate \
+  --manifest-dir ./output \
+  --comparison-policy-version same-prefix-v1 \
+  --l1-near-tie-max-abs-logit-gap <reviewed-threshold> \
+  --l2-atol <reviewed-threshold>
 ```
 
-Validates every declared reference/baseline pair, computes `atol` from the
-oracle pair, records the baseline artifacts consumed as calibration evidence,
-materializes the explicit versioned comparison policy, and updates
-`manifest.json` in place. Baseline disagreement never authorizes reference
-acceptance. A missing pair, empty comparison set, unmatched oracle
-length, or unsupported tensor shape exits non-zero.
+Validates every declared reference/baseline pair, computes same-prefix
+calibration observations, and records the consumed baseline artifacts. The
+version and both acceptance thresholds are required reviewed inputs; observed
+baseline differences are never promoted into reference acceptance thresholds
+automatically. A missing pair, empty comparison set, unmatched oracle length,
+or unsupported tensor shape exits non-zero.
 
 ```bash
 uv run python -m golden_gen --help   # full usage

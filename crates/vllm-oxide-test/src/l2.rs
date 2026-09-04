@@ -67,6 +67,11 @@ pub fn compare_l2(
         for (j, &expected) in expected_slice.iter().enumerate() {
             let actual = generated_logits[start + j] as f64;
             let expected_f = expected as f64;
+            if !actual.is_finite() || !expected_f.is_finite() {
+                max_abs_diff = f64::INFINITY;
+                total_exceeding += 1;
+                continue;
+            }
             let abs_diff = (actual - expected_f).abs();
 
             if abs_diff > max_abs_diff {
@@ -163,6 +168,28 @@ mod tests {
         let result = compare_l2(&fixture, &gen_vals, &generated_tokens, &policy).unwrap();
         assert!(!result.passed);
         assert!(result.elements_exceeding_tol > 0);
+    }
+
+    #[test]
+    fn non_finite_logits_fail_closed() {
+        let fixture = FixtureData {
+            prompt_id: "non-finite".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 1,
+            token_ids: vec![1],
+            n_prompt_tokens: 2,
+            logits: Some(vec![0.0, 1.0]),
+            logits_shape: (1, 2),
+            top5_indices: None,
+            top5_logits: None,
+        };
+
+        let result = compare_l2(&fixture, &[0.0, f32::NAN], &[1], &make_policy()).unwrap();
+
+        assert!(!result.passed);
+        assert_eq!(result.elements_exceeding_tol, 1);
+        assert!(result.max_abs_diff.is_infinite());
     }
 
     #[test]

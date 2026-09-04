@@ -9,6 +9,7 @@ from golden_gen.calibrate import (
     calibrate_from_fixtures,
     count_argmax_mismatches,
     pairwise_max_abs_diff,
+    same_prefix_max_abs_diff,
     validate_calibration_coverage,
 )
 from golden_gen.config import VOCAB_SIZE
@@ -110,6 +111,45 @@ class TestPairwiseMaxAbsDiff:
         diff = pairwise_max_abs_diff(a, b)
         assert diff == pytest.approx(1.0)
 
+    def test_non_finite_values_fail_closed(self):
+        a = np.array([[1.0, np.nan]], dtype=np.float32)
+        b = np.array([[1.0, 2.0]], dtype=np.float32)
+
+        with pytest.raises(ValueError, match="finite"):
+            pairwise_max_abs_diff(a, b)
+
+
+class TestSamePrefixMaxAbsDiff:
+    def test_first_token_divergence_includes_only_the_shared_prompt_row(self):
+        reference_logits = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        baseline_logits = np.array([[1.25, 2.0], [300.0, 400.0]], dtype=np.float32)
+        reference_tokens = np.array([1, 2], dtype=np.int64)
+        baseline_tokens = np.array([9, 2], dtype=np.int64)
+
+        max_abs_diff = same_prefix_max_abs_diff(
+            reference_logits,
+            baseline_logits,
+            reference_tokens,
+            baseline_tokens,
+        )
+
+        assert max_abs_diff == pytest.approx(0.25)
+
+    def test_later_divergence_excludes_following_logit_rows(self):
+        reference_logits = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32)
+        baseline_logits = np.array([[1.0, 2.0], [3.0, 4.0], [500.0, 600.0]], dtype=np.float32)
+        reference_tokens = np.array([1, 2, 3], dtype=np.int64)
+        baseline_tokens = np.array([1, 9, 3], dtype=np.int64)
+
+        max_abs_diff = same_prefix_max_abs_diff(
+            reference_logits,
+            baseline_logits,
+            reference_tokens,
+            baseline_tokens,
+        )
+
+        assert max_abs_diff == pytest.approx(0.0)
+
 
 class TestCountArgmaxMismatches:
     def test_identical(self):
@@ -164,14 +204,16 @@ class TestCalibrateFromFixtures:
             calibrate_from_fixtures(tmp_path)
 
     def test_success_records_every_calibrated_baseline_fixture(self, tmp_path):
-        token_ids = np.array([1], dtype=np.int64)
-        reference_logits = np.zeros((1, VOCAB_SIZE), dtype=np.float32)
+        reference_tokens = np.array([1, 2, 3], dtype=np.int64)
+        baseline_tokens = np.array([1, 9, 3], dtype=np.int64)
+        reference_logits = np.zeros((3, VOCAB_SIZE), dtype=np.float32)
         baseline_logits = reference_logits.copy()
         baseline_logits[0, 0] = 0.001
+        baseline_logits[2, 0] = 100.0
         fixtures = []
-        for oracle, logits in (
-            ("transformers", reference_logits),
-            ("vllm", baseline_logits),
+        for oracle, token_ids, logits in (
+            ("transformers", reference_tokens, reference_logits),
+            ("vllm", baseline_tokens, baseline_logits),
         ):
             filename = f"canonical_01.{oracle}.safetensors"
             sha256 = save_fixture(
@@ -187,9 +229,9 @@ class TestCalibrateFromFixtures:
                     prompt_id="canonical_01",
                     category="canonical",
                     oracle=oracle,
-                    num_tokens=1,
+                    num_tokens=3,
                     logits_dtype="float32",
-                    logits_shape=(1, VOCAB_SIZE),
+                    logits_shape=(3, VOCAB_SIZE),
                     sha256=sha256,
                     filename=filename,
                 )
@@ -208,14 +250,27 @@ class TestCalibrateFromFixtures:
         )
         write_manifest(manifest, tmp_path / "manifest.json")
 
-        exit_code = cli.main(["calibrate", "--manifest-dir", str(tmp_path)])
+        exit_code = cli.main(
+            [
+                "calibrate",
+                "--manifest-dir",
+                str(tmp_path),
+                "--comparison-policy-version",
+                "same-prefix-v1",
+                "--l1-near-tie-max-abs-logit-gap",
+                "0.125",
+                "--l2-atol",
+                "0.25",
+            ]
+        )
 
         assert exit_code == 0
         calibrated = read_manifest(tmp_path / "manifest.json")
         assert calibrated.calibrated_fixtures == ["canonical_01.vllm"]
         assert calibrated.comparison_policy.version == "same-prefix-v1"
-        assert calibrated.comparison_policy.l2_atol == pytest.approx(0.002)
-        assert calibrated.comparison_policy.l1_near_tie_max_abs_logit_gap == pytest.approx(0.004)
+        assert calibrated.tolerance.observed_max_abs_diff == pytest.approx(0.001)
+        assert calibrated.comparison_policy.l2_atol == pytest.approx(0.25)
+        assert calibrated.comparison_policy.l1_near_tie_max_abs_logit_gap == pytest.approx(0.125)
 
     def test_missing_baseline_fixture_fails_closed(self, tmp_path):
         manifest = build_manifest(

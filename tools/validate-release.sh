@@ -4,7 +4,9 @@
 # Run on a GPU machine (sm_89+) before tagging a release.
 # This is the RELEASE GATE — not CI.
 #
-# Usage:
+# Usage (thresholds must come from reviewed release evidence):
+#   COMPARISON_POLICY_VERSION=same-prefix-v1 \
+#   L1_NEAR_TIE_MAX_ABS_LOGIT_GAP=<value> L2_ATOL=<value> \
 #   ./tools/validate-release.sh /path/to/Qwen3-0.6B [goldens-v0.1]
 
 set -euo pipefail
@@ -13,6 +15,9 @@ MODEL_PATH="${1:?Usage: $0 <model-path> [release-tag]}"
 RELEASE_TAG="${2:-goldens-v0.1}"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 GOLDEN_OUTPUT="/tmp/vllm-oxide-goldens-release"
+COMPARISON_POLICY_VERSION="${COMPARISON_POLICY_VERSION:?Set reviewed policy version}"
+L1_NEAR_TIE_MAX_ABS_LOGIT_GAP="${L1_NEAR_TIE_MAX_ABS_LOGIT_GAP:?Set reviewed L1 threshold}"
+L2_ATOL="${L2_ATOL:?Set the reviewed L2 threshold}"
 
 echo "════════════════════════════════════════════"
 echo "  vllm-oxide v0.1 Release Validation"
@@ -33,7 +38,10 @@ echo ""
 # Step 2: Record calibration observations and explicit comparison policy
 echo "── Step 2: Calibrating tolerance ──"
 uv run python -m golden_gen calibrate \
-    --manifest-dir "$GOLDEN_OUTPUT"
+    --manifest-dir "$GOLDEN_OUTPUT" \
+    --comparison-policy-version "$COMPARISON_POLICY_VERSION" \
+    --l1-near-tie-max-abs-logit-gap "$L1_NEAR_TIE_MAX_ABS_LOGIT_GAP" \
+    --l2-atol "$L2_ATOL"
 echo ""
 
 # Step 3: Build the comparison crate (release mode)

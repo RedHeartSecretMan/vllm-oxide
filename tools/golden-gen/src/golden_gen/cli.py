@@ -12,7 +12,6 @@ from golden_gen.calibrate import (
     calibrate_from_fixtures,
     validate_calibration_coverage,
 )
-from golden_gen.config import NEAR_TIE_ATOL_MULTIPLIER
 from golden_gen.generate import run_all
 from golden_gen.manifest import build_expected_fixtures, build_manifest, write_manifest
 from golden_gen.oracles.fake import FakeOracle
@@ -71,6 +70,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Path to directory containing manifest.json + .safetensors fixtures",
+    )
+    cal.add_argument(
+        "--comparison-policy-version",
+        choices=["same-prefix-v1"],
+        required=True,
+        help="Versioned comparison semantics to record in the manifest",
+    )
+    cal.add_argument(
+        "--l1-near-tie-max-abs-logit-gap",
+        type=float,
+        required=True,
+        help="Reviewed L1 expected/actual candidate-logit gap threshold",
+    )
+    cal.add_argument(
+        "--l2-atol",
+        type=float,
+        required=True,
+        help="Reviewed absolute tolerance for same-prefix L2 comparison",
     )
 
     return parser
@@ -273,15 +290,15 @@ def _run_calibrate(args: argparse.Namespace) -> int:
     calibrated_fixtures = validate_calibration_coverage(manifest_dir, manifest)
     tolerance = calibrate_from_fixtures(manifest_dir)
     print(
-        f"Tolerance calibrated: atol={tolerance.atol:.6f}, "
+        f"Baseline calibration observed: candidate_atol={tolerance.atol:.6f}, "
         f"observed_max_abs_diff={tolerance.observed_max_abs_diff:.6f}"
     )
 
     manifest.tolerance = tolerance
     manifest.comparison_policy = ComparisonPolicy(
-        version="same-prefix-v1",
-        l1_near_tie_max_abs_logit_gap=tolerance.atol * NEAR_TIE_ATOL_MULTIPLIER,
-        l2_atol=tolerance.atol,
+        version=args.comparison_policy_version,
+        l1_near_tie_max_abs_logit_gap=args.l1_near_tie_max_abs_logit_gap,
+        l2_atol=args.l2_atol,
     )
     manifest.calibrated_fixtures = calibrated_fixtures
     write_manifest(manifest, manifest_path)
