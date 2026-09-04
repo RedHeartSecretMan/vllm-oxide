@@ -35,6 +35,12 @@ llm  (composition root — owns everything)
 default to `pub(crate)` or stricter. Downstream callers never reach below the
 re-exports curated in `lib.rs`.
 
+Until Ticket #44 completes the v0.2.0 public contraction, types required by the
+currently semver-visible registry factory may remain reachable through
+`lib.rs`. In particular, `ResolvedModel` visibility is a transitional
+construction constraint, not part of the supported composition-root API
+(ADR-0007).
+
 ## EngineCore coordination seam
 
 **Decision**: v0.1 collapsed V1/nano-vllm's `ModelRunner` into

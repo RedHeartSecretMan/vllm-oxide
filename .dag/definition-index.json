@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "1c4f80d583623a2a87861b597acdab42418012f3"
+      "blob_oid": "3db2d0d871594882fa3c68fb6db891c67303fbfd"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -15,15 +15,15 @@
     },
     {
       "path": "docs/adr/0002-weight-loader-seam.md",
-      "blob_oid": "4fcc0734897e26ddc7b93929a7bd0e86181b9186"
+      "blob_oid": "745c83f7a4799f34ad45a53eba308090872dc35a"
     },
     {
       "path": "docs/adr/0003-model-registry-and-rope.md",
-      "blob_oid": "6766c1daf09e5a68989fe5f07e86a063e30f76fc"
+      "blob_oid": "b01f38cff5815b97acf319f9ead30f27801c4309"
     },
     {
       "path": "docs/adr/0004-engine-architecture-and-dependency-dag.md",
-      "blob_oid": "9ba327c6f108e9a1bd5a33832c03ee5bbc623eef"
+      "blob_oid": "4d363f8606cbe347ae7ba25dfbd55ea36a3f5263"
     },
     {
       "path": "docs/adr/0005-golden-generation-correctness-strategy.md",
@@ -32,6 +32,10 @@
     {
       "path": "docs/adr/0006-v0.2-correctness-first-release-scope.md",
       "blob_oid": "faab8d445b72227ff362c4c49937cc9628b9fe7e"
+    },
+    {
+      "path": "docs/adr/0007-resolved-model-identity-seam.md",
+      "blob_oid": "15ab419be763d066146c959ea6c677506403165c"
     }
   ]
 }

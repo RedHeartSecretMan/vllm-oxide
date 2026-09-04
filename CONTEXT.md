@@ -36,6 +36,10 @@ _Avoid_: dispatcher, factory table.
 The internal component that resolves checkpoint artifacts and exposes their weights for model construction. The `model-loader` wording in v0.2 tracker prose names this component, not the `Model registry`.
 _Avoid_: model registry, dispatcher.
 
+**ResolvedModel**:
+The immutable construction identity that binds one source revision, configuration, tokenizer, weight set, dtype, and special-token contract for an `LLM` lifetime.
+_Avoid_: resolved source, model snapshot, artifact bundle.
+
 **LinearSpec**:
 The neutral geometry parameter struct that `Linear<P>::from_vb` consumes — `{ in_features, out_features_per_shard, bias }`. Model code unpacks its own `Config` (e.g. `Qwen3Config`) into `LinearSpec`. Closes the ADR-0002 seam: `Linear<P>` (in shared `layers/`) stays fully model-agnostic — it never imports `models::qwen3::Qwen3Config` or any architecture-specific type.
 _Avoid_: layer config, linear config, projection shape.

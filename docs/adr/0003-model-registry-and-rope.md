@@ -5,14 +5,18 @@ Two decisions governing the `models/` module.
 ## Registry: additive-only architecture registration
 
 **Decision**: Each architecture is one module + one `inventory::submit!`
-self-registration. The `CausalLM` trait (`forward`, `compute_logits`,
-`vocab_size`, `device`) is the engine-facing contract. Adding an architecture
-is purely additive: new file + `mod xxx;` line in `models/mod.rs`, zero edits
-to `registry.rs` or any existing model file.
+self-registration. Its single `ModelEntry` factory consumes an immutable
+`ResolvedModel` owned by the Weight loader and produces the model plus shared
+attention state. Registry lookup remains a pure architecture query and never
+resolves sources or fetches artifacts (ADR-0007). The `CausalLM` trait
+(`forward`, `compute_logits`, `vocab_size`, `device`) remains the
+engine-facing contract. Adding an architecture is purely additive: new file +
+`mod xxx;` line in `models/mod.rs`, zero edits to `registry.rs` or any
+existing model file.
 
 **Consequences**:
 - The registry maps HF architecture strings (e.g. `"Qwen3ForCausalLM"`) to
-  factory functions producing `Box<dyn CausalLM>`.
+  factories consuming `&ResolvedModel`.
 - `models/` depends on `layers/` + `attention/` + `loader/`; nothing depends
   on `models/` except `llm.rs` (the composition root).
 - No plugin dynamic loading in v0.1 — all architectures are compiled in.
