@@ -747,7 +747,11 @@ impl Scheduler {
     /// logical history length as the recovery target, and requeue at the front
     /// of `waiting` without changing request identity, tokens, or parameters.
     fn preempt_if_needed(&mut self, kv_mgr: &mut KvCacheManager) -> Result<(), StepPlanError> {
-        if self.running.iter().any(|sequence| sequence.is_prefill) {
+        if self
+            .running
+            .iter()
+            .any(|sequence| sequence.is_prefill && sequence.recompute_target_tokens.is_none())
+        {
             return Ok(());
         }
 
@@ -2130,10 +2134,83 @@ mod tests {
     mod preemption {
         use super::*;
 
+        fn prepare_decoder_before_first_decode(
+            kv: &mut KvCacheManager,
+            mut sequence: Sequence,
+            completion_token: u32,
+        ) -> Sequence {
+            kv.allocate(&mut sequence, 0).unwrap();
+            sequence.num_scheduled_tokens = sequence.num_prompt_tokens;
+            kv.hash_blocks(&mut sequence);
+            sequence.num_cached_tokens = sequence.num_prompt_tokens;
+            sequence.num_scheduled_tokens = 0;
+            sequence.append_token(completion_token);
+            sequence.status = SequenceStatus::Running;
+            sequence.is_prefill = false;
+            sequence
+        }
+
+        #[test]
+        fn cache_pressure_during_chunked_recovery_preempts_the_recovery_victim() {
+            let mut scheduler = Scheduler::new(BLOCK_SIZE / 2 + 1, 512, 0.9);
+            let mut kv = KvCacheManager::new_with_prefix_cache(3, BLOCK_SIZE, fake_cache(), false);
+
+            let decoder = prepare_decoder_before_first_decode(
+                &mut kv,
+                Sequence::new(10, 10, (0..BLOCK_SIZE as u32).collect(), &make_params(2)),
+                90,
+            );
+            scheduler.running.push_back(decoder);
+
+            let mut recovery = prepare_decoder_before_first_decode(
+                &mut kv,
+                Sequence::new(
+                    11,
+                    11,
+                    (1_000..1_000 + BLOCK_SIZE as u32).collect(),
+                    &make_params(3),
+                ),
+                91,
+            );
+            recovery.num_cached_tokens = BLOCK_SIZE / 2;
+            recovery.recompute_target_tokens = Some(BLOCK_SIZE + 1);
+            recovery.is_prefill = true;
+            scheduler.running.push_back(recovery);
+
+            let decoder_plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(decoder_plan.sequences.len(), 1);
+            assert_eq!(decoder_plan.sequences[0].request_id, 10);
+            assert_eq!(decoder_plan.token_budget, 1);
+            assert_eq!(
+                decoder_plan.blocked_admission,
+                Some(BlockedAdmission {
+                    request_id: 11,
+                    reason: AdmissionBlockedReason::KvCache,
+                })
+            );
+            let waiting = &scheduler.waiting[0];
+            assert_eq!(waiting.request_id, 11);
+            assert_eq!(waiting.status, SequenceStatus::Waiting);
+            assert_eq!(waiting.num_cached_tokens, 0);
+            assert_eq!(waiting.num_scheduled_tokens, 0);
+            assert_eq!(waiting.recompute_target_tokens, Some(BLOCK_SIZE + 1));
+            assert_eq!(waiting.completion_token_ids(), &[91]);
+            assert!(waiting.block_table.is_empty());
+
+            scheduler
+                .apply_step_result(&result_for_plan(&decoder_plan, 42), &mut kv)
+                .unwrap();
+            let resumed = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(resumed.sequences[0].request_id, 11);
+            assert_eq!(resumed.sequences[0].token_range, 0..BLOCK_SIZE / 2 + 1);
+            assert!(!resumed.sequences[0].sampling_allowed);
+        }
+
         #[test]
         fn recovery_plan_replays_prompt_and_completion_before_sampling() {
             let mut scheduler = Scheduler::new(BLOCK_SIZE + 1, 512, 0.9);
-            let mut kv = make_kv_mgr(3);
+            let mut kv = KvCacheManager::new_with_prefix_cache(3, BLOCK_SIZE, fake_cache(), false);
             let survivor_params = make_params(2);
             let victim_params = SamplingParams {
                 temperature: 0.25,
@@ -2151,17 +2228,16 @@ mod tests {
                 } else {
                     &victim_params
                 };
-                let mut sequence = Sequence::new(
-                    sequence_id,
-                    sequence_id,
-                    (0..BLOCK_SIZE as u32).collect(),
-                    params,
+                let sequence = prepare_decoder_before_first_decode(
+                    &mut kv,
+                    Sequence::new(
+                        sequence_id,
+                        sequence_id,
+                        (0..BLOCK_SIZE as u32).collect(),
+                        params,
+                    ),
+                    90 + sequence_id as u32,
                 );
-                kv.allocate(&mut sequence, 0).unwrap();
-                sequence.num_cached_tokens = BLOCK_SIZE;
-                sequence.append_token(90 + sequence_id as u32);
-                sequence.status = SequenceStatus::Running;
-                sequence.is_prefill = false;
                 scheduler.running.push_back(sequence);
             }
 
@@ -2192,21 +2268,18 @@ mod tests {
             let mut kv = make_kv_mgr(3);
             let mut victim_block = None;
             for sequence_id in 0..2 {
-                let mut sequence = Sequence::new(
-                    sequence_id,
-                    sequence_id,
-                    (sequence_id as u32 * 1_000..sequence_id as u32 * 1_000 + BLOCK_SIZE as u32)
-                        .collect(),
-                    &make_params(if sequence_id == 0 { 2 } else { 3 }),
+                let sequence = prepare_decoder_before_first_decode(
+                    &mut kv,
+                    Sequence::new(
+                        sequence_id,
+                        sequence_id,
+                        (sequence_id as u32 * 1_000
+                            ..sequence_id as u32 * 1_000 + BLOCK_SIZE as u32)
+                            .collect(),
+                        &make_params(if sequence_id == 0 { 2 } else { 3 }),
+                    ),
+                    90 + sequence_id as u32,
                 );
-                kv.allocate(&mut sequence, 0).unwrap();
-                sequence.num_scheduled_tokens = BLOCK_SIZE;
-                kv.hash_blocks(&mut sequence);
-                sequence.num_cached_tokens = BLOCK_SIZE;
-                sequence.num_scheduled_tokens = 0;
-                sequence.append_token(90 + sequence_id as u32);
-                sequence.status = SequenceStatus::Running;
-                sequence.is_prefill = false;
                 if sequence_id == 1 {
                     victim_block = sequence.block_table.first().copied();
                 }
@@ -2251,17 +2324,16 @@ mod tests {
             let mut scheduler = Scheduler::new(BLOCK_SIZE / 2, 512, 0.9);
             let mut kv = KvCacheManager::new_with_prefix_cache(3, BLOCK_SIZE, fake_cache(), false);
             for sequence_id in 0..2 {
-                let mut sequence = Sequence::new(
-                    sequence_id,
-                    sequence_id,
-                    (0..BLOCK_SIZE as u32).collect(),
-                    &make_params(if sequence_id == 0 { 2 } else { 3 }),
+                let sequence = prepare_decoder_before_first_decode(
+                    &mut kv,
+                    Sequence::new(
+                        sequence_id,
+                        sequence_id,
+                        (0..BLOCK_SIZE as u32).collect(),
+                        &make_params(if sequence_id == 0 { 2 } else { 3 }),
+                    ),
+                    90 + sequence_id as u32,
                 );
-                kv.allocate(&mut sequence, 0).unwrap();
-                sequence.num_cached_tokens = BLOCK_SIZE;
-                sequence.append_token(90 + sequence_id as u32);
-                sequence.status = SequenceStatus::Running;
-                sequence.is_prefill = false;
                 scheduler.running.push_back(sequence);
             }
 
@@ -2378,17 +2450,16 @@ mod tests {
             let mut scheduler = Scheduler::new(2, 512, 0.9);
             let mut kv = KvCacheManager::new_with_prefix_cache(2, BLOCK_SIZE, fake_cache(), false);
             for sequence_id in 0..2 {
-                let mut sequence = Sequence::new(
-                    sequence_id,
-                    sequence_id,
-                    (0..BLOCK_SIZE as u32).collect(),
-                    &make_params(3),
+                let sequence = prepare_decoder_before_first_decode(
+                    &mut kv,
+                    Sequence::new(
+                        sequence_id,
+                        sequence_id,
+                        (0..BLOCK_SIZE as u32).collect(),
+                        &make_params(3),
+                    ),
+                    90 + sequence_id as u32,
                 );
-                kv.allocate(&mut sequence, 0).unwrap();
-                sequence.num_cached_tokens = BLOCK_SIZE;
-                sequence.append_token(90 + sequence_id as u32);
-                sequence.status = SequenceStatus::Running;
-                sequence.is_prefill = false;
                 scheduler.running.push_back(sequence);
             }
             let victim_block = scheduler.running[1].block_table[0];
@@ -2431,17 +2502,16 @@ mod tests {
             let mut kv = KvCacheManager::new_with_prefix_cache(5, BLOCK_SIZE, fake_cache(), false);
             for sequence_id in 0..2 {
                 let prompt_start = sequence_id as u32 * 1_000;
-                let mut sequence = Sequence::new(
-                    sequence_id,
-                    sequence_id,
-                    (prompt_start..prompt_start + (2 * BLOCK_SIZE - 1) as u32).collect(),
-                    &make_params(if sequence_id == 0 { 3 } else { 5 }),
+                let sequence = prepare_decoder_before_first_decode(
+                    &mut kv,
+                    Sequence::new(
+                        sequence_id,
+                        sequence_id,
+                        (prompt_start..prompt_start + (2 * BLOCK_SIZE - 1) as u32).collect(),
+                        &make_params(if sequence_id == 0 { 3 } else { 5 }),
+                    ),
+                    700 + sequence_id as u32,
                 );
-                kv.allocate(&mut sequence, 0).unwrap();
-                sequence.num_cached_tokens = sequence.num_prompt_tokens;
-                sequence.append_token(700 + sequence_id as u32);
-                sequence.status = SequenceStatus::Running;
-                sequence.is_prefill = false;
                 scheduler.running.push_back(sequence);
             }
 
@@ -2472,17 +2542,16 @@ mod tests {
             assert_eq!(scheduler.running[0].completion_token_ids(), &[701, 88, 88]);
             assert_eq!(scheduler.running[0].recompute_target_tokens, None);
 
-            let mut competitor = Sequence::new(
-                2,
-                2,
-                (2_000..2_000 + (2 * BLOCK_SIZE) as u32).collect(),
-                &make_params(2),
+            let competitor = prepare_decoder_before_first_decode(
+                &mut kv,
+                Sequence::new(
+                    2,
+                    2,
+                    (2_000..2_000 + (2 * BLOCK_SIZE) as u32).collect(),
+                    &make_params(2),
+                ),
+                702,
             );
-            kv.allocate(&mut competitor, 0).unwrap();
-            competitor.num_cached_tokens = competitor.num_prompt_tokens;
-            competitor.append_token(702);
-            competitor.status = SequenceStatus::Running;
-            competitor.is_prefill = false;
             scheduler.running.push_front(competitor);
 
             let second_preemption = scheduler.plan_step(&mut kv).unwrap().unwrap();
@@ -2530,12 +2599,11 @@ mod tests {
             let mut scheduler = Scheduler::new(3, 3, 0.9);
             let mut kv = KvCacheManager::new_with_prefix_cache(3, BLOCK_SIZE, fake_cache(), false);
 
-            let mut decoder = Sequence::new(10, 10, vec![1], &make_params(4));
-            kv.allocate(&mut decoder, 0).unwrap();
-            decoder.num_cached_tokens = decoder.num_prompt_tokens;
-            decoder.append_token(10);
-            decoder.status = SequenceStatus::Running;
-            decoder.is_prefill = false;
+            let decoder = prepare_decoder_before_first_decode(
+                &mut kv,
+                Sequence::new(10, 10, vec![1], &make_params(4)),
+                10,
+            );
             scheduler.running.push_back(decoder);
 
             let mut recovery = Sequence::new(11, 11, vec![2, 3, 4, 5], &make_params(2));

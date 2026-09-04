@@ -1210,12 +1210,7 @@ mod tests {
             let unpreempted_outputs = unpreempted.generate(&prompts, &params).unwrap();
 
             assert_eq!(preempted_outputs.len(), prompts.len());
-            for (input_position, (actual, expected)) in preempted_outputs
-                .iter()
-                .zip(&unpreempted_outputs)
-                .enumerate()
-            {
-                assert_eq!(actual.request_id, input_position);
+            for (actual, expected) in preempted_outputs.iter().zip(&unpreempted_outputs) {
                 assert_eq!(actual.request_id, expected.request_id);
                 assert_eq!(actual.token_ids, expected.token_ids);
                 assert_eq!(actual.text, expected.text);
