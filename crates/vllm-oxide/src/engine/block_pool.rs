@@ -149,13 +149,23 @@ impl BlockPool {
     ///
     /// # Errors
     ///
-    /// Returns `BlockPoolError` if the free list is empty (out of memory).
+    /// Returns `BlockPoolError` without mutating the pool if the free-list head
+    /// is missing or violates the pool's ownership invariants.
     fn allocate_block_private(&mut self) -> Result<usize, BlockPoolError> {
-        let block_id = self
+        let block_id = *self
             .free_block_ids
-            .pop_front()
+            .front()
             .ok_or_else(|| BlockPoolError("no free blocks available".to_string()))?;
-        let block = &self.blocks[block_id];
+        let block = self
+            .blocks
+            .get(block_id)
+            .ok_or_else(|| BlockPoolError(format!("free block id {block_id} is out of range")))?;
+        if block.ref_count != 0 || self.used_block_ids.contains(&block_id) {
+            return Err(BlockPoolError(format!(
+                "free block {block_id} has inconsistent ownership"
+            )));
+        }
+        self.free_block_ids.pop_front();
         // nano-vllm asserts ref_count == 0 here.
         if block.hash != -1 {
             if let Some(&existing) = self.hash_to_block_id.get(&block.hash) {
@@ -236,8 +246,8 @@ impl BlockPool {
     ///
     /// # Errors
     ///
-    /// Returns `BlockPoolError` if a new block cannot be allocated (should
-    /// not happen if `can_allocate` returned `Some`).
+    /// Validates the complete allocation before changing ownership. Any
+    /// `BlockPoolError` therefore leaves both the pool and `Sequence` unchanged.
     pub fn allocate(
         &mut self,
         seq: &mut Sequence,
@@ -248,27 +258,97 @@ impl BlockPool {
                 "sequence already has a block table".to_string(),
             ));
         }
-
+        if num_cached_blocks > seq.num_blocks() {
+            return Err(BlockPoolError(format!(
+                "cached block count {num_cached_blocks} exceeds sequence block count {}",
+                seq.num_blocks()
+            )));
+        }
         let mut h: i64 = -1;
+        let mut cached_block_ids = Vec::with_capacity(num_cached_blocks);
+        let mut distinct_cached_block_ids = HashSet::with_capacity(num_cached_blocks);
         for i in 0..num_cached_blocks {
-            let token_ids = seq.block(i).to_vec();
-            h = Self::compute_hash(&token_ids, h);
+            let token_ids = seq.block(i);
+            h = Self::compute_hash(token_ids, h);
             let block_id = *self
                 .hash_to_block_id
                 .get(&h)
                 .ok_or_else(|| BlockPoolError("cached block hash not found".to_string()))?;
+            let block = self.blocks.get(block_id).ok_or_else(|| {
+                BlockPoolError(format!("cached block {block_id} is out of range"))
+            })?;
+            if block.token_ids != token_ids {
+                return Err(BlockPoolError(format!(
+                    "cached block {block_id} token ids do not match"
+                )));
+            }
+            if !distinct_cached_block_ids.insert(block_id) {
+                return Err(BlockPoolError(format!(
+                    "cached block {block_id} appears more than once"
+                )));
+            }
+            if self.used_block_ids.contains(&block_id) {
+                if block.ref_count == 0 {
+                    return Err(BlockPoolError(format!(
+                        "used cached block {block_id} has ref_count 0"
+                    )));
+                }
+                block.ref_count.checked_add(1).ok_or_else(|| {
+                    BlockPoolError(format!("cached block {block_id} ref_count overflow"))
+                })?;
+            } else if block.ref_count != 0 || !self.free_block_ids.iter().any(|&id| id == block_id)
+            {
+                return Err(BlockPoolError(format!(
+                    "cached block {block_id} has inconsistent free-list ownership"
+                )));
+            }
+            cached_block_ids.push(block_id);
+        }
+
+        let required_uncached_blocks = seq.num_blocks() - num_cached_blocks;
+        let cached_free_blocks = cached_block_ids
+            .iter()
+            .filter(|block_id| !self.used_block_ids.contains(block_id))
+            .count();
+        let required_free_blocks = required_uncached_blocks
+            .checked_add(cached_free_blocks)
+            .ok_or_else(|| BlockPoolError("required free block count overflow".to_string()))?;
+        if self.free_block_ids.len() < required_free_blocks {
+            return Err(BlockPoolError("no free blocks available".to_string()));
+        }
+        let new_block_ids = self
+            .free_block_ids
+            .iter()
+            .filter(|block_id| !distinct_cached_block_ids.contains(block_id))
+            .take(required_uncached_blocks)
+            .copied()
+            .collect::<Vec<_>>();
+        if new_block_ids.len() != required_uncached_blocks {
+            return Err(BlockPoolError("no free blocks available".to_string()));
+        }
+        let mut distinct_new_block_ids = HashSet::with_capacity(new_block_ids.len());
+        for &block_id in &new_block_ids {
+            let block = self.blocks.get(block_id).ok_or_else(|| {
+                BlockPoolError(format!("free block id {block_id} is out of range"))
+            })?;
+            if !distinct_new_block_ids.insert(block_id)
+                || block.ref_count != 0
+                || self.used_block_ids.contains(&block_id)
+            {
+                return Err(BlockPoolError(format!(
+                    "free block {block_id} has inconsistent ownership"
+                )));
+            }
+        }
+
+        for block_id in cached_block_ids {
             let block = &mut self.blocks[block_id];
             if self.used_block_ids.contains(&block_id) {
                 block.ref_count += 1;
             } else {
                 // Block is in hash_to_block_id but not used — a previously
                 // hashed-then-deallocated block; move from free to used.
-                let idx = self
-                    .free_block_ids
-                    .iter()
-                    .position(|&fid| fid == block_id)
-                    .ok_or_else(|| BlockPoolError("cached block not in free list".to_string()))?;
-                self.free_block_ids.remove(idx);
+                self.free_block_ids.retain(|&free_id| free_id != block_id);
                 block.ref_count = 1;
                 self.used_block_ids.insert(block_id);
             }
@@ -508,6 +588,68 @@ mod tests {
 
     mod allocate {
         use super::*;
+
+        #[test]
+        fn capacity_failure_leaves_pool_and_sequence_unchanged() {
+            let mut pool = BlockPool::new(1, 256);
+            let mut seq = make_seq((0..257).collect());
+
+            let error = pool.allocate(&mut seq, 0).unwrap_err();
+
+            assert_eq!(
+                error,
+                BlockPoolError("no free blocks available".to_string())
+            );
+            assert_eq!(pool.num_free_blocks(), 1);
+            assert!(pool.used_block_ids.is_empty());
+            assert_eq!(pool.blocks[0].ref_count, 0);
+            assert!(seq.block_table.is_empty());
+            assert_eq!(seq.num_cached_tokens, 0);
+        }
+
+        #[test]
+        fn cached_lookup_failure_rolls_back_shared_ownership() {
+            let mut pool = BlockPool::new(4, 256);
+            let prefix = (0..256).collect::<Vec<u32>>();
+            let mut cached_owner = make_seq(prefix.clone());
+            pool.allocate(&mut cached_owner, 0).unwrap();
+            let cached_block = cached_owner.block_table[0];
+            let prefix_hash = BlockPool::compute_hash(&prefix, -1);
+            pool.blocks[cached_block].update(prefix_hash, prefix);
+            pool.hash_to_block_id.insert(prefix_hash, cached_block);
+
+            let mut target = make_seq((0..513).collect());
+            let free_before = pool.num_free_blocks();
+            let error = pool.allocate(&mut target, 2).unwrap_err();
+
+            assert_eq!(
+                error,
+                BlockPoolError("cached block hash not found".to_string())
+            );
+            assert_eq!(pool.num_free_blocks(), free_before);
+            assert_eq!(pool.blocks[cached_block].ref_count, 1);
+            assert!(target.block_table.is_empty());
+            assert_eq!(target.num_cached_tokens, 0);
+        }
+
+        #[test]
+        fn invalid_later_free_block_does_not_partially_allocate() {
+            let mut pool = BlockPool::new(3, 256);
+            pool.free_block_ids = VecDeque::from([0, usize::MAX, 2]);
+            let mut seq = make_seq((0..257).collect());
+
+            let error = pool.allocate(&mut seq, 0).unwrap_err();
+
+            assert_eq!(
+                error,
+                BlockPoolError(format!("free block id {} is out of range", usize::MAX))
+            );
+            assert_eq!(pool.free_block_ids, VecDeque::from([0, usize::MAX, 2]));
+            assert!(pool.used_block_ids.is_empty());
+            assert!(pool.blocks.iter().all(|block| block.ref_count == 0));
+            assert!(seq.block_table.is_empty());
+            assert_eq!(seq.num_cached_tokens, 0);
+        }
 
         #[test]
         fn sets_block_table_and_cached_tokens() {

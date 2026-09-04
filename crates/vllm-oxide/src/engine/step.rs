@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use crate::attention::AttnMetadata;
+use crate::engine::BlockPoolError;
 use crate::SamplingParams;
 
 /// Execution phase for one immutable engine step.
@@ -11,6 +12,9 @@ pub(crate) enum StepPhase {
 }
 
 /// Immutable description of one scheduler-selected engine step.
+///
+/// `token_budget` is the exact sum of positive per-sequence budgets and never
+/// exceeds the Scheduler's configured global budget.
 #[derive(Debug, Clone)]
 pub(crate) struct StepPlan {
     pub(crate) id: u64,
@@ -76,11 +80,34 @@ pub(crate) enum StepPlanError {
         plan_id: u64,
         reason: String,
     },
+    CacheOperation {
+        operation: &'static str,
+        sequence_id: usize,
+        source: BlockPoolError,
+    },
+    NoProgress {
+        waiting_sequences: usize,
+        running_sequences: usize,
+        token_budget: usize,
+        free_blocks: usize,
+    },
 }
 
 impl StepPlanError {
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::Invalid(message.into())
+    }
+
+    pub(crate) fn cache(
+        operation: &'static str,
+        sequence_id: usize,
+        source: BlockPoolError,
+    ) -> Self {
+        Self::CacheOperation {
+            operation,
+            sequence_id,
+            source,
+        }
     }
 }
 
@@ -104,6 +131,23 @@ impl std::fmt::Display for StepPlanError {
             Self::ResultMismatch { plan_id, reason } => {
                 write!(f, "step result {plan_id} does not match its plan: {reason}")
             }
+            Self::CacheOperation {
+                operation,
+                sequence_id,
+                source,
+            } => write!(
+                f,
+                "cache {operation} failed for sequence {sequence_id}: {source}"
+            ),
+            Self::NoProgress {
+                waiting_sequences,
+                running_sequences,
+                token_budget,
+                free_blocks,
+            } => write!(
+                f,
+                "scheduler made no progress: waiting={waiting_sequences}, running={running_sequences}, token_budget={token_budget}, free_blocks={free_blocks}"
+            ),
         }
     }
 }
