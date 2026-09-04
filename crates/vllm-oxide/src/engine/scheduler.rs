@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 
 use crate::attention::{
-    build_continued_prefill_metadata, build_decode_metadata, build_prefill_metadata,
+    build_continued_prefill_metadata, build_decode_metadata, build_prefill_metadata, AttnMetadata,
 };
 use crate::engine::kv_cache_manager::{KvCacheError, KvCacheManager};
 use crate::engine::sequence::{Sequence, SequenceStatus};
@@ -56,6 +56,27 @@ fn block_tables_for_plan(sequences: &[SequenceStepPlan]) -> Result<Vec<Vec<i32>>
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect()
+}
+
+fn build_paged_prefill_plan_metadata(
+    sequences: &[SequenceStepPlan],
+    slot_mapping: &[i64],
+) -> Result<AttnMetadata, StepPlanError> {
+    let scheduled_tokens = sequences
+        .iter()
+        .map(|sequence| usize_to_u32(sequence.token_budget, "scheduled token count"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let kv_lengths = sequences
+        .iter()
+        .map(|sequence| usize_to_u32(sequence.cache.kv_length, "KV length"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let block_tables = block_tables_for_plan(sequences)?;
+    Ok(build_continued_prefill_metadata(
+        &scheduled_tokens,
+        &kv_lengths,
+        &block_tables,
+        slot_mapping,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,8 +187,9 @@ impl Scheduler {
     ///    and cache capacity all permit admission.
     /// 3. Schedule bounded running continuation or decode work from the same
     ///    global token budget, then spend the reservation on waiting prefill.
-    /// 4. Reserve decode append blocks transactionally. If aggregate cache
-    ///    pressure rejects admission, roll it back and keep decode progress.
+    /// 4. Reserve decode append blocks transactionally. Under aggregate cache
+    ///    pressure, roll admissions back from the FIFO tail until the maximal
+    ///    feasible prefix can coexist with decode progress.
     ///
     /// FIFO arrivals never overtake one another. Therefore, while every
     /// decision retains enough token, sequence, and cache capacity for at least
@@ -194,18 +216,19 @@ impl Scheduler {
                 self.reset_scheduled_work();
                 return Err(error);
             }
-            if let Err(error) = self.reserve_decode_cache(kv_mgr) {
-                if self.running.len() == running_before_admission {
-                    self.reset_scheduled_work();
-                    return Err(error);
-                }
-                if let Err(error) = self.rollback_admissions(kv_mgr, running_before_admission) {
-                    self.reset_scheduled_work();
-                    return Err(error);
-                }
-                if let Err(error) = self.reserve_decode_cache(kv_mgr) {
-                    self.reset_scheduled_work();
-                    return Err(error);
+            loop {
+                match self.reserve_decode_cache(kv_mgr) {
+                    Ok(()) => break,
+                    Err(error) if self.running.len() == running_before_admission => {
+                        self.reset_scheduled_work();
+                        return Err(error);
+                    }
+                    Err(_) => {
+                        if let Err(error) = self.rollback_last_admission(kv_mgr) {
+                            self.reset_scheduled_work();
+                            return Err(error);
+                        }
+                    }
                 }
             }
             let blocked_admission = blocked_before_selection
@@ -312,6 +335,9 @@ impl Scheduler {
             .flat_map(|sequence| sequence.cache.slot_mapping.iter().copied())
             .collect::<Vec<_>>();
         let attention = match output.phase {
+            StepPhase::Prefill if output.is_prefill_continuation => {
+                build_paged_prefill_plan_metadata(&sequences, &slot_mapping)?
+            }
             StepPhase::Prefill => {
                 let scheduled_tokens = sequences
                     .iter()
@@ -321,17 +347,7 @@ impl Scheduler {
                     .iter()
                     .map(|sequence| usize_to_u32(sequence.cache.kv_length, "KV length"))
                     .collect::<Result<Vec<_>, _>>()?;
-                if output.is_prefill_continuation {
-                    let block_tables = block_tables_for_plan(&sequences)?;
-                    build_continued_prefill_metadata(
-                        &scheduled_tokens,
-                        &kv_lengths,
-                        &block_tables,
-                        &slot_mapping,
-                    )
-                } else {
-                    build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping)
-                }
+                build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping)
             }
             StepPhase::Decode => {
                 let context_lengths = sequences
@@ -341,23 +357,7 @@ impl Scheduler {
                 let block_tables = block_tables_for_plan(&sequences)?;
                 build_decode_metadata(&context_lengths, &block_tables, &slot_mapping)
             }
-            StepPhase::Mixed => {
-                let scheduled_tokens = sequences
-                    .iter()
-                    .map(|sequence| usize_to_u32(sequence.token_budget, "scheduled token count"))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let kv_lengths = sequences
-                    .iter()
-                    .map(|sequence| usize_to_u32(sequence.cache.kv_length, "KV length"))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let block_tables = block_tables_for_plan(&sequences)?;
-                build_continued_prefill_metadata(
-                    &scheduled_tokens,
-                    &kv_lengths,
-                    &block_tables,
-                    &slot_mapping,
-                )
-            }
+            StepPhase::Mixed => build_paged_prefill_plan_metadata(&sequences, &slot_mapping)?,
         };
 
         let plan = StepPlan {
@@ -643,27 +643,28 @@ impl Scheduler {
         Ok(())
     }
 
-    fn rollback_admissions(
+    fn rollback_last_admission(
         &mut self,
         kv_mgr: &mut KvCacheManager,
-        running_before_admission: usize,
     ) -> Result<(), StepPlanError> {
-        while self.running.len() > running_before_admission {
-            // The length check guarantees a newly admitted sequence exists.
-            #[allow(clippy::unwrap_used)]
-            let mut sequence = self.running.pop_back().unwrap();
-            let sequence_id = sequence.seq_id;
-            kv_mgr
-                .deallocate(&mut sequence)
-                .map_err(KvCacheError::from)
-                .map_err(|source| {
-                    StepPlanError::cache(CacheOperation::AllocationRollback, sequence_id, source)
-                })?;
-            sequence.status = SequenceStatus::Waiting;
-            sequence.num_scheduled_tokens = 0;
-            sequence.is_prefill = true;
-            self.waiting.push_front(sequence);
+        let Some(mut sequence) = self.running.pop_back() else {
+            return Err(StepPlanError::invalid(
+                "cannot roll back admission from an empty running queue",
+            ));
+        };
+        let sequence_id = sequence.seq_id;
+        if let Err(source) = kv_mgr.deallocate(&mut sequence).map_err(KvCacheError::from) {
+            self.running.push_back(sequence);
+            return Err(StepPlanError::cache(
+                CacheOperation::AllocationRollback,
+                sequence_id,
+                source,
+            ));
         }
+        sequence.status = SequenceStatus::Waiting;
+        sequence.num_scheduled_tokens = 0;
+        sequence.is_prefill = true;
+        self.waiting.push_front(sequence);
         Ok(())
     }
 
@@ -1486,7 +1487,7 @@ mod tests {
         }
 
         #[test]
-        fn mixed_admission_failure_rolls_back_decode_cache_reservation() {
+        fn mixed_admission_failure_leaves_decode_cache_and_selection_unchanged() {
             let mut scheduler = Scheduler::new(300, 4, 0.9);
             let mut kv = make_kv_mgr(3);
             begin_decoding(
@@ -1543,6 +1544,48 @@ mod tests {
             );
             assert_eq!(scheduler.num_running(), 1);
             assert_eq!(scheduler.num_waiting(), 1);
+            assert_eq!(scheduler.waiting[0].status, SequenceStatus::Waiting);
+            assert_eq!(scheduler.waiting[0].num_scheduled_tokens, 0);
+            assert!(scheduler.waiting[0].block_table.is_empty());
+            assert_eq!(kv.num_free_blocks(), 0);
+        }
+
+        #[test]
+        fn aggregate_cache_backoff_keeps_the_maximal_fifo_admission_prefix() {
+            let mut scheduler = Scheduler::new(300, 4, 0.9);
+            let mut kv = make_kv_mgr(3);
+            begin_decoding(
+                &mut scheduler,
+                &mut kv,
+                (0..BLOCK_SIZE as u32).collect(),
+                2,
+                42,
+            );
+            scheduler.max_num_batched_tokens = 3;
+            scheduler.add_request(vec![4], make_params(1));
+            scheduler.add_request(vec![5], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Mixed);
+            assert_eq!(plan.token_budget, 2);
+            assert_eq!(
+                plan.sequences
+                    .iter()
+                    .map(|sequence| sequence.request_id)
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
+            );
+            assert_eq!(
+                plan.blocked_admission,
+                Some(BlockedAdmission {
+                    request_id: 2,
+                    reason: AdmissionBlockedReason::KvCache,
+                })
+            );
+            assert_eq!(scheduler.num_running(), 2);
+            assert_eq!(scheduler.num_waiting(), 1);
+            assert_eq!(scheduler.waiting[0].request_id, 2);
             assert_eq!(scheduler.waiting[0].status, SequenceStatus::Waiting);
             assert_eq!(scheduler.waiting[0].num_scheduled_tokens, 0);
             assert!(scheduler.waiting[0].block_table.is_empty());
