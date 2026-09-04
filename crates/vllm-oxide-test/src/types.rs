@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level manifest describing a set of golden fixtures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub schema_version: u32,
     pub generated_at: String,
@@ -16,7 +17,11 @@ pub struct Manifest {
     pub oracle_versions: OracleVersions,
     pub generation: GenerationConfig,
     pub tolerance: ToleranceCalibration,
+    pub expected_fixtures: Vec<ExpectedFixture>,
     pub fixtures: Vec<FixtureMetadata>,
+    /// Baseline fixture identifiers successfully consumed by calibration.
+    #[serde(default)]
+    pub calibrated_fixtures: Vec<String>,
     /// Mapping from prompt_id to a list of token positions where vLLM (the
     /// reference BF16 engine) disagrees with transformers. These positions are
     /// skipped during L1 regression comparison.
@@ -24,8 +29,24 @@ pub struct Manifest {
     pub regression_skip_map: HashMap<String, Vec<usize>>,
 }
 
+/// Contract for one oracle artifact required by the release manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedFixture {
+    pub fixture_id: String,
+    pub prompt_id: String,
+    pub family: FixtureFamily,
+    pub model_revision: String,
+    pub dtype: String,
+    pub oracle: OracleName,
+    pub oracle_role: OracleRole,
+    pub required_comparison: RequiredComparison,
+    pub filename: String,
+}
+
 /// Provenance of the model used to generate goldens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelInfo {
     pub id: String,
     pub revision: String,
@@ -36,6 +57,7 @@ pub struct ModelInfo {
 
 /// Versions of the oracle engines used during generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OracleVersions {
     pub transformers: String,
     pub vllm: String,
@@ -43,6 +65,7 @@ pub struct OracleVersions {
 
 /// Parameters used during golden generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenerationConfig {
     pub canonical_max_tokens: u32,
     pub regression_max_tokens: u32,
@@ -52,6 +75,7 @@ pub struct GenerationConfig {
 
 /// Calibrated tolerances from oracle cross-validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToleranceCalibration {
     pub atol: f64,
     pub observed_max_abs_diff: f64,
@@ -61,6 +85,7 @@ pub struct ToleranceCalibration {
 
 /// Metadata for a single fixture file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixtureMetadata {
     pub prompt_id: String,
     pub category: PromptCategory,
@@ -72,19 +97,42 @@ pub struct FixtureMetadata {
     pub filename: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptCategory {
     Canonical,
     Regression,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum FixtureFamily {
+    Canonical,
+    Batch,
+    Regression,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum OracleName {
     Transformers,
     Vllm,
     Fake,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum OracleRole {
+    Reference,
+    Baseline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredComparison {
+    L1,
+    L1L2,
+    Calibration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

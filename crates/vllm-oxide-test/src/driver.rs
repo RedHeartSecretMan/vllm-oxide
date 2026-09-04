@@ -17,10 +17,10 @@ use vllm_oxide::{EngineOptions, Prompt, Source, LLM};
 use crate::l1::{compare_l1, compare_l1_regression};
 use crate::l2::compare_l2;
 use crate::l3::compare_l3;
-use crate::manifest;
+use crate::lifecycle::{preflight, ReferenceCase};
 use crate::prompts::PromptEntry;
 use crate::report::ComparisonReport;
-use crate::types::{Manifest, PromptCategory};
+use crate::types::{Manifest, PromptCategory, RequiredComparison};
 
 /// Flags that control which comparison layers run.
 pub struct DriverOptions {
@@ -42,107 +42,130 @@ pub fn run_comparison(
     manifest: &Manifest,
     fixture_dir: &Path,
     model_path: &Path,
-    canonical_prompts: &HashMap<String, PromptEntry>,
+    prompts: &HashMap<String, PromptEntry>,
     opts: &DriverOptions,
 ) -> Result<ComparisonReport> {
-    let mut report = ComparisonReport::default();
+    let prepared = preflight(manifest, fixture_dir, prompts);
+    let mut tracker = prepared.tracker;
+    let mut report = ComparisonReport {
+        failures: prepared.errors,
+        ..ComparisonReport::default()
+    };
 
-    for meta in &manifest.fixtures {
-        let Some(prompt_entry) = canonical_prompts.get(&meta.prompt_id) else {
-            tracing::warn!(
-                "prompt_id '{}' not found in canonical.jsonl — skipping",
-                meta.prompt_id
-            );
-            continue;
-        };
-
-        // Batch prompts (canonical_05) have sub_prompts — skip in v0.1.
-        if prompt_entry.sub_prompts.is_some() {
-            tracing::info!(
-                "[{}] skipping batch prompt (not supported in v0.1 generate_logits)",
-                meta.prompt_id
-            );
+    for case in prepared.reference_cases {
+        let fixture_id = case.expected.fixture_id.clone();
+        if tracker.was_skipped(&fixture_id) || !required_layers_enabled(&case, opts) {
+            tracker.record_skipped(&fixture_id);
             continue;
         }
-
-        let fixture = manifest::load_fixture(&fixture_dir.join(&meta.filename), meta)?;
-        let prompt = Prompt::Text(prompt_entry.prompt.clone());
-        let max_tokens = meta.num_tokens as usize;
-
-        let layer_label = match meta.category {
-            PromptCategory::Canonical => "L1+L2",
-            PromptCategory::Regression => "L1",
-        };
-        tracing::info!("[{}/{}] loading engine", meta.prompt_id, layer_label);
-        let mut llm = LLM::new(
-            Source::Local(model_path.to_path_buf()),
-            EngineOptions::default(),
-        )?;
-
-        let logits = match llm.generate_logits(&prompt, max_tokens) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("generate_logits failed for {}: {e}", meta.prompt_id);
-                continue;
-            }
-        };
-
-        // Flatten to F32 once — shared by argmax extraction and L2 comparison.
-        let logits_f32 = match logits.to_dtype(DType::F32) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("logits to_dtype failed: {e}");
-                continue;
-            }
-        };
-        let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
-        let vocab_size = fixture.model_vocab_size(&logits_vals);
-        let n_steps = logits.dims()[0];
-        let generated_tokens = extract_greedy_tokens(&logits_vals, n_steps, vocab_size);
-
-        match meta.category {
-            PromptCategory::Canonical => {
-                if !opts.l2_only {
-                    let l1_result = compare_l1(
-                        &fixture,
-                        &generated_tokens,
-                        Some(&logits),
-                        &manifest.tolerance,
-                        opts.epsilon,
-                    )?;
-                    report.l1_results.push(l1_result);
+        match compare_reference_case(&case, manifest, fixture_dir, model_path, opts) {
+            Ok(comparison) => {
+                let passed = comparison.l1.as_ref().map_or(true, |result| result.passed)
+                    && comparison.l2.as_ref().map_or(true, |result| result.passed);
+                if let Some(result) = comparison.l1 {
+                    report.l1_results.push(result);
                 }
-
-                if !opts.l1_only {
-                    // ADR-0005: L2 uses same-prefix comparison (skips divergent steps)
-                    let l2_result = compare_l2(
-                        &fixture,
-                        &logits_vals,
-                        &generated_tokens,
-                        &manifest.tolerance,
-                    )?;
-                    report.l2_results.push(l2_result);
+                if let Some(result) = comparison.l2 {
+                    report.l2_results.push(result);
                 }
-
-                if opts.debug {
-                    let l3_result = compare_l3(manifest, fixture_dir, &meta.prompt_id)?;
-                    report.l3_results.push(l3_result);
+                if let Some(result) = comparison.l3 {
+                    report.l3_results.push(result);
+                }
+                tracker.record_compared(&fixture_id);
+                if !passed {
+                    tracker.record_failed(&fixture_id);
                 }
             }
-            PromptCategory::Regression => {
-                if !opts.l2_only {
-                    let l1_result = compare_l1_regression(
-                        &fixture,
-                        &generated_tokens,
-                        &manifest.regression_skip_map,
-                    )?;
-                    report.l1_results.push(l1_result);
-                }
+            Err(error) => {
+                tracker.record_failed(&fixture_id);
+                report
+                    .failures
+                    .push(format!("fixture {fixture_id} comparison failed: {error:#}"));
             }
         }
     }
 
+    report.lifecycle = tracker.totals();
     Ok(report)
+}
+
+struct CaseComparison {
+    l1: Option<crate::l1::L1Result>,
+    l2: Option<crate::l2::L2Result>,
+    l3: Option<crate::l3::L3Result>,
+}
+
+fn required_layers_enabled(case: &ReferenceCase, opts: &DriverOptions) -> bool {
+    match case.expected.required_comparison {
+        RequiredComparison::L1 => !opts.l2_only,
+        RequiredComparison::L1L2 => !opts.l1_only && !opts.l2_only,
+        RequiredComparison::Calibration => false,
+    }
+}
+
+fn compare_reference_case(
+    case: &ReferenceCase,
+    manifest: &Manifest,
+    fixture_dir: &Path,
+    model_path: &Path,
+    opts: &DriverOptions,
+) -> Result<CaseComparison> {
+    let prompt = Prompt::Text(case.prompt.prompt.clone());
+    let max_tokens = case.metadata.num_tokens as usize;
+    let layer_label = match case.metadata.category {
+        PromptCategory::Canonical => "L1+L2",
+        PromptCategory::Regression => "L1",
+    };
+    tracing::info!(
+        "[{}/{}] loading engine",
+        case.metadata.prompt_id,
+        layer_label
+    );
+    let mut llm = LLM::new(
+        Source::Local(model_path.to_path_buf()),
+        EngineOptions::default(),
+    )?;
+    let logits = llm.generate_logits(&prompt, max_tokens)?;
+    let logits_f32 = logits.to_dtype(DType::F32)?;
+    let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
+    let vocab_size = case.fixture.model_vocab_size(&logits_vals);
+    if vocab_size == 0 {
+        anyhow::bail!("generated logits have zero vocabulary width");
+    }
+    let n_steps = logits.dims()[0];
+    let generated_tokens = extract_greedy_tokens(&logits_vals, n_steps, vocab_size);
+
+    let (l1, l2) = match case.metadata.category {
+        PromptCategory::Canonical => (
+            Some(compare_l1(
+                &case.fixture,
+                &generated_tokens,
+                Some(&logits),
+                &manifest.tolerance,
+                opts.epsilon,
+            )?),
+            Some(compare_l2(
+                &case.fixture,
+                &logits_vals,
+                &generated_tokens,
+                &manifest.tolerance,
+            )?),
+        ),
+        PromptCategory::Regression => (
+            Some(compare_l1_regression(
+                &case.fixture,
+                &generated_tokens,
+                &manifest.regression_skip_map,
+            )?),
+            None,
+        ),
+    };
+    let l3 = if opts.debug {
+        Some(compare_l3(manifest, fixture_dir, &case.metadata.prompt_id)?)
+    } else {
+        None
+    };
+    Ok(CaseComparison { l1, l2, l3 })
 }
 
 /// Extract greedy tokens from flat F32 logits via per-step argmax.

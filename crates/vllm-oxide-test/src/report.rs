@@ -8,6 +8,33 @@ use crate::l2::L2Result;
 use crate::l3::L3Result;
 use crate::types::ToleranceCalibration;
 
+/// Exact fixture lifecycle accounting for one validation run.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct LifecycleTotals {
+    pub expected: usize,
+    pub discovered: usize,
+    pub generated: usize,
+    pub compared: usize,
+    pub missing: usize,
+    pub unexpected: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+impl LifecycleTotals {
+    /// Release validation is fail-closed: every expected fixture must reach comparison.
+    pub fn release_passed(&self) -> bool {
+        self.expected > 0
+            && self.discovered == self.expected
+            && self.generated == self.expected
+            && self.compared == self.expected
+            && self.missing == 0
+            && self.unexpected == 0
+            && self.skipped == 0
+            && self.failed == 0
+    }
+}
+
 /// Aggregate results from a full golden comparison run.
 #[derive(Debug, Default)]
 pub struct ComparisonReport {
@@ -16,8 +43,8 @@ pub struct ComparisonReport {
     pub l1_results: Vec<L1Result>,
     pub l2_results: Vec<L2Result>,
     pub l3_results: Vec<L3Result>,
-    /// Fixtures that were skipped (e.g., no engine logits for regression).
-    pub skipped_l2: Vec<String>,
+    pub lifecycle: LifecycleTotals,
+    pub failures: Vec<String>,
 }
 
 impl ComparisonReport {
@@ -30,7 +57,10 @@ impl ComparisonReport {
     }
 
     pub fn overall_passed(&self) -> bool {
-        self.l1_passed() && self.l2_passed()
+        (!self.l1_results.is_empty() || !self.l2_results.is_empty())
+            && self.l1_passed()
+            && self.l2_passed()
+            && self.lifecycle.release_passed()
     }
 }
 
@@ -53,6 +83,25 @@ pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration)
     }
     println!();
 
+    println!("── Fixture lifecycle ──");
+    println!(
+        "  expected={} discovered={} generated={} compared={} skipped={} failed={}",
+        report.lifecycle.expected,
+        report.lifecycle.discovered,
+        report.lifecycle.generated,
+        report.lifecycle.compared,
+        report.lifecycle.skipped,
+        report.lifecycle.failed,
+    );
+    println!(
+        "  missing={} unexpected={}",
+        report.lifecycle.missing, report.lifecycle.unexpected,
+    );
+    for failure in &report.failures {
+        println!("  ✗ {failure}");
+    }
+    println!();
+
     // ── L1 ──────────────────────────────────────────────
     print_l1_section(report);
 
@@ -70,8 +119,20 @@ pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration)
 
     // ── Summary ─────────────────────────────────────────
     println!("══════════════════════════════════════════════════");
-    let l1_status = if report.l1_passed() { "PASS" } else { "FAIL" };
-    let l2_status = if report.l2_passed() { "PASS" } else { "FAIL" };
+    let l1_status = if report.l1_results.is_empty() {
+        "NOT RUN"
+    } else if report.l1_passed() {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let l2_status = if report.l2_results.is_empty() {
+        "NOT RUN"
+    } else if report.l2_passed() {
+        "PASS"
+    } else {
+        "FAIL"
+    };
     let overall = if report.overall_passed() {
         "PASS"
     } else {
@@ -79,9 +140,6 @@ pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration)
     };
     println!("  L1 (token match):   {}", l1_status);
     println!("  L2 (logits):        {}", l2_status);
-    if !report.skipped_l2.is_empty() {
-        println!("  L2 skipped:         {}", report.skipped_l2.join(", "));
-    }
     println!("  ────────────────────────────────────────");
     println!("  OVERALL:            {}", overall);
     println!("══════════════════════════════════════════════");
@@ -135,6 +193,8 @@ fn print_l2_section(report: &ComparisonReport) {
 #[derive(Serialize)]
 struct JsonReportEntry<'a> {
     tolerance: &'a ToleranceCalibration,
+    lifecycle: &'a LifecycleTotals,
+    failures: &'a [String],
     l1: Vec<JsonL1Entry>,
     l2: Vec<JsonL2Entry>,
     overall: bool,
@@ -163,6 +223,8 @@ struct JsonL2Entry {
 pub fn json_report(report: &ComparisonReport, tolerance: &ToleranceCalibration) -> String {
     let data = JsonReportEntry {
         tolerance,
+        lifecycle: &report.lifecycle,
+        failures: &report.failures,
         l1: report
             .l1_results
             .iter()
@@ -190,4 +252,70 @@ pub fn json_report(report: &ComparisonReport, tolerance: &ToleranceCalibration) 
     };
     serde_json::to_string_pretty(&data)
         .unwrap_or_else(|e| format!("{{ \"error\": \"serialization failed: {e}\" }}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{json_report, ComparisonReport, LifecycleTotals};
+    use crate::types::ToleranceCalibration;
+
+    #[test]
+    fn empty_comparison_set_fails_closed() {
+        let report = ComparisonReport::default();
+
+        assert!(!report.overall_passed());
+    }
+
+    #[test]
+    fn complete_lifecycle_is_release_accepted() {
+        let totals = LifecycleTotals {
+            expected: 2,
+            discovered: 2,
+            generated: 2,
+            compared: 2,
+            missing: 0,
+            unexpected: 0,
+            skipped: 0,
+            failed: 0,
+        };
+
+        assert!(totals.release_passed());
+    }
+
+    #[test]
+    fn json_report_contains_exact_lifecycle_totals() {
+        let report = ComparisonReport {
+            lifecycle: LifecycleTotals {
+                expected: 8,
+                discovered: 7,
+                generated: 6,
+                compared: 5,
+                missing: 2,
+                unexpected: 1,
+                skipped: 1,
+                failed: 3,
+            },
+            ..ComparisonReport::default()
+        };
+        let tolerance = ToleranceCalibration {
+            atol: 0.01,
+            observed_max_abs_diff: 0.005,
+            calibration_factor: 2.0,
+            method: "test".to_string(),
+        };
+
+        let json: serde_json::Value =
+            serde_json::from_str(&json_report(&report, &tolerance)).unwrap();
+
+        assert_eq!(json["lifecycle"]["expected"], 8);
+        assert_eq!(json["lifecycle"]["discovered"], 7);
+        assert_eq!(json["lifecycle"]["generated"], 6);
+        assert_eq!(json["lifecycle"]["compared"], 5);
+        assert_eq!(json["lifecycle"]["missing"], 2);
+        assert_eq!(json["lifecycle"]["unexpected"], 1);
+        assert_eq!(json["lifecycle"]["skipped"], 1);
+        assert_eq!(json["lifecycle"]["failed"], 3);
+        assert_eq!(json["overall"], false);
+    }
 }

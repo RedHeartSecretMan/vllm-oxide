@@ -33,8 +33,12 @@ cd tools/golden-gen
 uv run python -m golden_gen generate
 ```
 
-This loads both oracles (transformers + vLLM), runs all 25 prompts, and writes
-`output/manifest.json` + `output/*.safetensors`. Expect ~5-15 minutes on an A10.
+This loads both oracles (transformers + vLLM), discovers all canonical, batch,
+and regression cases, and writes `output/manifest.json` +
+`output/*.safetensors`. The five canonical prompt specifications flatten to
+eight fixture cases because the batch corpus contains four sub-prompts; with
+20 regression cases and two oracle artifacts per case, a complete run produces
+56 fixture files. Expect ~5-15 minutes on an A10.
 
 Options:
 
@@ -42,7 +46,7 @@ Options:
 |------|-------------|
 | `--dry-run` | Use fake oracle (no GPU, no model download) — for smoke testing |
 | `--output-dir PATH` | Output directory (default: `./output`) |
-| `--only-category {canonical,regression}` | Run only one prompt category |
+| `--only-category {canonical,regression}` | Exploratory partial generation; cannot satisfy the release gate |
 
 ### 2. Calibrate tolerance after generation
 
@@ -51,8 +55,10 @@ cd tools/golden-gen
 uv run python -m golden_gen calibrate --manifest-dir ./output
 ```
 
-Computes `atol` / `rtol` from the oracle pair, produces the regression skip map,
-and updates `manifest.json` in place.
+Validates every declared reference/baseline pair, computes `atol` from the
+oracle pair, produces the regression skip map, records the baseline artifacts
+consumed as calibration evidence, and updates `manifest.json` in place. A
+missing pair, empty comparison set, or unsupported tensor shape exits non-zero.
 
 ```bash
 uv run python -m golden_gen --help   # full usage
@@ -65,8 +71,9 @@ cd tools/golden-gen
 uv run python -m golden_gen generate --dry-run
 ```
 
-Produces a valid fake manifest and synthetic `.safetensors` fixtures without loading
-any model or GPU.
+Produces a schema-valid but uncalibrated fake manifest and synthetic
+`.safetensors` fixtures without loading any model or GPU. It exercises lifecycle
+plumbing only and is never publishable release evidence.
 
 ### Testing (CPU-only)
 
@@ -83,7 +90,7 @@ All unit tests run on CPU and do not require a GPU.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | int | Manifest format version (currently 1) |
+| `schema_version` | int | Manifest format version (currently 2) |
 | `generated_at` | ISO 8601 | UTC timestamp of generation |
 | `model.id` | str | HuggingFace model ID (`Qwen/Qwen3-0.6B`) |
 | `model.revision` | str | Git revision (commit hash) of the model weights |
@@ -100,8 +107,22 @@ All unit tests run on CPU and do not require a GPU.
 | `tolerance.observed_max_abs_diff` | float | Maximum observed absolute difference across oracle pair |
 | `tolerance.calibration_factor` | float | Safety factor applied (2.0) |
 | `tolerance.method` | str | Description of calibration method |
+| `expected_fixtures` | list[object] | Independent contract for every required oracle artifact |
+| `calibrated_fixtures` | list[str] | Baseline fixture IDs successfully consumed by calibration |
 | `regression_skip_map` | dict | Prompt → list of token positions to skip during L1 regression |
 | `fixtures` | list[object] | List of `FixtureMetadata` records |
+
+Each `expected_fixtures` entry declares the concrete `fixture_id`, `prompt_id`,
+fixture `family` (`canonical`, `batch`, or `regression`), immutable
+`model_revision`, model `dtype`, oracle name and role (`reference` or
+`baseline`), required comparison (`l1`, `l1_l2`, or `calibration`), and exact
+filename. Transformers is always the reference; vLLM is always baseline
+calibration evidence and never a second pass/fail truth.
+
+The generator prints exact `expected`, `discovered`, `generated`, `compared`,
+`skipped`, and `failed` totals. Partial `--only-category` runs remain explicit
+through non-zero skipped coverage. Any oracle exception exits non-zero and does
+not publish a new manifest.
 
 Each `FixtureMetadata` entry:
 

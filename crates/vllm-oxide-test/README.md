@@ -18,6 +18,12 @@ generator (`tools/golden-gen/`):
 | **L2** | Per-step logits tensor comparison (atol+rtol) | Always |
 | **L3** | Per-layer activations (debug only) | `--debug` flag |
 
+Before any GPU comparison, a CPU preflight matches the schema-v2 manifest to
+all canonical, flattened batch, and regression prompts; verifies asset names,
+SHA-256 digests, tensor sets, dtypes, and shapes; and classifies the two oracle
+roles. Only Transformers reference artifacts feed correctness comparisons.
+vLLM artifacts count only after the manifest records successful calibration.
+
 ## Usage
 
 ### Prerequisites
@@ -67,9 +73,20 @@ Golden fixtures are described by a `manifest.json` (produced by
 `tools/golden-gen/`). The manifest records:
 
 - **Provenance**: model ID, revision, architecture, dtype
+- **Expected fixtures**: family, immutable model identity, oracle role, and
+  required comparison for every artifact
 - **Tolerances**: calibrated `atol` and `rtol` from oracle cross-validation
 - **Known deviations**: documented disagreements between oracle implementations
 - **Fixtures**: per-file metadata including SHA-256 hashes
+
+The report includes exact `expected`, `discovered`, `generated`, `compared`,
+`missing`, `unexpected`, `skipped`, and `failed` totals. Release acceptance is
+fail-closed: the set must be non-empty, every expected fixture must reach its
+declared comparison, and missing/unexpected/skipped/failed must all be zero.
+Malformed manifests, unmatched identifiers, unsupported fixture shapes, and
+empty comparison sets exit non-zero. `--l1-only` or `--l2-only` is exploratory
+when it omits a declared comparison and therefore cannot satisfy the release
+gate.
 
 ### L1: Token-sequence exact match
 
@@ -120,6 +137,7 @@ crates/vllm-oxide-test/
     ├── main.rs        # CLI entrypoint
     ├── types.rs       # Manifest schema types (matches Python schema.py)
     ├── manifest.rs    # Manifest parsing + fixture loading
+    ├── lifecycle.rs   # Discovery, asset preflight, and exact coverage accounting
     ├── download.rs    # GitHub Release asset download + SHA-256 verification
     ├── l1.rs          # L1: token-sequence exact match with near-tie skipping
     ├── l2.rs          # L2: logits tensor comparison (atol+rtol)

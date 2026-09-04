@@ -94,7 +94,7 @@ fn main() -> Result<()> {
         anyhow::bail!("either --manifest or --release-tag must be provided");
     };
 
-    let canonical_prompts = prompts::load_canonical_prompts(&cli.prompts_dir)?;
+    let all_prompts = prompts::load_all_prompts(&cli.prompts_dir)?;
 
     // 2. Run all comparisons via the driver.
     let opts = DriverOptions {
@@ -107,7 +107,7 @@ fn main() -> Result<()> {
         &golden_manifest,
         &fixture_dir,
         &cli.model_path,
-        &canonical_prompts,
+        &all_prompts,
         &opts,
     )?;
 

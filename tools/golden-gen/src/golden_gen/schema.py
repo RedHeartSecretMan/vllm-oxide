@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PromptCategory = Literal["canonical", "regression"]
 OracleName = Literal["transformers", "vllm", "fake"]
+FixtureFamily = Literal["canonical", "batch", "regression"]
+OracleRole = Literal["reference", "baseline"]
+RequiredComparison = Literal["l1", "l1_l2", "calibration"]
 
 
 class PromptSpec(BaseModel):
@@ -29,6 +32,40 @@ class PromptSpec(BaseModel):
         """Whether this prompt exercises the batch/continuous-batching path."""
         return self.sub_prompts is not None and len(self.sub_prompts) > 1
 
+    @model_validator(mode="after")
+    def validate_batch_shape(self) -> Self:
+        if self.sub_prompts is not None and not 2 <= len(self.sub_prompts) <= 26:
+            raise ValueError("sub_prompts must contain 2 to 26 prompts")
+        if self.sub_prompts is not None and self.category != "canonical":
+            raise ValueError("batch prompts must belong to the canonical corpus")
+        return self
+
+
+class DiscoveredFixture(BaseModel):
+    """One concrete prompt case discovered from the prompt corpora."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    prompt_id: str = Field(min_length=1)
+    family: FixtureFamily
+    prompt: str
+
+
+class ExpectedFixture(BaseModel):
+    """Manifest contract for one required oracle artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fixture_id: str = Field(min_length=1)
+    prompt_id: str = Field(min_length=1)
+    family: FixtureFamily
+    model_revision: str = Field(min_length=1)
+    dtype: str = Field(min_length=1)
+    oracle: OracleName
+    oracle_role: OracleRole
+    required_comparison: RequiredComparison
+    filename: str = Field(min_length=1)
+
 
 class OracleVersions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -43,7 +80,7 @@ class FixtureMetadata(BaseModel):
     prompt_id: str
     category: PromptCategory
     oracle: OracleName
-    num_tokens: int
+    num_tokens: int = Field(gt=0)
     logits_dtype: Literal["float32"]
     logits_shape: tuple[int, int]
     sha256: str
@@ -64,11 +101,11 @@ class ModelInfo(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: str
-    revision: str
-    arch: str
-    dtype: str
-    vocab_size: int
+    id: str = Field(min_length=1)
+    revision: str = Field(min_length=1)
+    arch: str = Field(min_length=1)
+    dtype: str = Field(min_length=1)
+    vocab_size: int = Field(gt=0)
 
 
 class GenerationConfig(BaseModel):
@@ -100,14 +137,103 @@ class Manifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     generated_at: datetime
     model: ModelInfo
     oracle_versions: OracleVersions
     generation: GenerationConfig
     tolerance: ToleranceCalibration
+    expected_fixtures: list[ExpectedFixture] = Field(min_length=1)
     fixtures: list[FixtureMetadata]
-    regression_skip_map: dict[str, list[int]] = {}
+    calibrated_fixtures: list[str] = Field(default_factory=list)
+    regression_skip_map: dict[str, list[int]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def generated_fixtures_match_expectations(self) -> Self:
+        fixture_ids = [entry.fixture_id for entry in self.expected_fixtures]
+        if len(fixture_ids) != len(set(fixture_ids)):
+            raise ValueError("duplicate expected fixture identifier")
+        for entry in self.expected_fixtures:
+            if not entry.prompt_id.replace("_", "").replace("-", "").isalnum() or not (
+                entry.prompt_id.isascii()
+            ):
+                raise ValueError(f"unsupported fixture identifier: {entry.prompt_id}")
+            canonical_id = f"{entry.prompt_id}.{entry.oracle}"
+            if entry.fixture_id != canonical_id or entry.filename != f"{canonical_id}.safetensors":
+                raise ValueError(
+                    f"non-canonical fixture identifier or filename: {entry.fixture_id}"
+                )
+            if entry.model_revision != self.model.revision or entry.dtype != self.model.dtype:
+                raise ValueError(
+                    f"fixture {entry.fixture_id} model revision or dtype does not match manifest"
+                )
+            reference_comparison = "l1" if entry.family == "regression" else "l1_l2"
+            valid_reference = (
+                entry.oracle == "transformers"
+                and entry.oracle_role == "reference"
+                and entry.required_comparison == reference_comparison
+            )
+            valid_baseline = (
+                entry.oracle == "vllm"
+                and entry.oracle_role == "baseline"
+                and entry.required_comparison == "calibration"
+            )
+            if not (valid_reference or valid_baseline):
+                raise ValueError(f"invalid oracle role contract: {entry.fixture_id}")
+        roles_by_prompt: dict[str, set[str]] = {}
+        families_by_prompt: dict[str, set[str]] = {}
+        for entry in self.expected_fixtures:
+            roles_by_prompt.setdefault(entry.prompt_id, set()).add(entry.oracle_role)
+            families_by_prompt.setdefault(entry.prompt_id, set()).add(entry.family)
+        for prompt_id, roles in roles_by_prompt.items():
+            if roles != {"reference", "baseline"}:
+                raise ValueError(
+                    f"fixture {prompt_id} must declare reference and baseline oracle roles"
+                )
+            if len(families_by_prompt[prompt_id]) != 1:
+                raise ValueError(f"fixture {prompt_id} declares inconsistent families")
+        expected = {
+            (entry.prompt_id, entry.oracle, entry.filename): entry
+            for entry in self.expected_fixtures
+        }
+        generated_ids = [(fixture.prompt_id, fixture.oracle) for fixture in self.fixtures]
+        if len(generated_ids) != len(set(generated_ids)):
+            raise ValueError("duplicate generated fixture identifier")
+        if len(self.calibrated_fixtures) != len(set(self.calibrated_fixtures)):
+            raise ValueError("duplicate calibrated fixture identifier")
+        expected_by_id = {entry.fixture_id: entry for entry in self.expected_fixtures}
+        generated_by_id = {f"{fixture.prompt_id}.{fixture.oracle}" for fixture in self.fixtures}
+        for fixture_id in self.calibrated_fixtures:
+            calibrated = expected_by_id.get(fixture_id)
+            if calibrated is None:
+                raise ValueError(f"unmatched calibrated fixture: {fixture_id}")
+            if calibrated.oracle_role != "baseline" or fixture_id not in generated_by_id:
+                raise ValueError(f"invalid baseline calibration evidence: {fixture_id}")
+        for fixture in self.fixtures:
+            key = (fixture.prompt_id, fixture.oracle, fixture.filename)
+            if key not in expected:
+                raise ValueError(
+                    "unmatched generated fixture: "
+                    f"{fixture.prompt_id}.{fixture.oracle} ({fixture.filename})"
+                )
+            expected_category = (
+                "regression" if expected[key].family == "regression" else "canonical"
+            )
+            if fixture.category != expected_category:
+                raise ValueError(
+                    f"generated fixture {fixture.prompt_id} family does not match expectation"
+                )
+        regression_ids = {
+            entry.prompt_id
+            for entry in self.expected_fixtures
+            if entry.family == "regression" and entry.oracle_role == "reference"
+        }
+        for prompt_id, positions in self.regression_skip_map.items():
+            if prompt_id not in regression_ids:
+                raise ValueError(f"unmatched regression skip identifier: {prompt_id}")
+            if any(position < 0 for position in positions) or len(positions) != len(set(positions)):
+                raise ValueError(f"invalid regression skip positions: {prompt_id}")
+        return self
 
     def to_json(self, path: str | Path) -> None:
         """Serialize to JSON file."""

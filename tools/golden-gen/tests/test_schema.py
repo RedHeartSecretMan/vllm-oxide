@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from golden_gen.schema import (
+    ExpectedFixture,
     FixtureMetadata,
     GenerationConfig,
     Manifest,
@@ -86,15 +87,15 @@ class TestPromptSpec:
         assert spec.is_batch is True
         assert len(spec.sub_prompts) == 4
 
-    def test_is_batch_false_with_single_sub_prompt(self):
-        spec = PromptSpec(
-            id="test",
-            category="canonical",
-            prompt="test",
-            description="test",
-            sub_prompts=["only one"],
-        )
-        assert spec.is_batch is False
+    def test_single_sub_prompt_is_an_unsupported_batch_shape(self):
+        with pytest.raises(ValidationError, match="sub_prompts must contain 2 to 26"):
+            PromptSpec(
+                id="test",
+                category="canonical",
+                prompt="test",
+                description="test",
+                sub_prompts=["only one"],
+            )
 
     def test_sub_prompts_roundtrip_json(self):
         spec = PromptSpec(
@@ -199,8 +200,32 @@ class TestManifest:
             sha256="abc123",
             filename="canonical_01.transformers.safetensors",
         )
+        expected = [
+            ExpectedFixture(
+                fixture_id="canonical_01.transformers",
+                prompt_id="canonical_01",
+                family="canonical",
+                model_revision="abc123",
+                dtype="bfloat16",
+                oracle="transformers",
+                oracle_role="reference",
+                required_comparison="l1_l2",
+                filename="canonical_01.transformers.safetensors",
+            ),
+            ExpectedFixture(
+                fixture_id="canonical_01.vllm",
+                prompt_id="canonical_01",
+                family="canonical",
+                model_revision="abc123",
+                dtype="bfloat16",
+                oracle="vllm",
+                oracle_role="baseline",
+                required_comparison="calibration",
+                filename="canonical_01.vllm.safetensors",
+            ),
+        ]
         manifest = Manifest(
-            schema_version=1,
+            schema_version=2,
             generated_at=datetime.now(UTC),
             model=ModelInfo(
                 id="Qwen/Qwen3-0.6B",
@@ -217,12 +242,13 @@ class TestManifest:
                 attn_implementation="eager",
             ),
             tolerance=tolerance,
+            expected_fixtures=expected,
             fixtures=[fixture],
         )
         path = tmp_path / "manifest.json"
         manifest.to_json(path)
         restored = Manifest.from_json(path)
-        assert restored.schema_version == 1
+        assert restored.schema_version == 2
         assert len(restored.fixtures) == 1
         assert restored.fixtures[0].sha256 == "abc123"
         assert restored.tolerance.atol == 0.01

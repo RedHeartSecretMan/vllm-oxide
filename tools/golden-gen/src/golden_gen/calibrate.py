@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -9,8 +10,8 @@ from numpy.typing import NDArray
 
 from golden_gen.config import TOLERANCE_CALIBRATION_FACTOR
 from golden_gen.io import load_fixture
-from golden_gen.manifest import read_manifest, write_manifest
-from golden_gen.schema import FixtureMetadata, Manifest, ToleranceCalibration
+from golden_gen.manifest import read_manifest
+from golden_gen.schema import ExpectedFixture, FixtureMetadata, Manifest, ToleranceCalibration
 
 
 def _group_fixtures_by_oracle(
@@ -31,6 +32,74 @@ def _group_fixtures_by_oracle(
             continue
         grouped.setdefault(f.prompt_id, {})[f.oracle] = f
     return grouped
+
+
+def validate_calibration_coverage(manifest_dir: Path, manifest: Manifest) -> list[str]:
+    """Validate every baseline/reference pair and return calibrated baseline IDs."""
+    generated = {(fixture.prompt_id, fixture.oracle): fixture for fixture in manifest.fixtures}
+    calibrated: list[str] = []
+    for expected in manifest.expected_fixtures:
+        if expected.oracle_role != "baseline":
+            continue
+        reference = generated.get((expected.prompt_id, "transformers"))
+        baseline = generated.get((expected.prompt_id, "vllm"))
+        if reference is None or baseline is None:
+            raise ValueError(f"missing oracle pair for calibration fixture {expected.fixture_id}")
+        _validate_fixture_shape(manifest_dir, manifest, expected, reference)
+        _validate_fixture_shape(manifest_dir, manifest, expected, baseline)
+        calibrated.append(expected.fixture_id)
+    if not calibrated:
+        raise ValueError("empty calibration comparison set")
+    return sorted(calibrated)
+
+
+def _validate_fixture_shape(
+    manifest_dir: Path,
+    manifest: Manifest,
+    expected: ExpectedFixture,
+    metadata: FixtureMetadata,
+) -> None:
+    path = manifest_dir / metadata.filename
+    actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_sha256 != metadata.sha256:
+        raise ValueError(f"fixture checksum mismatch for {metadata.filename}")
+    data = load_fixture(path)
+    token_ids = data.get("token_ids")
+    prompt_tokens = data.get("n_prompt_tokens")
+    if (
+        token_ids is None
+        or token_ids.dtype != np.int64
+        or token_ids.shape != (metadata.num_tokens,)
+    ):
+        raise ValueError(f"unsupported token_ids shape for {metadata.filename}")
+    if prompt_tokens is None or prompt_tokens.dtype != np.int64 or prompt_tokens.shape != ():
+        raise ValueError(f"unsupported n_prompt_tokens shape for {metadata.filename}")
+    if expected.family in ("canonical", "batch"):
+        logits = data.get("logits")
+        required_shape = (metadata.num_tokens, manifest.model.vocab_size)
+        if (
+            set(data) != {"token_ids", "n_prompt_tokens", "logits"}
+            or logits is None
+            or logits.dtype != np.float32
+            or logits.shape != required_shape
+            or metadata.logits_shape != required_shape
+        ):
+            raise ValueError(f"unsupported canonical fixture shape for {metadata.filename}")
+    else:
+        top5_indices = data.get("top5_indices")
+        top5_logits = data.get("top5_logits")
+        required_shape = (metadata.num_tokens, 5)
+        if (
+            set(data) != {"token_ids", "n_prompt_tokens", "top5_indices", "top5_logits"}
+            or top5_indices is None
+            or top5_indices.dtype != np.int64
+            or top5_indices.shape != required_shape
+            or top5_logits is None
+            or top5_logits.dtype != np.float32
+            or top5_logits.shape != required_shape
+            or metadata.logits_shape != (0, 0)
+        ):
+            raise ValueError(f"unsupported regression fixture shape for {metadata.filename}")
 
 
 def pairwise_max_abs_diff(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
@@ -114,7 +183,9 @@ def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
         )
         per_prompt_max_abs.append(max_abs)
 
-    observed_max_abs_diff = max(per_prompt_max_abs) if per_prompt_max_abs else 0.0
+    if not per_prompt_max_abs:
+        raise ValueError("empty calibration comparison set")
+    observed_max_abs_diff = max(per_prompt_max_abs)
     atol = TOLERANCE_CALIBRATION_FACTOR * observed_max_abs_diff
     method = (
         f"{TOLERANCE_CALIBRATION_FACTOR}x max pairwise per-element |diff| "

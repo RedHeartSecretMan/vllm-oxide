@@ -50,8 +50,7 @@ pub fn download_release(
     tracing::info!("downloading manifest.json");
 
     let manifest_bytes = download_bytes(&agent, &manifest_url)?;
-    let manifest: Manifest =
-        serde_json::from_slice(&manifest_bytes).context("parsing manifest.json")?;
+    let manifest = manifest::parse_manifest_bytes(&manifest_bytes, "GitHub release manifest")?;
 
     // 3. Create cache dir and write manifest.
     std::fs::create_dir_all(cache_dir)

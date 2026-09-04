@@ -7,11 +7,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from golden_gen.calibrate import calibrate_from_fixtures, compute_regression_skip_map
+from golden_gen.calibrate import (
+    calibrate_from_fixtures,
+    compute_regression_skip_map,
+    validate_calibration_coverage,
+)
 from golden_gen.generate import run_all
-from golden_gen.manifest import build_manifest, write_manifest
+from golden_gen.manifest import build_expected_fixtures, build_manifest, write_manifest
 from golden_gen.oracles.fake import FakeOracle
-from golden_gen.prompts import load_prompts
+from golden_gen.prompts import discover_fixtures, load_prompts
 from golden_gen.schema import PromptCategory, ToleranceCalibration
 
 
@@ -90,6 +94,7 @@ def _run_generate(args: argparse.Namespace) -> int:
 
     prompts_dir = _resolve_prompts_dir()
     all_prompts = load_prompts(prompts_dir)
+    expected_fixtures = build_expected_fixtures(discover_fixtures(all_prompts))
 
     only_category: PromptCategory | None = args.only_category
     if only_category:
@@ -127,21 +132,42 @@ def _run_generate(args: argparse.Namespace) -> int:
         if existing.tolerance.atol > 0.0:
             existing_tolerance = existing.tolerance
 
+    failed_oracles: list[str] = []
     for name, oracle_cls in oracle_specs:
         oracle = oracle_cls()
         if args.dry_run:
             oracle.name = name
         try:
             fixtures = run_all(
-                [oracle], all_prompts, output_dir, only_category=only_category,
+                [oracle],
+                all_prompts,
+                output_dir,
+                only_category=only_category,
             )
             new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
             all_fixtures = [f for f in all_fixtures if (f.oracle, f.prompt_id) not in new_keys]
             all_fixtures.extend(fixtures)
         except Exception as e:
             print(f"ERROR: oracle {name} failed: {e}", file=sys.stderr)
+            failed_oracles.append(name)
         finally:
             oracle.close()
+
+    if failed_oracles:
+        failed = sum(1 for fixture in expected_fixtures if fixture.oracle in failed_oracles)
+        skipped = max(len(expected_fixtures) - len(all_fixtures) - failed, 0)
+        print(
+            "Lifecycle totals: "
+            f"expected={len(expected_fixtures)} discovered={len(expected_fixtures)} "
+            f"generated={len(all_fixtures)} compared=0 skipped={skipped} failed={failed}",
+            file=sys.stderr,
+        )
+        print(
+            "ERROR: fixture generation incomplete; manifest was not published "
+            f"(failed oracles: {', '.join(failed_oracles)})",
+            file=sys.stderr,
+        )
+        return 1
 
     print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
 
@@ -158,12 +184,23 @@ def _run_generate(args: argparse.Namespace) -> int:
     manifest = build_manifest(
         fixtures=all_fixtures,
         tolerance=tolerance,
+        expected_fixtures=expected_fixtures,
     )
     manifest_path = output_dir / "manifest.json"
     write_manifest(manifest, manifest_path)
     print(f"Manifest written to {manifest_path}")
+    generated = len(all_fixtures)
+    expected = len(expected_fixtures)
+    print(
+        "Lifecycle totals: "
+        f"expected={expected} discovered={expected} generated={generated} "
+        f"compared=0 skipped={expected - generated} failed=0"
+    )
     if existing_tolerance is None:
-        print("NOTE: tolerance is not yet calibrated. Run `golden-gen calibrate --manifest-dir <dir>` to fill it in.")
+        print(
+            "NOTE: tolerance is not yet calibrated. Run "
+            "`golden-gen calibrate --manifest-dir <dir>` to fill it in."
+        )
 
     return 0
 
@@ -179,6 +216,7 @@ def _run_calibrate(args: argparse.Namespace) -> int:
     from golden_gen.manifest import read_manifest
 
     manifest = read_manifest(manifest_path)
+    calibrated_fixtures = validate_calibration_coverage(manifest_dir, manifest)
     tolerance = calibrate_from_fixtures(manifest_dir)
     print(
         f"Tolerance calibrated: atol={tolerance.atol:.6f}, "
@@ -194,6 +232,7 @@ def _run_calibrate(args: argparse.Namespace) -> int:
         print("Regression skip map: empty (all token IDs match between oracles)")
 
     manifest.tolerance = tolerance
+    manifest.calibrated_fixtures = calibrated_fixtures
     manifest.regression_skip_map = skip_map
     write_manifest(manifest, manifest_path)
     print(f"Updated manifest written to {manifest_path}")

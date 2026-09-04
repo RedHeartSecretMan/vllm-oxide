@@ -16,6 +16,8 @@ from golden_gen.config import (
     VOCAB_SIZE,
 )
 from golden_gen.schema import (
+    DiscoveredFixture,
+    ExpectedFixture,
     FixtureMetadata,
     GenerationConfig,
     Manifest,
@@ -23,6 +25,32 @@ from golden_gen.schema import (
     OracleVersions,
     ToleranceCalibration,
 )
+
+
+def build_expected_fixtures(discovered: list[DiscoveredFixture]) -> list[ExpectedFixture]:
+    """Declare every required reference and baseline artifact for discovered cases."""
+    expected: list[ExpectedFixture] = []
+    for case in discovered:
+        reference_comparison = "l1" if case.family == "regression" else "l1_l2"
+        for oracle, role, comparison in (
+            ("transformers", "reference", reference_comparison),
+            ("vllm", "baseline", "calibration"),
+        ):
+            fixture_id = f"{case.prompt_id}.{oracle}"
+            expected.append(
+                ExpectedFixture(
+                    fixture_id=fixture_id,
+                    prompt_id=case.prompt_id,
+                    family=case.family,
+                    model_revision=MODEL_REVISION,
+                    dtype=MODEL_DTYPE,
+                    oracle=oracle,
+                    oracle_role=role,
+                    required_comparison=comparison,
+                    filename=f"{fixture_id}.safetensors",
+                )
+            )
+    return expected
 
 
 def get_oracle_versions() -> OracleVersions:
@@ -49,6 +77,7 @@ def build_manifest(
     fixtures: list[FixtureMetadata],
     tolerance: ToleranceCalibration,
     *,
+    expected_fixtures: list[ExpectedFixture] | None = None,
     generated_at: datetime | None = None,
     regression_skip_map: dict[str, list[int]] | None = None,
 ) -> Manifest:
@@ -67,7 +96,7 @@ def build_manifest(
         generated_at = datetime.now(UTC)
 
     return Manifest(
-        schema_version=1,
+        schema_version=2,
         generated_at=generated_at,
         model=ModelInfo(
             id=MODEL_ID,
@@ -84,6 +113,7 @@ def build_manifest(
             attn_implementation=ATTN_IMPLEMENTATION,
         ),
         tolerance=tolerance,
+        expected_fixtures=expected_fixtures or [],
         fixtures=fixtures,
         regression_skip_map=regression_skip_map or {},
     )

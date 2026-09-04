@@ -1,10 +1,249 @@
 from datetime import UTC, datetime
 
+import pytest
+from pydantic import ValidationError
+
 from golden_gen.manifest import build_manifest, get_oracle_versions, read_manifest, write_manifest
-from golden_gen.schema import FixtureMetadata, OracleVersions, ToleranceCalibration
+from golden_gen.schema import (
+    ExpectedFixture,
+    FixtureMetadata,
+    Manifest,
+    OracleVersions,
+    ToleranceCalibration,
+)
+
+MODEL_REVISION = "7e4ae267688d671ddfca3122e4528ee980cf3234"
+
+
+def expected_pair() -> list[ExpectedFixture]:
+    return [
+        ExpectedFixture(
+            fixture_id="canonical_01.transformers",
+            prompt_id="canonical_01",
+            family="canonical",
+            model_revision=MODEL_REVISION,
+            dtype="bfloat16",
+            oracle="transformers",
+            oracle_role="reference",
+            required_comparison="l1_l2",
+            filename="canonical_01.transformers.safetensors",
+        ),
+        ExpectedFixture(
+            fixture_id="canonical_01.vllm",
+            prompt_id="canonical_01",
+            family="canonical",
+            model_revision=MODEL_REVISION,
+            dtype="bfloat16",
+            oracle="vllm",
+            oracle_role="baseline",
+            required_comparison="calibration",
+            filename="canonical_01.vllm.safetensors",
+        ),
+    ]
 
 
 class TestManifest:
+    def test_empty_expected_fixture_set_is_rejected(self):
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+
+        with pytest.raises(ValidationError, match="expected_fixtures"):
+            build_manifest(fixtures=[], tolerance=tolerance)
+
+    def test_generated_fixture_identifier_must_match_an_expectation(self):
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+        unexpected = FixtureMetadata(
+            prompt_id="canonical_99",
+            category="canonical",
+            oracle="transformers",
+            num_tokens=1,
+            logits_dtype="float32",
+            logits_shape=(1, 151936),
+            sha256="abc123",
+            filename="canonical_99.transformers.safetensors",
+        )
+
+        with pytest.raises(ValidationError, match="unmatched generated fixture"):
+            build_manifest(
+                fixtures=[unexpected],
+                expected_fixtures=expected_pair(),
+                tolerance=tolerance,
+            )
+
+    def test_duplicate_expected_fixture_identifier_is_rejected(self):
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+        expected = ExpectedFixture(
+            fixture_id="canonical_01.transformers",
+            prompt_id="canonical_01",
+            family="canonical",
+            model_revision="7e4ae267688d671ddfca3122e4528ee980cf3234",
+            dtype="bfloat16",
+            oracle="transformers",
+            oracle_role="reference",
+            required_comparison="l1_l2",
+            filename="canonical_01.transformers.safetensors",
+        )
+
+        with pytest.raises(ValidationError, match="duplicate expected fixture identifier"):
+            build_manifest(
+                fixtures=[],
+                expected_fixtures=[expected, expected.model_copy()],
+                tolerance=tolerance,
+            )
+
+    def test_unsupported_manifest_schema_version_is_rejected(self):
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+        manifest = build_manifest(
+            fixtures=[], expected_fixtures=expected_pair(), tolerance=tolerance
+        ).model_dump()
+        manifest["schema_version"] = 999
+
+        with pytest.raises(ValidationError, match="schema_version"):
+            Manifest.model_validate(manifest)
+
+    def test_oracle_name_role_and_comparison_must_be_consistent(self):
+        invalid = ExpectedFixture(
+            fixture_id="canonical_01.transformers",
+            prompt_id="canonical_01",
+            family="canonical",
+            model_revision="7e4ae267688d671ddfca3122e4528ee980cf3234",
+            dtype="bfloat16",
+            oracle="transformers",
+            oracle_role="baseline",
+            required_comparison="calibration",
+            filename="canonical_01.transformers.safetensors",
+        )
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+
+        with pytest.raises(ValidationError, match="oracle role contract"):
+            build_manifest(fixtures=[], expected_fixtures=[invalid], tolerance=tolerance)
+
+    def test_each_prompt_requires_reference_and_baseline_expectations(self):
+        reference_only = ExpectedFixture(
+            fixture_id="canonical_01.transformers",
+            prompt_id="canonical_01",
+            family="canonical",
+            model_revision="7e4ae267688d671ddfca3122e4528ee980cf3234",
+            dtype="bfloat16",
+            oracle="transformers",
+            oracle_role="reference",
+            required_comparison="l1_l2",
+            filename="canonical_01.transformers.safetensors",
+        )
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+
+        with pytest.raises(ValidationError, match="reference and baseline"):
+            build_manifest(
+                fixtures=[],
+                expected_fixtures=[reference_only],
+                tolerance=tolerance,
+            )
+
+    def test_expected_fixture_identity_must_match_manifest_model(self):
+        expected = expected_pair()
+        expected[1] = expected[1].model_copy(update={"model_revision": "moving-tag"})
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+
+        with pytest.raises(ValidationError, match="model revision or dtype"):
+            build_manifest(fixtures=[], expected_fixtures=expected, tolerance=tolerance)
+
+    def test_generated_fixture_family_must_match_expectation(self):
+        fixture = FixtureMetadata(
+            prompt_id="canonical_01",
+            category="regression",
+            oracle="transformers",
+            num_tokens=1,
+            logits_dtype="float32",
+            logits_shape=(0, 0),
+            sha256="abc123",
+            filename="canonical_01.transformers.safetensors",
+        )
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+
+        with pytest.raises(ValidationError, match="family does not match"):
+            build_manifest(
+                fixtures=[fixture],
+                expected_fixtures=expected_pair(),
+                tolerance=tolerance,
+            )
+
+    def test_duplicate_generated_fixture_identifier_is_rejected(self):
+        fixture = FixtureMetadata(
+            prompt_id="canonical_01",
+            category="canonical",
+            oracle="transformers",
+            num_tokens=1,
+            logits_dtype="float32",
+            logits_shape=(1, 151936),
+            sha256="abc123",
+            filename="canonical_01.transformers.safetensors",
+        )
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+
+        with pytest.raises(ValidationError, match="duplicate generated fixture identifier"):
+            build_manifest(
+                fixtures=[fixture, fixture.model_copy()],
+                expected_fixtures=expected_pair(),
+                tolerance=tolerance,
+            )
+
+    def test_expected_identifier_and_filename_are_canonical(self):
+        expected = expected_pair()
+        expected[0] = expected[0].model_copy(update={"fixture_id": "wrong"})
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+
+        with pytest.raises(ValidationError, match="non-canonical fixture identifier"):
+            build_manifest(fixtures=[], expected_fixtures=expected, tolerance=tolerance)
+
     def test_build_manifest_minimal(self):
         tolerance = ToleranceCalibration(
             atol=0.01,
@@ -26,10 +265,11 @@ class TestManifest:
         ]
         manifest = build_manifest(
             fixtures=fixtures,
+            expected_fixtures=expected_pair(),
             tolerance=tolerance,
             generated_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
-        assert manifest.schema_version == 1
+        assert manifest.schema_version == 2
         assert manifest.model.id == "Qwen/Qwen3-0.6B"
         assert manifest.model.arch == "Qwen3ForCausalLM"
         assert manifest.model.vocab_size == 151936
@@ -59,6 +299,7 @@ class TestManifest:
         ]
         manifest = build_manifest(
             fixtures=fixtures,
+            expected_fixtures=expected_pair(),
             tolerance=tolerance,
             generated_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )

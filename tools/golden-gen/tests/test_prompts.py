@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from golden_gen.prompts import load_canonical, load_prompts, load_regression
+from golden_gen.prompts import discover_fixtures, load_canonical, load_prompts, load_regression
+from golden_gen.schema import PromptSpec
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -75,3 +76,42 @@ class TestLoadPrompts:
         bad_file.write_text("{invalid json}\n")
         with pytest.raises(json.JSONDecodeError):
             load_canonical(tmp_path)
+
+    def test_discovery_rejects_missing_required_fixture_family(self):
+        prompts = [
+            PromptSpec(
+                id="canonical_01",
+                category="canonical",
+                prompt="hello",
+                description="single only",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="missing required fixture families"):
+            discover_fixtures(prompts)
+
+    def test_discovery_rejects_duplicate_flattened_identifiers(self):
+        prompts = [
+            PromptSpec(
+                id="batch_01a",
+                category="canonical",
+                prompt="collides",
+                description="single",
+            ),
+            PromptSpec(
+                id="batch_01",
+                category="canonical",
+                prompt="batch",
+                description="batch",
+                sub_prompts=["first", "second"],
+            ),
+            PromptSpec(
+                id="regression_01",
+                category="regression",
+                prompt="regression",
+                description="regression",
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="duplicate fixture identifier: batch_01a"):
+            discover_fixtures(prompts)
