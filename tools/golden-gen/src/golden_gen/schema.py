@@ -74,6 +74,91 @@ class OracleVersions(BaseModel):
     vllm: str
 
 
+class KernelPaths(BaseModel):
+    """Exact kernel identities used by the three correctness engines."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reference: Literal["transformers-4.57.6/torch-2.10.0/sdpa-math"]
+    baseline: Literal["vllm-0.18.1/flash-attn-v2/eager"]
+    candidate: Literal[
+        "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/"
+        "flash-attn-varlen+paged-windowed"
+    ]
+
+    @property
+    def comparison_scope(self) -> str:
+        return f"{self.reference}::vs::{self.candidate}"
+
+
+class WheelIdentity(BaseModel):
+    """One installed registry wheel bound to its lockfile digest."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    filename: str = Field(pattern=r"^[^/\\]+\.whl$")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RuntimeInfo(BaseModel):
+    """Pinned software and live release-host identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_mode: Literal["release", "dry-run"]
+    registry_install_mode: Literal["locked-wheels-only"]
+    pythonhashseed: Literal["0"]
+    cublas_workspace_config: Literal[":4096:8"]
+    python_version: str = Field(pattern=r"^3\.12\.\d+$")
+    torch_version: Literal["2.10.0"]
+    torch_cuda_version: Literal["12.8"]
+    transformers_version: Literal["4.57.6"]
+    vllm_version: Literal["0.18.1"]
+    xgrammar_version: Literal["0.2.3"]
+    triton_version: Literal["3.6.0"]
+    cuda_toolkit_version: Literal["13.2.51"]
+    rustc_version: str = Field(min_length=1)
+    nvidia_driver_version: str = Field(min_length=1)
+    gpu_name: str = Field(min_length=1)
+    compute_capability: Literal["8.9"]
+    os_kernel: str = Field(min_length=1)
+    generator_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    uv_lock_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    wheels: list[WheelIdentity] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_locked_wheels_and_host(self) -> Self:
+        expected = {
+            "torch": self.torch_version,
+            "transformers": self.transformers_version,
+            "vllm": self.vllm_version,
+            "xgrammar": self.xgrammar_version,
+            "triton": self.triton_version,
+        }
+        observed: dict[str, str] = {}
+        for wheel in self.wheels:
+            normalized = wheel.name.lower().replace("_", "-")
+            if normalized in observed:
+                raise ValueError(f"duplicate resolved wheel identity: {normalized}")
+            observed[normalized] = wheel.version
+        if any(observed.get(name) != version for name, version in expected.items()):
+            raise ValueError("runtime locked wheel set is incomplete or version-inconsistent")
+
+        if self.evidence_mode == "release":
+            live_values = (
+                self.rustc_version,
+                self.nvidia_driver_version,
+                self.gpu_name,
+                self.os_kernel,
+            )
+            forbidden = ("unknown", "fallback", "auto", "dry-run")
+            if any(any(word in value.lower() for word in forbidden) for value in live_values):
+                raise ValueError("release runtime contains an unknown or fallback host identity")
+        return self
+
+
 class FixtureMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -117,9 +202,19 @@ class ModelInfo(BaseModel):
 
     id: str = Field(min_length=1)
     revision: str = Field(min_length=1)
+    tokenizer_revision: str = Field(min_length=1)
+    config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tokenizer_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    weights_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     arch: str = Field(min_length=1)
     dtype: str = Field(min_length=1)
     vocab_size: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def tokenizer_uses_the_model_revision(self) -> Self:
+        if self.tokenizer_revision != self.revision:
+            raise ValueError("tokenizer_revision must equal the immutable model revision")
+        return self
 
 
 class GenerationConfig(BaseModel):
@@ -167,6 +262,8 @@ class Manifest(BaseModel):
     generated_at: datetime
     model: ModelInfo
     oracle_versions: OracleVersions
+    runtime: RuntimeInfo
+    kernel_paths: KernelPaths
     generation: GenerationConfig
     tolerance_policy: TolerancePolicy
     baseline_calibration: BaselineCalibration
@@ -178,17 +275,53 @@ class Manifest(BaseModel):
     def generated_fixtures_match_expectations(self) -> Self:
         if self.model.dtype != "bfloat16" or self.generation.attn_implementation != "sdpa":
             raise ValueError("golden manifest requires the Transformers BF16 SDPA reference oracle")
+        from golden_gen.config import (
+            ARCH,
+            MODEL_CONFIG_SHA256,
+            MODEL_DTYPE,
+            MODEL_ID,
+            MODEL_REVISION,
+            MODEL_WEIGHTS_SHA256,
+            TOKENIZER_REVISION,
+            TOKENIZER_SHA256,
+            VOCAB_SIZE,
+        )
+
+        expected_model = {
+            "id": MODEL_ID,
+            "revision": MODEL_REVISION,
+            "tokenizer_revision": TOKENIZER_REVISION,
+            "config_sha256": MODEL_CONFIG_SHA256,
+            "tokenizer_sha256": TOKENIZER_SHA256,
+            "weights_sha256": MODEL_WEIGHTS_SHA256,
+            "arch": ARCH,
+            "dtype": MODEL_DTYPE,
+            "vocab_size": VOCAB_SIZE,
+        }
+        if self.model.model_dump() != expected_model:
+            raise ValueError("manifest model and tokenizer identity does not match ADR-0012")
+        if (
+            self.oracle_versions.transformers != self.runtime.transformers_version
+            or self.oracle_versions.vllm != self.runtime.vllm_version
+        ):
+            raise ValueError("oracle_versions do not match the pinned runtime")
         if (
             self.tolerance_policy.dtype != self.model.dtype
-            or self.tolerance_policy.kernel != self.generation.attn_implementation
+            or self.tolerance_policy.kernel != self.kernel_paths.comparison_scope
         ):
-            raise ValueError("tolerance policy scope does not match model dtype and kernel")
+            raise ValueError("tolerance policy scope does not match model dtype and kernel paths")
         if not self.tolerance_policy.rationale.strip() or any(
             not item.strip() for item in self.tolerance_policy.evidence
         ):
             raise ValueError("tolerance policy rationale and evidence must be non-empty")
         if self.calibrated_fixtures and not self.tolerance_policy.evidence:
-            raise ValueError("calibrated tolerance policy requires non-empty evidence")
+            pending = (
+                self.tolerance_policy.l1_near_tie_max_abs_logit_gap == 0.0
+                and self.tolerance_policy.l2_atol == 0.0
+                and "pending" in self.tolerance_policy.rationale.lower()
+            )
+            if not pending:
+                raise ValueError("calibrated tolerance policy requires non-empty evidence")
         fixture_ids = [entry.fixture_id for entry in self.expected_fixtures]
         if len(fixture_ids) != len(set(fixture_ids)):
             raise ValueError("duplicate expected fixture identifier")

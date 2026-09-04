@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -107,6 +108,7 @@ def run_all(
     output_dir: Path,
     *,
     only_category: PromptCategory | None = None,
+    resource_guard: Callable[[], None] | None = None,
 ) -> list[FixtureMetadata]:
     """For each (oracle, prompt): generate, save .safetensors fixture, return metadata.
 
@@ -138,6 +140,8 @@ def run_all(
             oracle_names.append(o.name)  # type: ignore[arg-type]
 
     for prompt in prompts:
+        if resource_guard is not None:
+            resource_guard()
         if only_category and prompt.category != only_category:
             continue
 
@@ -179,5 +183,7 @@ def run_all(
                     output_dir=output_dir,
                 )
                 fixtures.append(fixture)
+        if resource_guard is not None:
+            resource_guard()
 
     return fixtures

@@ -10,6 +10,18 @@ pub const PRODUCT_VERSION: &str = "v0.2.0";
 pub const GOLDEN_VERSION: &str = "goldens-v0.2";
 pub const MANIFEST_FILENAME: &str = "manifest.json";
 pub const ARCHIVE_FILENAME: &str = "goldens-v0.2.tar.gz";
+pub const MODEL_ID: &str = "Qwen/Qwen3-0.6B";
+pub const MODEL_REVISION: &str = "7e4ae267688d671ddfca3122e4528ee980cf3234";
+pub const MODEL_CONFIG_SHA256: &str =
+    "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd";
+pub const TOKENIZER_SHA256: &str =
+    "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4";
+pub const MODEL_WEIGHTS_SHA256: &str =
+    "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b";
+pub const REFERENCE_KERNEL_PATH: &str = "transformers-4.57.6/torch-2.10.0/sdpa-math";
+pub const BASELINE_KERNEL_PATH: &str = "vllm-0.18.1/flash-attn-v2/eager";
+pub const CANDIDATE_KERNEL_PATH: &str =
+    "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/flash-attn-varlen+paged-windowed";
 
 /// Top-level manifest describing a set of golden fixtures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +34,8 @@ pub struct Manifest {
     pub generated_at: String,
     pub model: ModelInfo,
     pub oracle_versions: OracleVersions,
+    pub runtime: RuntimeInfo,
+    pub kernel_paths: KernelPaths,
     pub generation: GenerationConfig,
     /// Versioned acceptance inputs consumed by the reference comparator.
     pub tolerance_policy: TolerancePolicy,
@@ -63,6 +77,10 @@ pub struct ExpectedFixture {
 pub struct ModelInfo {
     pub id: String,
     pub revision: String,
+    pub tokenizer_revision: String,
+    pub config_sha256: String,
+    pub tokenizer_sha256: String,
+    pub weights_sha256: String,
     pub arch: String,
     pub dtype: String,
     pub vocab_size: usize,
@@ -74,6 +92,56 @@ pub struct ModelInfo {
 pub struct OracleVersions {
     pub transformers: String,
     pub vllm: String,
+}
+
+/// Software and live-host identity for one release evidence run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeInfo {
+    pub evidence_mode: String,
+    pub registry_install_mode: String,
+    pub pythonhashseed: String,
+    pub cublas_workspace_config: String,
+    pub python_version: String,
+    pub torch_version: String,
+    pub torch_cuda_version: String,
+    pub transformers_version: String,
+    pub vllm_version: String,
+    pub xgrammar_version: String,
+    pub triton_version: String,
+    pub cuda_toolkit_version: String,
+    pub rustc_version: String,
+    pub nvidia_driver_version: String,
+    pub gpu_name: String,
+    pub compute_capability: String,
+    pub os_kernel: String,
+    pub generator_commit: String,
+    pub uv_lock_sha256: String,
+    pub wheels: Vec<WheelIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WheelIdentity {
+    pub name: String,
+    pub version: String,
+    pub filename: String,
+    pub sha256: String,
+}
+
+/// Exact reference, baseline, and candidate kernel identities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KernelPaths {
+    pub reference: String,
+    pub baseline: String,
+    pub candidate: String,
+}
+
+impl KernelPaths {
+    pub fn comparison_scope(&self) -> String {
+        format!("{}::vs::{}", self.reference, self.candidate)
+    }
 }
 
 /// Parameters used during golden generation.

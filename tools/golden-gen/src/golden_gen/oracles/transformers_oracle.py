@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -21,6 +22,25 @@ if TYPE_CHECKING:
     pass
 
 
+def reference_model_kwargs() -> dict[str, object]:
+    """Serializable construction contract independently checked by preflight."""
+    return {
+        "model": MODEL_ID,
+        "revision": MODEL_REVISION,
+        "tokenizer_revision": MODEL_REVISION,
+        "torch_dtype": "bfloat16",
+        "attn_implementation": ATTN_IMPLEMENTATION,
+    }
+
+
+def _configure_determinism(torch: object) -> None:
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)  # type: ignore[attr-defined]
+    torch.cuda.manual_seed_all(0)  # type: ignore[attr-defined]
+    torch.use_deterministic_algorithms(True, warn_only=False)  # type: ignore[attr-defined]
+
+
 class TransformersOracle:
     """Oracle using HuggingFace Transformers.
 
@@ -34,20 +54,22 @@ class TransformersOracle:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        _configure_determinism(torch)
+        contract = reference_model_kwargs()
         self.model = (
             AutoModelForCausalLM.from_pretrained(
-                MODEL_ID,
-                revision=MODEL_REVISION,
+                contract["model"],
+                revision=contract["revision"],
                 torch_dtype=torch.bfloat16,
-                attn_implementation=ATTN_IMPLEMENTATION,
+                attn_implementation=contract["attn_implementation"],
             )
             .to("cuda")
             .eval()
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_ID,
-            revision=MODEL_REVISION,
+            contract["model"],
+            revision=contract["tokenizer_revision"],
         )
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
@@ -72,7 +94,10 @@ class TransformersOracle:
         input_ids = inputs["input_ids"].to("cuda")
         n_prompt_tokens = input_ids.shape[1]
 
-        with torch.no_grad():
+        with (
+            torch.inference_mode(),
+            torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]),
+        ):
             out = self.model.generate(
                 input_ids,
                 max_new_tokens=max_tokens,
@@ -128,7 +153,10 @@ class TransformersOracle:
         n_prompt_tokens_per_seq = attention_mask.sum(dim=1).tolist()
         max_prompt_len = input_ids.shape[1]
 
-        with torch.no_grad():
+        with (
+            torch.inference_mode(),
+            torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]),
+        ):
             out = self.model.generate(
                 input_ids,
                 attention_mask=attention_mask,

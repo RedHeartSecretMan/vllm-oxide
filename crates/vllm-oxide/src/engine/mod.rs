@@ -86,6 +86,21 @@ impl EngineCore {
         self.step_internal()
     }
 
+    #[cfg(feature = "internal-golden")]
+    pub(crate) fn step_with_telemetry(
+        &mut self,
+    ) -> Result<(Vec<RequestOutput>, EngineStepTelemetry)> {
+        let (outputs, capture) = self.step_internal()?;
+        Ok((
+            outputs,
+            EngineStepTelemetry {
+                phase: capture.phase,
+                prefill_tokens: capture.prefill_tokens,
+                emissions: capture.rows,
+            },
+        ))
+    }
+
     fn step_internal(&mut self) -> Result<(Vec<RequestOutput>, EngineStepCapture)> {
         let plan = match self.scheduler.plan_step(&mut self.kv_cache_manager) {
             Ok(plan) => plan,
@@ -100,6 +115,10 @@ impl EngineCore {
                 EngineStepCapture {
                     #[cfg(feature = "internal-golden")]
                     rows: Vec::new(),
+                    #[cfg(feature = "internal-golden")]
+                    phase: None,
+                    #[cfg(feature = "internal-golden")]
+                    prefill_tokens: 0,
                     logits: empty,
                 },
             ));
@@ -158,6 +177,13 @@ impl EngineCore {
                     })
             })
             .collect();
+        #[cfg(feature = "internal-golden")]
+        let prefill_tokens = plan
+            .sequences
+            .iter()
+            .filter(|sequence| sequence.phase == SequencePhase::Prefill)
+            .map(|sequence| sequence.token_budget)
+            .sum();
         let outputs = match self
             .scheduler
             .apply_step_result(&result, &mut self.kv_cache_manager)
@@ -172,6 +198,10 @@ impl EngineCore {
             EngineStepCapture {
                 #[cfg(feature = "internal-golden")]
                 rows: capture_rows,
+                #[cfg(feature = "internal-golden")]
+                phase: Some(plan.phase),
+                #[cfg(feature = "internal-golden")]
+                prefill_tokens,
                 logits,
             },
         ))
@@ -303,7 +333,18 @@ impl EngineCore {
 pub(crate) struct EngineStepCapture {
     #[cfg(feature = "internal-golden")]
     pub(crate) rows: Vec<EngineCaptureRow>,
+    #[cfg(feature = "internal-golden")]
+    pub(crate) phase: Option<StepPhase>,
+    #[cfg(feature = "internal-golden")]
+    pub(crate) prefill_tokens: usize,
     pub(crate) logits: Tensor,
+}
+
+#[cfg(feature = "internal-golden")]
+pub(crate) struct EngineStepTelemetry {
+    pub(crate) phase: Option<StepPhase>,
+    pub(crate) prefill_tokens: usize,
+    pub(crate) emissions: Vec<EngineCaptureRow>,
 }
 
 #[cfg(feature = "internal-golden")]

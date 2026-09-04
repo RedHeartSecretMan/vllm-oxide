@@ -379,9 +379,24 @@ mod tests {
             "generated_at": "2026-09-04T00:00:00Z",
             "model": {
                 "id": "model", "revision": "rev", "arch": "arch",
+                "tokenizer_revision": "rev",
+                "config_sha256": "a", "tokenizer_sha256": "b", "weights_sha256": "c",
                 "dtype": "bfloat16", "vocab_size": 3
             },
             "oracle_versions": {"transformers": "5", "vllm": "0.26"},
+            "runtime": {
+                "evidence_mode": "release",
+                "registry_install_mode": "locked-wheels-only",
+                "pythonhashseed": "0", "cublas_workspace_config": ":4096:8",
+                "python_version": "3.12.13", "torch_version": "2.10.0",
+                "torch_cuda_version": "12.8", "transformers_version": "4.57.6",
+                "vllm_version": "0.18.1", "xgrammar_version": "0.2.3",
+                "triton_version": "3.6.0", "cuda_toolkit_version": "13.2.51",
+                "rustc_version": "rustc", "nvidia_driver_version": "driver",
+                "gpu_name": "gpu", "compute_capability": "8.9", "os_kernel": "linux",
+                "generator_commit": "commit", "uv_lock_sha256": "lock", "wheels": []
+            },
+            "kernel_paths": {"reference": "reference", "baseline": "baseline", "candidate": "candidate"},
             "generation": {
                 "canonical_max_tokens": 1, "regression_max_tokens": 1,
                 "temperature": 0.0, "attn_implementation": "sdpa"
@@ -674,6 +689,7 @@ mod tests {
             l1_only: false,
             l2_only: false,
             debug: false,
+            capture_dir: None,
         };
         let report = run_prepared_comparisons(prepared, &options, |case| {
             let l1 = L1Result {

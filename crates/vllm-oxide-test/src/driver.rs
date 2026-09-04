@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
-use vllm_oxide::{EngineOptions, Prompt, Source, LLM};
+use vllm_oxide::{Prompt, Source, LLM};
 
-use crate::capture::generate_with_capture;
+use crate::benchmark::fixed_engine_options;
+use crate::capture::{generate_with_capture, generate_with_preserved_capture};
 use crate::l1::{compare_l1, compare_l1_tokens_only};
 use crate::l2::compare_l2;
 use crate::l3::compare_l3;
@@ -23,11 +24,12 @@ use crate::report::ComparisonReport;
 use crate::types::{Manifest, PromptCategory, RequiredComparison};
 
 /// Flags that control which comparison layers run.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DriverOptions {
     pub l1_only: bool,
     pub l2_only: bool,
     pub debug: bool,
+    pub capture_dir: Option<std::path::PathBuf>,
 }
 
 /// Run all golden comparisons described by `manifest`.
@@ -138,9 +140,21 @@ fn compare_reference_case(
     );
     let mut llm = LLM::new(
         Source::Local(model_path.to_path_buf()),
-        EngineOptions::default(),
+        fixed_engine_options(),
     )?;
-    let captured = generate_with_capture(&mut llm, prompt, max_tokens, &case.expected.fixture_id)?;
+    let captured = if let Some(capture_dir) = &opts.capture_dir {
+        let destination = capture_dir.join(format!("{}.candidate.jsonl", case.metadata.prompt_id));
+        generate_with_preserved_capture(
+            &mut llm,
+            prompt,
+            max_tokens,
+            &case.expected.fixture_id,
+            &destination,
+        )?
+        .0
+    } else {
+        generate_with_capture(&mut llm, prompt, max_tokens, &case.expected.fixture_id)?
+    };
     let (captured_steps, captured_vocab_size) = captured.tensor_shape;
     let (_n_steps, vocab_size) = generated_logits_geometry(
         &[captured_steps, captured_vocab_size],
@@ -236,15 +250,16 @@ mod tests {
             l1_only: false,
             l2_only: false,
             debug: false,
+            capture_dir: None,
         };
         let l1_only = DriverOptions {
             l1_only: true,
-            ..all_layers
+            ..all_layers.clone()
         };
         let l2_only = DriverOptions {
             l1_only: false,
             l2_only: true,
-            ..all_layers
+            ..all_layers.clone()
         };
 
         assert!(required_layers_enabled(

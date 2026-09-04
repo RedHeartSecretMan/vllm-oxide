@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize};
 pub(crate) const TEMP_DIR_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_TEMP_DIR";
 pub(crate) const DESTINATION_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_DESTINATION";
 pub(crate) const CALL_ID_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_CALL_ID";
+mod benchmark;
+pub(crate) use benchmark::BenchmarkSession;
+#[cfg(test)]
+use benchmark::{BenchmarkConfig, BENCHMARK_DESTINATION_ENV};
 
 #[derive(Debug)]
 pub(crate) struct CaptureConfig {
@@ -752,6 +756,16 @@ mod tests {
         .unwrap()
     }
 
+    fn benchmark_config(temp: &Path, destination: &str, call_id: &str) -> BenchmarkConfig {
+        BenchmarkConfig::from_values(
+            Some(temp.as_os_str().to_owned()),
+            Some(OsString::from(destination)),
+            Some(OsString::from(call_id)),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
     fn output(request_id: usize, token_ids: Vec<u32>) -> crate::RequestOutput {
         crate::RequestOutput {
             request_id,
@@ -858,6 +872,8 @@ mod tests {
                     selected_token: 1,
                     completion_step: 0,
                 }],
+                phase: Some(crate::engine::StepPhase::Prefill),
+                prefill_tokens: 1,
                 logits,
             })
             .unwrap();
@@ -1068,6 +1084,8 @@ mod tests {
                     selected_token: 2,
                     completion_step: 0,
                 }],
+                phase: Some(crate::engine::StepPhase::Prefill),
+                prefill_tokens: 1,
                 logits,
             })
             .unwrap_err();
@@ -1103,5 +1121,68 @@ mod tests {
         assert!(format!("{error:#}").contains("serializing JSON line"));
         drop(session);
         assert!(!temp.path().join("capture.jsonl").exists());
+    }
+
+    #[test]
+    fn benchmark_artifact_contains_only_small_synchronized_step_telemetry() {
+        let temp = private_temp();
+        let mut session = BenchmarkSession::prepare(benchmark_config(
+            temp.path(),
+            "benchmark.json",
+            "canonical-04-repetition-1",
+        ))
+        .unwrap();
+        session.bind_requests(&[7]).unwrap();
+        session
+            .record_engine_step(
+                crate::engine::EngineStepTelemetry {
+                    phase: Some(crate::engine::StepPhase::Prefill),
+                    prefill_tokens: 8,
+                    emissions: vec![crate::engine::EngineCaptureRow {
+                        request_id: 7,
+                        selected_token: 11,
+                        completion_step: 0,
+                    }],
+                },
+                0,
+                10_000_000,
+            )
+            .unwrap();
+        session
+            .record_engine_step(
+                crate::engine::EngineStepTelemetry {
+                    phase: Some(crate::engine::StepPhase::Decode),
+                    prefill_tokens: 0,
+                    emissions: vec![crate::engine::EngineCaptureRow {
+                        request_id: 7,
+                        selected_token: 12,
+                        completion_step: 1,
+                    }],
+                },
+                10_000_000,
+                12_000_000,
+            )
+            .unwrap();
+
+        let path = session.finish(&[output(7, vec![11, 12])]).unwrap();
+        let bytes = std::fs::read_to_string(path).unwrap();
+        let artifact: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+
+        assert_eq!(artifact["complete"], true);
+        assert_eq!(artifact["telemetry"]["prefill_tokens"], 8);
+        assert_eq!(artifact["telemetry"]["decode_tokens"], 1);
+        assert!(!bytes.contains("logits"));
+    }
+
+    #[test]
+    fn incomplete_benchmark_configuration_fails_before_request_admission() {
+        let error = BenchmarkConfig::from_values(
+            Some(OsString::from("/does/not/matter")),
+            None,
+            Some(OsString::from("call-1")),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains(BENCHMARK_DESTINATION_ENV));
     }
 }

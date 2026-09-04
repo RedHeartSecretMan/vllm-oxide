@@ -8,10 +8,11 @@
 //!     --release-tag goldens-v0.2 --cache-dir /tmp/goldens
 //! ```
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use vllm_oxide_test::{download, manifest, print_report, prompts, DriverOptions};
 
@@ -22,6 +23,14 @@ use vllm_oxide_test::{download, manifest, print_report, prompts, DriverOptions};
 #[derive(Parser, Debug)]
 #[command(name = "vllm-oxide-test", version, about)]
 struct Cli {
+    /// Release gate mode. Holdout access exists only in authoritative mode.
+    #[arg(long, value_enum)]
+    mode: GateMode,
+
+    /// Tracked, Definition-approved calibration observation.
+    #[arg(long, required_if_eq("mode", "authoritative"))]
+    approved_observation: Option<PathBuf>,
+
     /// Path to the model directory (containing config.json, tokenizer.json, weights).
     #[arg(long)]
     model_path: PathBuf,
@@ -61,6 +70,15 @@ struct Cli {
     /// Path to the golden-gen prompts directory (canonical.jsonl).
     #[arg(long, default_value = "tools/golden-gen/prompts")]
     prompts_dir: PathBuf,
+
+    /// Fresh private directory that retains candidate captures for replay audit.
+    #[arg(long)]
+    capture_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum GateMode {
+    Authoritative,
 }
 
 fn main() -> Result<()> {
@@ -91,12 +109,23 @@ fn main() -> Result<()> {
     };
 
     let all_prompts = prompts::load_all_prompts(&cli.prompts_dir)?;
+    let approval = cli
+        .approved_observation
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("authoritative mode requires --approved-observation"))?;
+    vllm_oxide_test::approval::validate_authoritative_approval(&golden_manifest, approval)?;
+    if cli.capture_dir.exists() || cli.capture_dir.is_symlink() {
+        anyhow::bail!("authoritative capture directory must be fresh and non-existing");
+    }
+    std::fs::create_dir(&cli.capture_dir)?;
+    std::fs::set_permissions(&cli.capture_dir, std::fs::Permissions::from_mode(0o700))?;
 
     // 2. Run all comparisons via the driver.
     let opts = DriverOptions {
         l1_only: cli.l1_only,
         l2_only: cli.l2_only,
         debug: cli.debug,
+        capture_dir: Some(cli.capture_dir.clone()),
     };
     let mut report = vllm_oxide_test::run_comparison(
         &golden_manifest,

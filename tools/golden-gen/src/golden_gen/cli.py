@@ -1,386 +1,332 @@
-"""CLI entrypoint for golden-gen harness."""
+"""Thin argparse adapter for golden generation and release-evidence modules."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Any
 
-from golden_gen.assets import build_fixture_archive, publish_release_bundle
-from golden_gen.calibrate import (
-    calibrate_from_fixtures,
-    validate_calibration_coverage,
+from golden_gen.assets import publish_release_bundle
+from golden_gen.calibrate import calibrate_from_fixtures, validate_calibration_coverage
+from golden_gen.dry_run import run_dry_generate
+from golden_gen.environment import collect_release_runtime
+from golden_gen.manifest import write_manifest
+from golden_gen.observation import (
+    approve_manifest_policy,
+    canonical_observation_json,
+    observation_exit_code,
+    observe_capture_replays,
+    verify_candidate_capture_replay,
 )
-from golden_gen.config import ATTN_IMPLEMENTATION, MODEL_DTYPE
-from golden_gen.generate import run_all
-from golden_gen.manifest import build_expected_fixtures, build_manifest, write_manifest
+from golden_gen.oracle_run import (
+    assemble_release_fixtures,
+    generate_oracle_run,
+    verify_fresh_replay,
+)
 from golden_gen.oracles.fake import FakeOracle
-from golden_gen.prompts import discover_fixtures, load_prompts
-from golden_gen.schema import BaselineCalibration, Manifest, PromptCategory, TolerancePolicy
+from golden_gen.report import ReleaseReportInput, render_release_report
+from golden_gen.schema import Manifest
+from golden_gen.stages import write_stage_marker
 
 
 def _resolve_prompts_dir() -> Path:
-    """Find the prompts/ directory relative to this package."""
-    pkg_dir = Path(__file__).resolve().parent
-    candidates = [
-        pkg_dir.parent.parent.parent / "prompts",
-        pkg_dir.parent.parent / "prompts",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
+    package = Path(__file__).resolve().parent
+    for candidate in (package.parent.parent.parent / "prompts", package.parent.parent / "prompts"):
+        if candidate.exists():
+            return candidate
     return Path.cwd() / "prompts"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate golden fixtures for vllm-oxide from two oracles.",
+        description="Generate golden fixtures and validate vllm-oxide release evidence."
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    gen = subparsers.add_parser("generate", help="Run oracles and produce fixtures")
-    gen.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "Use fake oracle (no GPU, no model download). For local pipeline smoke "
-            "testing ONLY -- NOT for CI. Goldens produced in --dry-run are synthetic "
-            "and must never be published as release assets."
-        ),
-    )
-    gen.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("./output"),
-        help="Where to write fixtures + manifest.json. Default: ./output",
-    )
-    gen.add_argument(
-        "--only-category",
-        type=str,
-        choices=["canonical", "regression"],
-        help="Run only canonical or only regression prompts.",
-    )
+    preflight = commands.add_parser("preflight", help="Record the pinned release environment")
+    preflight.add_argument("--model-dir", type=Path, required=True)
+    preflight.add_argument("--repo-root", type=Path, required=True)
+    preflight.add_argument("--output", type=Path, required=True)
 
-    cal = subparsers.add_parser(
-        "calibrate",
-        help="Record baseline observations and a reviewed tolerance policy",
-    )
-    cal.add_argument(
-        "--manifest-dir",
-        type=Path,
-        required=True,
-        help="Path to directory containing manifest.json + .safetensors fixtures",
-    )
-    cal.add_argument(
-        "--tolerance-policy-version",
-        choices=["same-prefix-v1"],
-        required=True,
-        help="Versioned comparison semantics to record in the manifest",
-    )
-    cal.add_argument(
-        "--l1-near-tie-max-abs-logit-gap",
-        type=float,
-        required=True,
-        help="Reviewed L1 expected/actual candidate-logit gap threshold",
-    )
-    cal.add_argument(
-        "--l2-atol",
-        type=float,
-        required=True,
-        help="Reviewed absolute tolerance for same-prefix L2 comparison",
-    )
-    cal.add_argument(
-        "--tolerance-policy-rationale",
-        required=True,
-        help="Reviewed rationale for selecting the acceptance thresholds",
-    )
-    cal.add_argument(
-        "--tolerance-policy-evidence",
-        action="append",
-        required=True,
-        help="Evidence identifier or URI; repeat for every reviewed source",
-    )
+    generate = commands.add_parser("generate", help="Synthetic lifecycle smoke test only")
+    generate.add_argument("--dry-run", action="store_true")
+    generate.add_argument("--output-dir", type=Path, default=Path("./output"))
+    generate.add_argument("--only-category", choices=["canonical", "regression"])
 
-    bundle = subparsers.add_parser(
-        "bundle",
-        help="Build the exact two-file local release bundle from calibrated fixtures",
-    )
-    bundle.add_argument(
-        "--fixture-dir",
-        type=Path,
-        required=True,
-        help="Directory containing schema-v4 manifest and declared fixtures",
-    )
-    bundle.add_argument(
-        "--release-dir",
-        type=Path,
-        required=True,
-        help="New independent directory to contain only the two release assets",
-    )
+    one = commands.add_parser("generate-oracle", help="Generate one fresh oracle corpus")
+    one.add_argument("--oracle", choices=["transformers", "vllm"], required=True)
+    one.add_argument("--runtime-record", type=Path, required=True)
+    one.add_argument("--prompts-dir", type=Path, default=Path("./prompts"))
+    one.add_argument("--output-dir", type=Path, required=True)
 
+    replay = commands.add_parser("verify-replay", help="Verify one oracle replay")
+    replay.add_argument("--oracle", choices=["transformers", "vllm"], required=True)
+    replay.add_argument("--primary-dir", type=Path, required=True)
+    replay.add_argument("--replay-dir", type=Path, required=True)
+    replay.add_argument("--output", type=Path, required=True)
+
+    assemble = commands.add_parser("assemble", help="Assemble the pending schema-v4 corpus")
+    assemble.add_argument("--runtime-record", type=Path, required=True)
+    assemble.add_argument("--reference-dir", type=Path, required=True)
+    assemble.add_argument("--baseline-dir", type=Path, required=True)
+    assemble.add_argument("--prompts-dir", type=Path, required=True)
+    assemble.add_argument("--output-dir", type=Path, required=True)
+
+    baseline = commands.add_parser(
+        "calibrate-baseline", help="Record baseline evidence without choosing thresholds"
+    )
+    baseline.add_argument("--manifest-dir", type=Path, required=True)
+
+    observe = commands.add_parser("observe", help="Write a non-accepting calibration observation")
+    observe.add_argument("--manifest", type=Path, required=True)
+    observe.add_argument("--primary-dir", type=Path, required=True)
+    observe.add_argument("--replay-dir", type=Path, required=True)
+    observe.add_argument("--output", type=Path, required=True)
+
+    candidate = commands.add_parser(
+        "verify-candidate-replay", help="Verify all candidate captures bit-identically"
+    )
+    candidate.add_argument("--primary-dir", type=Path, required=True)
+    candidate.add_argument("--replay-dir", type=Path, required=True)
+    candidate.add_argument("--output", type=Path, required=True)
+
+    approve = commands.add_parser("approve-policy", help="Apply the tracked mechanical proposal")
+    approve.add_argument("--manifest", type=Path, required=True)
+    approve.add_argument("--observation", type=Path, required=True)
+    approve.add_argument("--repo-root", type=Path, required=True)
+    approve.add_argument("--rationale", required=True)
+
+    report = commands.add_parser("report", help="Render the evidence-only release report")
+    for name in ("manifest", "observation", "comparison", "benchmark"):
+        report.add_argument(f"--{name}", type=Path, required=True)
+    for name in (
+        "observation-commit",
+        "observation-tree",
+        "policy-checkpoint-commit",
+        "policy-checkpoint-tree",
+        "measurement-commit",
+        "measurement-tree",
+    ):
+        report.add_argument(f"--{name}", required=True)
+    report.add_argument("--limitation", action="append", required=True)
+    report.add_argument("--output", type=Path, required=True)
+
+    bundle = commands.add_parser("bundle", help="Build the exact two-file local bundle")
+    bundle.add_argument("--fixture-dir", type=Path, required=True)
+    bundle.add_argument("--release-dir", type=Path, required=True)
+
+    marker = commands.add_parser("stage-marker", help="Write a content-bound stage marker")
+    marker.add_argument("--run-root", type=Path, required=True)
+    marker.add_argument("--stage", required=True)
+    marker.add_argument("--repo-root", type=Path, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
+    handlers: dict[str, Callable[[argparse.Namespace], int]] = {
+        "preflight": _run_preflight,
+        "generate": _run_generate,
+        "generate-oracle": _run_generate_oracle,
+        "verify-replay": _run_verify_replay,
+        "assemble": _run_assemble,
+        "calibrate-baseline": _run_calibrate_baseline,
+        "observe": _run_observe,
+        "verify-candidate-replay": _run_verify_candidate_replay,
+        "approve-policy": _run_approve_policy,
+        "report": _run_report,
+        "bundle": _run_bundle,
+        "stage-marker": _run_stage_marker,
+    }
+    return handlers[args.command](args)
 
-    if args.command == "generate":
-        return _run_generate(args)
-    elif args.command == "calibrate":
-        return _run_calibrate(args)
-    elif args.command == "bundle":
-        return _run_bundle(args)
-    else:
-        parser.print_help()
+
+def _fresh_output(path: Path, description: str) -> None:
+    if path.exists() or path.is_symlink():
+        raise FileExistsError(f"{description} must be fresh and non-existing")
+
+
+def _run_preflight(args: argparse.Namespace) -> int:
+    try:
+        _fresh_output(args.output, "runtime record output")
+        runtime = collect_release_runtime(args.model_dir, args.repo_root)
+        with args.output.open("xb") as output:
+            output.write(runtime.model_dump_json(indent=2).encode())
+            output.write(b"\n")
+    except (OSError, ValueError) as error:
+        print(f"ERROR: environment preflight failed: {error}", file=sys.stderr)
         return 1
+    return 0
 
 
 def _run_generate(args: argparse.Namespace) -> int:
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    prompts_dir = _resolve_prompts_dir()
-    all_prompts = load_prompts(prompts_dir)
-    expected_fixtures = build_expected_fixtures(discover_fixtures(all_prompts))
-
-    only_category: PromptCategory | None = args.only_category
-    selected_expected_fixtures = [
-        fixture
-        for fixture in expected_fixtures
-        if only_category is None
-        or (only_category == "canonical" and fixture.family in ("canonical", "batch"))
-        or (only_category == "regression" and fixture.family == "regression")
-    ]
-    if only_category:
-        all_prompts = [p for p in all_prompts if p.category == only_category]
-
-    if not all_prompts:
-        print("ERROR: No prompts loaded.", file=sys.stderr)
+    if not args.dry_run:
+        print(
+            "ERROR: release generation must use separate generate-oracle/replay/assemble stages",
+            file=sys.stderr,
+        )
         return 1
+    return run_dry_generate(args, _resolve_prompts_dir(), FakeOracle)
 
-    staging = TemporaryDirectory(prefix="golden-gen-", dir=output_dir.parent)
-    staging_dir = Path(staging.name)
 
-    oracle_specs: list[tuple[str, type[Any] | type[FakeOracle]]] = []
-
-    if args.dry_run:
-        oracle_specs = [
-            ("transformers", FakeOracle),
-            ("vllm", FakeOracle),
-        ]
-    else:
-        from golden_gen.oracles.transformers_oracle import TransformersOracle
-        from golden_gen.oracles.vllm_oracle import VllmOracle
-
-        oracle_specs = [
-            ("vllm", VllmOracle),
-            ("transformers", TransformersOracle),
-        ]
-
-    all_fixtures: list[Any] = []
-
-    existing_manifest_path = output_dir / "manifest.json"
-    existing_calibration: BaselineCalibration | None = None
-    existing_policy: TolerancePolicy | None = None
-    if existing_manifest_path.exists():
-        from golden_gen.manifest import read_manifest
-
-        existing = read_manifest(existing_manifest_path)
-        all_fixtures = list(existing.fixtures)
-        if existing.baseline_calibration.candidate_atol > 0.0:
-            existing_calibration = existing.baseline_calibration
-            existing_policy = existing.tolerance_policy
-
-    failed_oracles: list[str] = []
-    generated_this_run: set[str] = set()
-    for name, oracle_cls in oracle_specs:
-        oracle = oracle_cls()
-        if args.dry_run:
-            oracle.name = name
-        try:
-            fixtures = run_all(
-                [oracle],
-                all_prompts,
-                staging_dir,
-                only_category=only_category,
-            )
-            new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
-            generated_this_run.update(
-                f"{fixture.prompt_id}.{fixture.oracle}" for fixture in fixtures
-            )
-            all_fixtures = [f for f in all_fixtures if (f.oracle, f.prompt_id) not in new_keys]
-            all_fixtures.extend(fixtures)
-        except Exception as e:
-            print(f"ERROR: oracle {name} failed: {e}", file=sys.stderr)
-            failed_oracles.append(name)
-        finally:
-            oracle.close()
-
-    if failed_oracles:
-        failed = sum(
-            1 for fixture in selected_expected_fixtures if fixture.oracle in failed_oracles
-        )
-        skipped = len(expected_fixtures) - len(selected_expected_fixtures)
-        print(
-            "Lifecycle totals: "
-            f"expected={len(expected_fixtures)} discovered={len(expected_fixtures)} "
-            f"generated={len(generated_this_run)} compared=0 skipped={skipped} failed={failed}",
-            file=sys.stderr,
-        )
-        print(
-            "ERROR: fixture generation incomplete; manifest was not published "
-            f"(failed oracles: {', '.join(failed_oracles)})",
-            file=sys.stderr,
-        )
-        staging.cleanup()
-        return 1
-
-    generated_ids = {f"{fixture.prompt_id}.{fixture.oracle}" for fixture in all_fixtures}
-    expected_ids = {fixture.fixture_id for fixture in expected_fixtures}
-    if only_category is None and generated_ids != expected_ids:
-        missing = len(expected_ids - generated_ids)
-        unexpected = len(generated_ids - expected_ids)
-        print(
-            "Lifecycle totals: "
-            f"expected={len(expected_ids)} discovered={len(expected_ids)} "
-            f"generated={len(generated_ids & expected_ids)} compared=0 skipped=0 "
-            f"failed={missing + unexpected}",
-            file=sys.stderr,
-        )
-        print(
-            "ERROR: full fixture generation did not match the expected manifest contract; "
-            "manifest was not published",
-            file=sys.stderr,
-        )
-        staging.cleanup()
-        return 1
-
-    print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
-
-    if existing_calibration is not None:
-        baseline_calibration = existing_calibration
-        assert existing_policy is not None
-        tolerance_policy = existing_policy
-        print(
-            "Reusing existing baseline calibration: "
-            f"candidate_atol={baseline_calibration.candidate_atol:.6f}"
-        )
-    else:
-        baseline_calibration = BaselineCalibration(
-            candidate_atol=0.0,
-            observed_max_abs_diff=0.0,
-            calibration_factor=2.0,
-            method="pending -- run `golden-gen calibrate` to compute",
-        )
-        tolerance_policy = TolerancePolicy(
-            version="same-prefix-v1",
-            dtype=MODEL_DTYPE,
-            kernel=ATTN_IMPLEMENTATION,
-            l1_near_tie_max_abs_logit_gap=0.0,
-            l2_atol=0.0,
-            rationale="pending reviewed policy selection",
-            evidence=[],
-        )
-    for fixture in all_fixtures:
-        staged_path = staging_dir / fixture.filename
-        if staged_path.exists():
-            continue
-        source_path = output_dir / fixture.filename
-        if not source_path.is_file() or source_path.is_symlink():
-            print(f"ERROR: regular existing fixture not found at {source_path}", file=sys.stderr)
-            staging.cleanup()
-            return 1
-        staged_path.hardlink_to(source_path)
-    staged_archive_path = staging_dir / "goldens-v0.2.tar.gz"
+def _run_generate_oracle(args: argparse.Namespace) -> int:
     try:
-        archive = build_fixture_archive(staging_dir, all_fixtures, staged_archive_path)
-    except (OSError, ValueError) as error:
-        print(f"ERROR: fixture archive build failed: {error}", file=sys.stderr)
-        staging.cleanup()
+        generate_oracle_run(args.oracle, args.runtime_record, args.prompts_dir, args.output_dir)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"ERROR: {args.oracle} oracle generation failed: {error}", file=sys.stderr)
         return 1
+    return 0
 
-    manifest = build_manifest(
-        fixtures=all_fixtures,
-        baseline_calibration=baseline_calibration,
-        archive=archive,
-        tolerance_policy=tolerance_policy,
-        expected_fixtures=expected_fixtures,
-    )
-    manifest_path = output_dir / "manifest.json"
-    staged_manifest_path = staging_dir / "manifest.json"
-    write_manifest(manifest, staged_manifest_path)
-    generated_filenames = {f"{fixture_id}.safetensors" for fixture_id in generated_this_run}
-    for fixture_path in staging_dir.glob("*.safetensors"):
-        if fixture_path.name in generated_filenames:
-            fixture_path.replace(output_dir / fixture_path.name)
-    staged_archive_path.replace(output_dir / archive.filename)
-    staged_manifest_path.replace(manifest_path)
-    staging.cleanup()
-    print(f"Manifest written to {manifest_path}")
-    generated = len(generated_this_run)
-    expected = len(expected_fixtures)
-    skipped = expected - len(selected_expected_fixtures)
-    print(
-        "Lifecycle totals: "
-        f"expected={expected} discovered={expected} generated={generated} "
-        f"compared=0 skipped={skipped} failed=0"
-    )
-    if existing_calibration is None:
-        print(
-            "NOTE: baseline calibration and tolerance policy are pending. Run "
-            "`golden-gen calibrate --help` for the required reviewed inputs."
+
+def _run_verify_replay(args: argparse.Namespace) -> int:
+    try:
+        verify_fresh_replay(args.oracle, args.primary_dir, args.replay_dir, args.output)
+    except (OSError, ValueError) as error:
+        print(f"ERROR: {args.oracle} replay verification failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_assemble(args: argparse.Namespace) -> int:
+    try:
+        assemble_release_fixtures(
+            args.runtime_record,
+            args.reference_dir,
+            args.baseline_dir,
+            args.prompts_dir,
+            args.output_dir,
         )
+    except (OSError, ValueError) as error:
+        print(f"ERROR: fixture assembly failed: {error}", file=sys.stderr)
+        return 1
+    return 0
 
+
+def _run_calibrate_baseline(args: argparse.Namespace) -> int:
+    manifest_path = args.manifest_dir / "manifest.json"
+    try:
+        manifest = Manifest.from_json(manifest_path)
+        policy = manifest.tolerance_policy
+        if policy.evidence or policy.l1_near_tie_max_abs_logit_gap or policy.l2_atol:
+            raise ValueError("baseline calibration requires a pending zero-threshold manifest")
+        manifest.calibrated_fixtures = validate_calibration_coverage(args.manifest_dir, manifest)
+        manifest.baseline_calibration = calibrate_from_fixtures(args.manifest_dir)
+        manifest = Manifest.model_validate(manifest.model_dump())
+        write_manifest(manifest, manifest_path)
+    except (OSError, ValueError) as error:
+        print(f"ERROR: baseline calibration failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_observe(args: argparse.Namespace) -> int:
+    try:
+        _fresh_output(args.output, "observation output")
+        record = observe_capture_replays(args.manifest, args.primary_dir, args.replay_dir)
+        with args.output.open("xb") as output:
+            output.write(canonical_observation_json(record))
+    except (OSError, ValueError) as error:
+        print(f"ERROR: calibration observation failed: {error}", file=sys.stderr)
+        return 1
+    return observation_exit_code(record)
+
+
+def _run_verify_candidate_replay(args: argparse.Namespace) -> int:
+    try:
+        _fresh_output(args.output, "candidate replay output")
+        evidence = verify_candidate_capture_replay(args.primary_dir, args.replay_dir)
+        with args.output.open("xb") as output:
+            output.write((json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode())
+    except (OSError, ValueError) as error:
+        print(f"ERROR: candidate replay verification failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_approve_policy(args: argparse.Namespace) -> int:
+    try:
+        approve_manifest_policy(args.manifest, args.observation, args.repo_root, args.rationale)
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        print(f"ERROR: tolerance policy approval failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    try:
+        _fresh_output(args.output, "release report output")
+        manifest_bytes = args.manifest.read_bytes()
+        manifest = Manifest.model_validate_json(manifest_bytes)
+        observation_bytes = args.observation.read_bytes()
+        observation = json.loads(observation_bytes)
+        comparison = json.loads(args.comparison.read_bytes())
+        benchmark = json.loads(args.benchmark.read_bytes())
+        lifecycle = comparison["lifecycle"]
+        if comparison.get("overall") is not True or lifecycle.get("compared") != 56:
+            raise ValueError("authoritative comparison is not an exact complete pass")
+        evidence = ReleaseReportInput(
+            observation_commit=args.observation_commit,
+            observation_tree=args.observation_tree,
+            policy_checkpoint_commit=args.policy_checkpoint_commit,
+            policy_checkpoint_tree=args.policy_checkpoint_tree,
+            measurement_commit=args.measurement_commit,
+            measurement_tree=args.measurement_tree,
+            runtime=manifest.runtime,
+            kernel_paths=manifest.kernel_paths,
+            lifecycle={
+                "expected": lifecycle["expected"],
+                "discovered": lifecycle["discovered"],
+                "generated": lifecycle["generated"],
+                "calibration_compared": lifecycle["compared"],
+                "reference_compared": len(comparison["reference_correctness"]["l1"]),
+                "missing": lifecycle["missing"],
+                "unexpected": lifecycle["unexpected"],
+                "skipped": lifecycle["skipped"],
+                "failed": lifecycle["failed"],
+                "duplicate": 0,
+                "stale": 0,
+                "unmatched": 0,
+            },
+            tolerance={
+                "l1_near_tie_max_abs_logit_gap": (
+                    manifest.tolerance_policy.l1_near_tie_max_abs_logit_gap
+                ),
+                "l2_atol": manifest.tolerance_policy.l2_atol,
+                "observation_sha256": hashlib.sha256(observation_bytes).hexdigest(),
+                "raw_evidence_sha256": observation["identity"]["raw_evidence_sha256"],
+            },
+            benchmark=benchmark["workloads"],
+            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            archive_sha256=manifest.archive.sha256,
+            limitations=args.limitation,
+        )
+        with args.output.open("xb") as output:
+            output.write(render_release_report(evidence).encode())
+    except (KeyError, OSError, ValueError) as error:
+        print(f"ERROR: release report generation failed: {error}", file=sys.stderr)
+        return 1
     return 0
 
 
 def _run_bundle(args: argparse.Namespace) -> int:
     try:
-        release_dir = publish_release_bundle(Path(args.fixture_dir), Path(args.release_dir))
+        publish_release_bundle(args.fixture_dir, args.release_dir)
     except (OSError, ValueError) as error:
         print(f"ERROR: release bundle failed: {error}", file=sys.stderr)
         return 1
-    print(f"Release bundle written to {release_dir}")
     return 0
 
 
-def _run_calibrate(args: argparse.Namespace) -> int:
-    manifest_dir = Path(args.manifest_dir)
-    manifest_path = manifest_dir / "manifest.json"
-
-    if not manifest_path.exists():
-        print(f"ERROR: manifest not found at {manifest_path}", file=sys.stderr)
+def _run_stage_marker(args: argparse.Namespace) -> int:
+    try:
+        write_stage_marker(args.run_root, args.stage, args.repo_root)
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        print(f"ERROR: stage marker failed: {error}", file=sys.stderr)
         return 1
-
-    from golden_gen.manifest import read_manifest
-
-    manifest = read_manifest(manifest_path)
-    calibrated_fixtures = validate_calibration_coverage(manifest_dir, manifest)
-    calibration = calibrate_from_fixtures(manifest_dir)
-    print(
-        "Baseline calibration observed: "
-        f"candidate_atol={calibration.candidate_atol:.6f}, "
-        f"observed_max_abs_diff={calibration.observed_max_abs_diff:.6f}"
-    )
-
-    manifest.baseline_calibration = calibration
-    manifest.tolerance_policy = TolerancePolicy(
-        version=args.tolerance_policy_version,
-        dtype=manifest.model.dtype,
-        kernel=manifest.generation.attn_implementation,
-        l1_near_tie_max_abs_logit_gap=args.l1_near_tie_max_abs_logit_gap,
-        l2_atol=args.l2_atol,
-        rationale=args.tolerance_policy_rationale,
-        evidence=args.tolerance_policy_evidence,
-    )
-    manifest.calibrated_fixtures = calibrated_fixtures
-    manifest = Manifest.model_validate(manifest.model_dump())
-    write_manifest(manifest, manifest_path)
-    print(f"Updated manifest written to {manifest_path}")
-
     return 0
 
 

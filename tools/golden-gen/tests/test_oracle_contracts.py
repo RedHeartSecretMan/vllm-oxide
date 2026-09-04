@@ -6,7 +6,8 @@ import pytest
 from golden_gen.config import VOCAB_SIZE
 from golden_gen.generate import run_all
 from golden_gen.oracles.base import OracleResult
-from golden_gen.oracles.vllm_oracle import _extract_full_logits
+from golden_gen.oracles.transformers_oracle import reference_model_kwargs
+from golden_gen.oracles.vllm_oracle import _extract_full_logits, baseline_engine_kwargs
 from golden_gen.schema import PromptSpec
 
 
@@ -45,3 +46,22 @@ def test_vllm_short_logprobs_fail_instead_of_zero_padding():
 
     with pytest.raises(RuntimeError, match="1 logprob rows for 2 generated tokens"):
         _extract_full_logits(completion, n=2, vocab_size=1)
+
+
+def test_oracle_construction_pins_tokenizer_dtype_eager_and_non_fallback_kernels():
+    reference = reference_model_kwargs()
+    baseline = baseline_engine_kwargs()
+
+    assert reference["revision"] == reference["tokenizer_revision"]
+    assert reference["attn_implementation"] == "sdpa"
+    assert reference["torch_dtype"] == "bfloat16"
+    assert baseline["revision"] == baseline["tokenizer_revision"]
+    assert baseline["tensor_parallel_size"] == 1
+    assert baseline["dtype"] == "bfloat16"
+    assert baseline["seed"] == 0
+    assert baseline["enforce_eager"] is True
+    assert baseline["gpu_memory_utilization"] == 0.55
+    assert baseline["attention_config"] == {
+        "backend": "FLASH_ATTN",
+        "flash_attn_version": 2,
+    }

@@ -253,13 +253,13 @@ cargo test
 
 ### 第二层：发布门禁（手动，GPU）
 
-发布门禁验证 Rust 引擎的数值输出是否与黄金夹具匹配。需要 GPU（sm_89+）、模型权重和黄金夹具存档。
+发布门禁验证 Rust 引擎的数值输出是否与黄金夹具匹配。它需要一张 sm_89 GPU、固定模型快照和经过审查的 ADR-0012 环境，并通过可独立恢复的阶段逐步执行；`publish` 始终需要单独授权。
 
 ```bash
-# L1 参考 token / near-tie 分类 + L2 logits 比较
-cargo run --release -p vllm_oxide_test --features cuda -- \
-    --model-path /path/to/Qwen3-0.6B \
-    --release-tag goldens-v0.2
+# 创建新的 evidence run；后续阶段使用同一 run root 分别调用。
+./tools/validate-release.sh env \
+    /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id> \
+    /path/to/Qwen3-0.6B
 ```
 
 **验证内容：**
@@ -272,18 +272,21 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 
 黄金夹具由 `tools/golden-gen/`（Python）生成，运行两个预言机引擎：
 
-- **参考预言机**：transformers（BF16，`output_logits=True`，`attn_implementation=sdpa`）
-- **基线预言机**：vLLM（BF16，仅记录校准观察）
+- **参考预言机**：Transformers 4.57.6 / PyTorch 2.10 BF16，
+  `output_logits=True`，强制 SDPA math backend
+- **基线预言机**：vLLM 0.18.1 BF16、eager FlashAttention-2，仅作为校准证据
 
-schema-v4 manifest 记录 `v0.2.0` / `goldens-v0.2` 兼容关系、确定性夹具归档身份，
-并将版本化的容差策略与基线校准观察分开记录；
-基线证据不能覆盖参考预言机失败。
+扩展后的 schema-v4 manifest 记录模型/分词器哈希、运行时与 wheel 身份、三条 kernel path、
+`v0.2.0` / `goldens-v0.2` 兼容关系、确定性夹具归档身份，
+并将版本化容差策略与基线校准观察分开记录。首轮四例 candidate observation 永远不能通过；
+只有经过审查的 Definition checkpoint 才能授权读取 holdout。基线证据不能覆盖参考预言机失败。
 
 `goldens-v0.2` GitHub Release 严格只有 `manifest.json` 与
 `goldens-v0.2.tar.gz` 两个资产。夹具只存在于经过 checksum 验证的归档内，
 不会作为单独资产上传，也不进入 git。完整策略见
-[ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md) 与
-[ADR-0010](docs/adr/0010-golden-release-asset-contract.md)。
+[ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md)、
+[ADR-0010](docs/adr/0010-golden-release-asset-contract.md) 与
+[ADR-0012](docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md)。
 
 ### CI 绿色与数值验证
 

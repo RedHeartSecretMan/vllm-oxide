@@ -13,7 +13,7 @@ from golden_gen.calibrate import (
     same_prefix_max_abs_diff,
     validate_calibration_coverage,
 )
-from golden_gen.config import VOCAB_SIZE
+from golden_gen.config import COMPARISON_KERNEL_SCOPE, VOCAB_SIZE
 from golden_gen.io import save_fixture
 from golden_gen.manifest import build_manifest as _build_manifest
 from golden_gen.manifest import read_manifest, write_manifest
@@ -24,10 +24,13 @@ from golden_gen.schema import (
     FixtureMetadata,
     TolerancePolicy,
 )
+from tests.support import pinned_kernel_paths, release_runtime
 
 build_manifest = partial(
     _build_manifest,
     archive=ArchiveInfo(filename="goldens-v0.2.tar.gz", sha256="a" * 64),
+    runtime=release_runtime(),
+    kernel_paths=pinned_kernel_paths(),
 )
 
 
@@ -35,7 +38,7 @@ def same_prefix_policy() -> TolerancePolicy:
     return TolerancePolicy(
         version="same-prefix-v1",
         dtype="bfloat16",
-        kernel="sdpa",
+        kernel=COMPARISON_KERNEL_SCOPE,
         l1_near_tie_max_abs_logit_gap=0.0,
         l2_atol=0.0,
         rationale="Reviewed synthetic policy",
@@ -207,7 +210,15 @@ class TestCalibrateFromFixtures:
         manifest = build_manifest(
             fixtures=[],
             expected_fixtures=expected_pair(),
-            tolerance_policy=same_prefix_policy(),
+            tolerance_policy=TolerancePolicy(
+                version="same-prefix-v1",
+                dtype="bfloat16",
+                kernel=COMPARISON_KERNEL_SCOPE,
+                l1_near_tie_max_abs_logit_gap=0.0,
+                l2_atol=0.0,
+                rationale="pending empirical approval",
+                evidence=[],
+            ),
             baseline_calibration=tolerance,
         )
         write_manifest(manifest, tmp_path / "manifest.json")
@@ -257,7 +268,15 @@ class TestCalibrateFromFixtures:
         manifest = build_manifest(
             fixtures=fixtures,
             expected_fixtures=expected_pair(),
-            tolerance_policy=same_prefix_policy(),
+            tolerance_policy=TolerancePolicy(
+                version="same-prefix-v1",
+                dtype="bfloat16",
+                kernel=COMPARISON_KERNEL_SCOPE,
+                l1_near_tie_max_abs_logit_gap=0.0,
+                l2_atol=0.0,
+                rationale="pending empirical approval",
+                evidence=[],
+            ),
             baseline_calibration=tolerance,
         )
         write_manifest(manifest, tmp_path / "manifest.json")
@@ -267,19 +286,9 @@ class TestCalibrateFromFixtures:
 
         exit_code = cli.main(
             [
-                "calibrate",
+                "calibrate-baseline",
                 "--manifest-dir",
                 str(tmp_path),
-                "--tolerance-policy-version",
-                "same-prefix-v1",
-                "--l1-near-tie-max-abs-logit-gap",
-                "0.125",
-                "--l2-atol",
-                "0.25",
-                "--tolerance-policy-rationale",
-                "Synthetic reviewed thresholds",
-                "--tolerance-policy-evidence",
-                "synthetic:test_calibrate",
             ]
         )
 
@@ -289,10 +298,10 @@ class TestCalibrateFromFixtures:
         assert calibrated.calibrated_fixtures == ["canonical_01.vllm"]
         assert calibrated.tolerance_policy.version == "same-prefix-v1"
         assert calibrated.baseline_calibration.observed_max_abs_diff == pytest.approx(0.001)
-        assert calibrated.tolerance_policy.l2_atol == pytest.approx(0.25)
-        assert calibrated.tolerance_policy.l1_near_tie_max_abs_logit_gap == pytest.approx(0.125)
-        assert calibrated.tolerance_policy.rationale == "Synthetic reviewed thresholds"
-        assert calibrated.tolerance_policy.evidence == ["synthetic:test_calibrate"]
+        assert calibrated.tolerance_policy.l2_atol == 0.0
+        assert calibrated.tolerance_policy.l1_near_tie_max_abs_logit_gap == 0.0
+        assert "pending" in calibrated.tolerance_policy.rationale
+        assert calibrated.tolerance_policy.evidence == []
 
     def test_missing_baseline_fixture_fails_closed(self, tmp_path):
         manifest = build_manifest(

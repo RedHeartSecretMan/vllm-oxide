@@ -6,6 +6,7 @@ full pre-sampling logits for canonical prompts.
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 import numpy as np
@@ -21,6 +22,32 @@ from golden_gen.config import (
 )
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
+
+
+def baseline_engine_kwargs() -> dict[str, Any]:
+    """Exact no-fallback vLLM baseline construction contract from ADR-0012."""
+    return {
+        "model": MODEL_ID,
+        "tokenizer": MODEL_ID,
+        "revision": MODEL_REVISION,
+        "tokenizer_revision": MODEL_REVISION,
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "seed": 0,
+        "enforce_eager": True,
+        "logprobs_mode": "raw_logits",
+        "max_logprobs": -1,
+        "gpu_memory_utilization": 0.55,
+        "attention_config": {"backend": "FLASH_ATTN", "flash_attn_version": 2},
+    }
+
+
+def _configure_determinism(torch: Any) -> None:
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    torch.use_deterministic_algorithms(True, warn_only=False)
 
 
 def _extract_full_logits(completion: Any, n: int, vocab_size: int) -> NDArray[np.float32]:
@@ -66,17 +93,11 @@ class VllmOracle:
     name = "vllm"
 
     def __init__(self) -> None:
+        import torch
         from vllm import LLM
 
-        self.llm = LLM(
-            model=MODEL_ID,
-            revision=MODEL_REVISION,
-            dtype="bfloat16",
-            enforce_eager=True,
-            logprobs_mode="raw_logits",
-            max_logprobs=-1,
-            gpu_memory_utilization=0.65,
-        )
+        _configure_determinism(torch)
+        self.llm = LLM(**baseline_engine_kwargs())
 
     def _generate_canonical(self, prompt: PromptSpec) -> OracleResult:
         from vllm import SamplingParams

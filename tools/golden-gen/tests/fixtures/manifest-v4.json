@@ -10,13 +10,50 @@
   "model": {
     "id": "Qwen/Qwen3-0.6B",
     "revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+    "tokenizer_revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+    "config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+    "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "weights_sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
     "arch": "Qwen3ForCausalLM",
     "dtype": "bfloat16",
     "vocab_size": 151936
   },
   "oracle_versions": {
-    "transformers": "5.0.0",
-    "vllm": "0.26.0"
+    "transformers": "4.57.6",
+    "vllm": "0.18.1"
+  },
+  "runtime": {
+    "evidence_mode": "release",
+    "registry_install_mode": "locked-wheels-only",
+    "pythonhashseed": "0",
+    "cublas_workspace_config": ":4096:8",
+    "python_version": "3.12.13",
+    "torch_version": "2.10.0",
+    "torch_cuda_version": "12.8",
+    "transformers_version": "4.57.6",
+    "vllm_version": "0.18.1",
+    "xgrammar_version": "0.2.3",
+    "triton_version": "3.6.0",
+    "cuda_toolkit_version": "13.2.51",
+    "rustc_version": "rustc 1.89.0",
+    "nvidia_driver_version": "595.71",
+    "gpu_name": "NVIDIA GeForce RTX 4080",
+    "compute_capability": "8.9",
+    "os_kernel": "Linux 6.18.33.2-microsoft-standard-WSL2",
+    "generator_commit": "1111111111111111111111111111111111111111",
+    "uv_lock_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "wheels": [
+      {"name": "torch", "version": "2.10.0", "filename": "torch-2.10.0.whl", "sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+      {"name": "transformers", "version": "4.57.6", "filename": "transformers-4.57.6.whl", "sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+      {"name": "vllm", "version": "0.18.1", "filename": "vllm-0.18.1.whl", "sha256": "5555555555555555555555555555555555555555555555555555555555555555"},
+      {"name": "xgrammar", "version": "0.2.3", "filename": "xgrammar-0.2.3.whl", "sha256": "6666666666666666666666666666666666666666666666666666666666666666"},
+      {"name": "triton", "version": "3.6.0", "filename": "triton-3.6.0.whl", "sha256": "7777777777777777777777777777777777777777777777777777777777777777"}
+    ]
+  },
+  "kernel_paths": {
+    "reference": "transformers-4.57.6/torch-2.10.0/sdpa-math",
+    "baseline": "vllm-0.18.1/flash-attn-v2/eager",
+    "candidate": "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/flash-attn-varlen+paged-windowed"
   },
   "generation": {
     "canonical_max_tokens": 64,
@@ -27,7 +64,7 @@
   "tolerance_policy": {
     "version": "same-prefix-v1",
     "dtype": "bfloat16",
-    "kernel": "sdpa",
+    "kernel": "transformers-4.57.6/torch-2.10.0/sdpa-math::vs::vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/flash-attn-varlen+paged-windowed",
     "l1_near_tie_max_abs_logit_gap": 0.02,
     "l2_atol": 0.01,
     "rationale": "Reviewed cross-language fixture",

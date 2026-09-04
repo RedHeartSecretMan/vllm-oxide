@@ -254,13 +254,13 @@ Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation,
 
 ### Tier 2: Release gate (manual, GPU)
 
-The release gate validates the Rust engine's numerical output against golden fixtures. It requires a GPU (sm_89+), model weights, and a golden fixture archive.
+The release gate validates the Rust engine's numerical output against golden fixtures. It requires one sm_89 GPU, the pinned model snapshot, and the reviewed ADR-0012 environment. Run it through the independently resumable stages; `publish` remains separately authorized.
 
 ```bash
-# L1 reference-token / near-tie classification + L2 logits comparison
-cargo run --release -p vllm_oxide_test --features cuda -- \
-    --model-path /path/to/Qwen3-0.6B \
-    --release-tag goldens-v0.2
+# Start a fresh evidence run; invoke later stages one at a time.
+./tools/validate-release.sh env \
+    /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id> \
+    /path/to/Qwen3-0.6B
 ```
 
 **What it checks:**
@@ -273,18 +273,23 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 
 Golden fixtures are produced by `tools/golden-gen/` (Python), which runs two oracle engines:
 
-- **Reference oracle**: transformers (BF16, `output_logits=True`, `attn_implementation=sdpa`)
-- **Baseline oracle**: vLLM (BF16, records calibration observations only)
+- **Reference oracle**: Transformers 4.57.6 / PyTorch 2.10 BF16,
+  `output_logits=True`, mandatory SDPA math backend
+- **Baseline oracle**: vLLM 0.18.1 BF16, eager FlashAttention-2, calibration
+  evidence only
 
-The schema-v4 manifest records the `v0.2.0` / `goldens-v0.2` compatibility,
-the deterministic fixture archive identity, and the versioned Tolerance policy separately
+The extended schema-v4 manifest records exact model/tokenizer hashes, runtime and
+wheel identities, all three kernel paths, `v0.2.0` / `goldens-v0.2`
+compatibility, archive identity, and the versioned Tolerance policy separately
 from baseline calibration observations. Baseline evidence cannot override a
-reference-oracle failure.
+reference-oracle failure. The first four-case candidate observation is always
+non-accepting; only a reviewed Definition checkpoint can authorize holdout access.
 
 The `goldens-v0.2` GitHub Release has exactly two assets: `manifest.json` and
 `goldens-v0.2.tar.gz`. Fixtures appear only inside that checksum-verified archive,
 never as individual assets or in git. See [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md)
-and [ADR-0010](docs/adr/0010-golden-release-asset-contract.md).
+and [ADR-0010](docs/adr/0010-golden-release-asset-contract.md), plus the
+calibration/performance protocol in [ADR-0012](docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md).
 
 ### CI green vs numerically validated
 

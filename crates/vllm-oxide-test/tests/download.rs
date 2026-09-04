@@ -174,11 +174,40 @@ fn release_source() -> (FakeReleaseSource, String) {
         "model": {
             "id": "Qwen/Qwen3-0.6B",
             "revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+            "tokenizer_revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+            "config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+            "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+            "weights_sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
             "arch": "Qwen3ForCausalLM",
             "dtype": "bfloat16",
             "vocab_size": 151_936
         },
-        "oracle_versions": {"transformers": "5.0", "vllm": "0.26"},
+        "oracle_versions": {"transformers": "4.57.6", "vllm": "0.18.1"},
+        "runtime": {
+            "evidence_mode": "release",
+            "registry_install_mode": "locked-wheels-only",
+            "pythonhashseed": "0", "cublas_workspace_config": ":4096:8",
+            "python_version": "3.12.13", "torch_version": "2.10.0",
+            "torch_cuda_version": "12.8", "transformers_version": "4.57.6",
+            "vllm_version": "0.18.1", "xgrammar_version": "0.2.3",
+            "triton_version": "3.6.0", "cuda_toolkit_version": "13.2.51",
+            "rustc_version": "rustc 1.89.0", "nvidia_driver_version": "595.71",
+            "gpu_name": "NVIDIA GeForce RTX 4080", "compute_capability": "8.9",
+            "os_kernel": "Linux test", "generator_commit": "1".repeat(40),
+            "uv_lock_sha256": "2".repeat(64),
+            "wheels": [
+                {"name": "torch", "version": "2.10.0", "filename": "torch.whl", "sha256": "3".repeat(64)},
+                {"name": "transformers", "version": "4.57.6", "filename": "transformers.whl", "sha256": "4".repeat(64)},
+                {"name": "vllm", "version": "0.18.1", "filename": "vllm.whl", "sha256": "5".repeat(64)},
+                {"name": "xgrammar", "version": "0.2.3", "filename": "xgrammar.whl", "sha256": "6".repeat(64)},
+                {"name": "triton", "version": "3.6.0", "filename": "triton.whl", "sha256": "7".repeat(64)}
+            ]
+        },
+        "kernel_paths": {
+            "reference": "transformers-4.57.6/torch-2.10.0/sdpa-math",
+            "baseline": "vllm-0.18.1/flash-attn-v2/eager",
+            "candidate": "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/flash-attn-varlen+paged-windowed"
+        },
         "generation": {
             "canonical_max_tokens": 64,
             "regression_max_tokens": 32,
@@ -188,7 +217,7 @@ fn release_source() -> (FakeReleaseSource, String) {
         "tolerance_policy": {
             "version": "same-prefix-v1",
             "dtype": "bfloat16",
-            "kernel": "sdpa",
+            "kernel": "transformers-4.57.6/torch-2.10.0/sdpa-math::vs::vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/flash-attn-varlen+paged-windowed",
             "l1_near_tie_max_abs_logit_gap": 0.02,
             "l2_atol": 0.01,
             "rationale": "reviewed test policy",

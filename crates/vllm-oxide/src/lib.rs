@@ -105,6 +105,9 @@ pub(crate) mod utils;
 #[cfg(feature = "internal-golden")]
 mod golden_capture;
 
+#[cfg(any(feature = "internal-golden", test))]
+mod benchmark_telemetry;
+
 // Public generation contract (ADR-0011). Keep this list exact: internal
 // modules and their implementation types are reachable only within the crate.
 pub use config::Source;

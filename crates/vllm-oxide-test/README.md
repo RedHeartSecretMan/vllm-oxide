@@ -33,32 +33,45 @@ vLLM artifacts count only after the manifest records successful calibration.
 - Model weights for Qwen3-0.6B (local directory or HF Hub)
 - Golden fixtures (local directory or GitHub Release)
 
-### Run from local golden fixtures
+### Run the authoritative comparator
+
+The normal release path is `tools/validate-release.sh authoritative <run-root>`.
+Direct invocation is intentionally verbose because holdout access must bind a
+Definition-approved observation and retain a second set of candidate captures:
 
 ```bash
-cargo run --release -p vllm_oxide_test -- \
+cargo run --release -p vllm_oxide_test --features cuda -- \
+    --mode authoritative \
+    --approved-observation docs/releases/goldens-v0.2-calibration-observation.json \
     --model-path /path/to/Qwen3-0.6B \
-    --manifest /path/to/goldens/manifest.json
+    --manifest /path/to/goldens/manifest.json \
+    --capture-dir /tmp/fresh-candidate-captures
 ```
 
 ### Download goldens from GitHub Release and run
 
 ```bash
-cargo run --release -p vllm_oxide_test -- \
+cargo run --release -p vllm_oxide_test --features cuda -- \
+    --mode authoritative \
+    --approved-observation docs/releases/goldens-v0.2-calibration-observation.json \
     --model-path /path/to/Qwen3-0.6B \
     --release-tag goldens-v0.2 \
-    --cache-dir /tmp/vllm-oxide-goldens
+    --cache-dir /tmp/vllm-oxide-goldens \
+    --capture-dir /tmp/fresh-downloaded-candidate-captures
 ```
 
 ### Options
 
 | Flag | Description |
 |------|-------------|
+| `--mode authoritative` | The only accepting comparator mode |
+| `--approved-observation PATH` | Definition-tracked observation that unlocks holdout access |
 | `--model-path PATH` | Model directory (config.json + tokenizer.json + weights) |
 | `--manifest PATH` | Local manifest.json + fixture directory |
 | `--release-tag TAG` | GitHub Release tag to download goldens from |
 | `--repo OWNER/REPO` | GitHub repo (default: `RedHeartSecretMan/vllm-oxide`) |
 | `--cache-dir PATH` | Cache directory for downloaded goldens (default: `/tmp/vllm-oxide-goldens`) |
+| `--capture-dir PATH` | Fresh private destination for replay-audited candidate captures |
 | `--debug` | Enable L3 per-layer activations comparison |
 | `--json` | Output results as JSON |
 | `--l1-only` | Only run L1 comparison |
@@ -71,7 +84,9 @@ cargo run --release -p vllm_oxide_test -- \
 Golden fixtures are described by a `manifest.json` (produced by
 `tools/golden-gen/`). The manifest records:
 
-- **Provenance**: model ID, revision, architecture, dtype
+- **Provenance**: exact model/tokenizer revisions and hashes, architecture, dtype
+- **Runtime/kernel identity**: locked Python wheels, CUDA/Rust/driver/GPU/OS
+  identity, deterministic process settings, and all three kernel paths
 - **Expected fixtures**: family, immutable model identity, oracle role, and
   required comparison for every artifact
 - **Tolerance policy**: an explicit version and dtype/kernel scope, L1
@@ -109,7 +124,9 @@ declared comparison, and missing/unexpected/skipped/failed must all be zero.
 Malformed manifests, unmatched identifiers, unsupported fixture shapes, and
 empty comparison sets exit non-zero. `--l1-only` or `--l2-only` is exploratory
 when it omits a declared comparison and therefore cannot satisfy the release
-gate.
+gate. Before this comparator can run, its approval gate independently verifies
+the observation SHA, mechanical proposal, runtime/kernel identity, and sealed
+holdout list.
 
 ### L1: Reference-token match or explicit near tie
 

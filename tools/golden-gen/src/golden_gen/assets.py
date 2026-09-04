@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from golden_gen.config import ARCHIVE_FILENAME
+from golden_gen.release_protocol import validate_release_manifest_coverage
 from golden_gen.schema import ArchiveInfo, FixtureMetadata, Manifest
 
 _AT_FDCWD = -100
@@ -150,6 +151,7 @@ def _fixture_id(fixture: FixtureMetadata) -> str:
 
 
 def _validate_release_coverage(manifest: Manifest) -> None:
+    validate_release_manifest_coverage(manifest)
     expected_ids = {fixture.fixture_id for fixture in manifest.expected_fixtures}
     generated_ids = {_fixture_id(fixture) for fixture in manifest.fixtures}
     if generated_ids != expected_ids:

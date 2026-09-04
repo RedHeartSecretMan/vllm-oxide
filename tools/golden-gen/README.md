@@ -12,94 +12,57 @@ reference failure or select acceptance thresholds automatically.
 
 ## Prerequisites
 
-- Linux with an NVIDIA GPU (sm_89+; a single A10 is sufficient)
-- Python 3.12
+- Linux with one NVIDIA sm_89 GPU and no unrelated CUDA compute process
+- At least 32 GiB host RAM; every GPU-owning stage stops below 16 GiB available
+- Python 3.12, PyTorch 2.10.0 (CUDA 12.8), Transformers 4.57.6,
+  vLLM 0.18.1, xgrammar 0.2.3, and Triton 3.6.0 from `uv.lock`
+- CUDA toolkit 13.2.51 for the Rust/Candle candidate
 - `uv` package manager (see [docs.astral.sh/uv](https://docs.astral.sh/uv/))
-- ~6 GB free disk space for model weights and oracle caches
+- About 12 GiB free disk on a fresh host; the current release keeps all machine
+  evidence below `/tmp/vllm-oxide-dag-v0.2.0/t45-artifacts`
 
-## Install
+## Release workflow
+
+`tools/validate-release.sh` exposes separately invocable, content-marked stages:
+
+- `env` installs registry dependencies from locked wheels only, then validates
+  exact model/tokenizer hashes and runtime identities.
+- `generate` runs Transformers and vLLM in separate fresh processes twice,
+  verifies bit-identical replay, and assembles exactly 28 cases / 56 assets.
+- `calibrate` records baseline evidence without selecting acceptance thresholds.
+- `observe` opens only `canonical_01`, `canonical_02`, `canonical_03`, and
+  `canonical_05a`; it keeps the other four full-logit cases sealed and always
+  exits non-zero (`3`) after writing the normalized observation.
+- `authoritative` is unavailable until that observation is added through a
+  reviewed Definition checkpoint. It then runs and replays all 28 candidate cases.
+- `benchmark`, `report`, and `bundle` produce the fixed performance evidence,
+  evidence-only report, and exact two-asset bundle.
+- `publish` and `verify` are separate. `publish` is inert unless the user supplies
+  the explicit publication guard and frozen candidate identity.
+
+Start each release attempt with a fresh run root:
 
 ```bash
-cd tools/golden-gen
-uv sync --extra gpu
+./tools/validate-release.sh env \
+  /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id> \
+  /path/to/Qwen3-0.6B
 ```
 
-## Usage
-
-### 1. Generate fixtures (GPU required)
-
-```bash
-cd tools/golden-gen
-uv run python -m golden_gen generate
-```
-
-This loads both oracles (transformers + vLLM), discovers all canonical, batch,
-and regression cases, and writes `output/manifest.json`, the deterministic
-`output/goldens-v0.2.tar.gz`, and the individual `output/*.safetensors` working
-files. The five canonical prompt specifications flatten to
-eight fixture cases because the batch corpus contains four sub-prompts; with
-20 regression cases and two oracle artifacts per case, a complete run produces
-56 fixture files. Expect ~5-15 minutes on an A10.
-
-Options:
-
-| Flag | Description |
-|------|-------------|
-| `--dry-run` | Use fake oracle (no GPU, no model download) — for smoke testing |
-| `--output-dir PATH` | Output directory (default: `./output`) |
-| `--only-category {canonical,regression}` | Exploratory partial generation; cannot satisfy the release gate |
-
-### 2. Calibrate tolerance after generation
+Run later stages one at a time with the same root. Never use
+`tools/golden-gen/output/`: it is ignored legacy working state and is rejected as
+release evidence. Each successful stage creates a JSON marker binding the
+generator commit/tree, predecessor marker, and output checksums. A failed stage
+creates no successor marker.
 
 ```bash
-cd tools/golden-gen
-uv run python -m golden_gen calibrate \
-  --manifest-dir ./output \
-  --tolerance-policy-version same-prefix-v1 \
-  --l1-near-tie-max-abs-logit-gap <reviewed-threshold> \
-  --l2-atol <reviewed-threshold> \
-  --tolerance-policy-rationale <reviewed-rationale> \
-  --tolerance-policy-evidence <evidence-id-or-uri>
-```
-
-Validates every declared reference/baseline pair, computes same-prefix
-calibration observations, and records the consumed baseline artifacts. The
-version, both acceptance thresholds, rationale, and evidence references are
-required reviewed inputs; dtype and kernel scope are bound to the manifest.
-Observed baseline differences are never promoted into reference acceptance
-thresholds automatically. A missing pair, empty comparison set, unmatched
-oracle length, or unsupported tensor shape exits non-zero.
-Calibration updates only the standalone manifest; it never rewrites the fixture
-archive or changes its checksum.
-
-### 3. Build the local release bundle
-
-```bash
-uv run python -m golden_gen bundle \
-  --fixture-dir ./output \
-  --release-dir ./release/goldens-v0.2
-```
-
-The destination must not already exist. On success it contains exactly two
-files: `manifest.json` and `goldens-v0.2.tar.gz`. The publisher rebuilds the
-archive deterministically, verifies its identity against the calibrated
-manifest, requires complete expected-fixture and calibration coverage, and
-rejects missing, unexpected, or checksum-mismatched working fixtures. This
-command creates local release inputs only; Ticket #45 owns the actual GitHub
-Release publication.
-Publication requires the Linux release host's `renameat2(RENAME_NOREPLACE)`
-support. An unsupported kernel or filesystem fails closed; the publisher never
-falls back to a check-then-rename sequence that could overwrite a racing target.
-
-```bash
-uv run python -m golden_gen --help   # full usage
+uv run python -m golden_gen --help
 ```
 
 ### Dry-run (no GPU)
 
 ```bash
 cd tools/golden-gen
-uv run python -m golden_gen generate --dry-run
+uv run python -m golden_gen generate --dry-run --output-dir /tmp/golden-dry-run
 ```
 
 Produces a schema-valid but uncalibrated fake manifest and synthetic
@@ -113,7 +76,8 @@ cd tools/golden-gen
 uv run pytest
 ```
 
-All unit tests run on CPU and do not require a GPU.
+All unit tests run on CPU and do not require a GPU. The plain `generate` command
+is dry-run only; there is no direct real-generation or arbitrary-tolerance bypass.
 
 ## Manifest Schema
 
@@ -129,18 +93,26 @@ All unit tests run on CPU and do not require a GPU.
 | `generated_at` | ISO 8601 | UTC timestamp of generation |
 | `model.id` | str | HuggingFace model ID (`Qwen/Qwen3-0.6B`) |
 | `model.revision` | str | Git revision (commit hash) of the model weights |
+| `model.tokenizer_revision` | str | Immutable tokenizer revision (equal to model revision) |
+| `model.config_sha256` | str | Pinned `config.json` identity |
+| `model.tokenizer_sha256` | str | Pinned `tokenizer.json` identity |
+| `model.weights_sha256` | str | Pinned `model.safetensors` identity |
 | `model.arch` | str | Model architecture (`Qwen3ForCausalLM`) |
 | `model.dtype` | str | Model dtype (`bfloat16`) |
 | `model.vocab_size` | int | Vocabulary size (151936) |
 | `oracle_versions.transformers` | str | Installed transformers version |
 | `oracle_versions.vllm` | str | Installed vllm version |
+| `runtime` | object | Exact Python/Rust/CUDA/driver/GPU/OS/lock/wheel identities and deterministic process environment |
+| `kernel_paths.reference` | str | Transformers 4.57.6 / PyTorch 2.10 SDPA math path |
+| `kernel_paths.baseline` | str | vLLM 0.18.1 eager FlashAttention-2 path |
+| `kernel_paths.candidate` | str | Pinned Candle varlen + paged-windowed path |
 | `generation.canonical_max_tokens` | int | Max generated tokens for canonical prompts (64) |
 | `generation.regression_max_tokens` | int | Max generated tokens for regression prompts (32) |
 | `generation.temperature` | float | Sampling temperature (0.0) |
 | `generation.attn_implementation` | str | Reference oracle attention backend (`sdpa`) |
 | `tolerance_policy.version` | str | Supported comparison semantics (`same-prefix-v1`) |
 | `tolerance_policy.dtype` | str | Dtype scope, matched to the manifest model |
-| `tolerance_policy.kernel` | str | Kernel scope, matched to the manifest generation path |
+| `tolerance_policy.kernel` | str | Exact reference-versus-candidate comparison scope derived from `kernel_paths` |
 | `tolerance_policy.l1_near_tie_max_abs_logit_gap` | float | Maximum expected/actual candidate-logit gap for an explicit L1 near tie |
 | `tolerance_policy.l2_atol` | float | Absolute tolerance for same-prefix L2 logit comparison |
 | `tolerance_policy.rationale` | str | Reviewed reason for the selected thresholds |
@@ -214,16 +186,15 @@ calibration evidence; the Transformers output remains the Reference oracle targe
 
 The GitHub Release asset set is exactly the local bundle's two files. GitHub's
 automatic source archives are not API release assets for this contract, and
-individual `.safetensors` files must not be uploaded. After Ticket #45 produces
-and reviews the real GPU fixtures, its publication command is:
+individual `.safetensors` files must not be uploaded. Publication is available
+only through the separately authorized `publish` stage after the reviewed
+candidate and report are frozen:
 
 ```bash
-gh release create goldens-v0.2 \
-  --repo RedHeartSecretMan/vllm-oxide \
-  --title "Golden fixtures -- v0.2" \
-  --notes "Schema-v4 golden asset bundle for vllm-oxide v0.2.0." \
-  release/goldens-v0.2/manifest.json \
-  release/goldens-v0.2/goldens-v0.2.tar.gz
+VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2 \
+VLLM_OXIDE_GOLDEN_CANDIDATE=<reviewed-commit> \
+./tools/validate-release.sh publish \
+  /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id>
 ```
 
 The archive is gzip-compressed USTAR. It contains every and only the declared

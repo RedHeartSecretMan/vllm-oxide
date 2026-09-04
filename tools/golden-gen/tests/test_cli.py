@@ -11,7 +11,13 @@ import numpy as np
 import pytest
 
 import golden_gen.cli as cli
-from golden_gen.config import VOCAB_SIZE
+from golden_gen.config import (
+    COMPARISON_KERNEL_SCOPE,
+    MODEL_CONFIG_SHA256,
+    MODEL_WEIGHTS_SHA256,
+    TOKENIZER_SHA256,
+    VOCAB_SIZE,
+)
 from golden_gen.oracles.base import OracleResult
 
 
@@ -63,7 +69,11 @@ class TestCLI:
         assert result.returncode == 0
         assert "Generate golden fixtures" in result.stdout
         assert "generate" in result.stdout
-        assert "calibrate" in result.stdout
+        assert "preflight" in result.stdout
+        assert "generate-oracle" in result.stdout
+        assert "verify-replay" in result.stdout
+        assert "assemble" in result.stdout
+        assert "calibrate-baseline" in result.stdout
         assert "bundle" in result.stdout
 
     def test_generate_help(self):
@@ -78,20 +88,17 @@ class TestCLI:
         assert "--output-dir" in result.stdout
         assert "--only-category" in result.stdout
 
-    def test_calibrate_help(self):
+    def test_calibrate_baseline_help_has_no_threshold_override(self):
         result = subprocess.run(
-            [sys.executable, "-m", "golden_gen", "calibrate", "--help"],
+            [sys.executable, "-m", "golden_gen", "calibrate-baseline", "--help"],
             capture_output=True,
             text=True,
             cwd=Path(__file__).resolve().parent.parent,
         )
         assert result.returncode == 0
         assert "--manifest-dir" in result.stdout
-        assert "--tolerance-policy-version" in result.stdout
-        assert "--l1-near-tie-max-abs-logit-gap" in result.stdout
-        assert "--l2-atol" in result.stdout
-        assert "--tolerance-policy-rationale" in result.stdout
-        assert "--tolerance-policy-evidence" in result.stdout
+        assert "--l1-near-tie-max-abs-logit-gap" not in result.stdout
+        assert "--l2-atol" not in result.stdout
 
     def test_bundle_command_uses_the_local_publisher_seam(self, tmp_path, monkeypatch):
         fixture_dir = tmp_path / "fixtures"
@@ -117,15 +124,45 @@ class TestCLI:
         assert exit_code == 0
         assert observed == [(fixture_dir, release_dir)]
 
-    def test_release_script_uploads_only_the_schema_v4_bundle(self):
+    def test_release_script_exposes_only_independent_fail_closed_stages(self):
         script = (Path(__file__).resolve().parents[3] / "tools" / "validate-release.sh").read_text()
 
-        assert "${2:-goldens-v0.2}" in script
-        assert "python -m golden_gen bundle" in script
-        assert '"$GOLDEN_BUNDLE/manifest.json"' in script
-        assert '"$GOLDEN_BUNDLE/goldens-v0.2.tar.gz"' in script
+        for stage in (
+            "env",
+            "generate",
+            "calibrate",
+            "observe",
+            "authoritative",
+            "benchmark",
+            "report",
+            "bundle",
+            "publish",
+            "verify",
+        ):
+            assert f"{stage})" in script
+        assert "uv sync --extra gpu --frozen --no-build --no-install-project" in script
+        assert "CARGO_BUILD_JOBS=1" in script
+        assert (
+            "CARGO_TARGET_DIR=/home/wanghao/Projects/Codes/VibeCodings/vllm-oxide/target" in script
+        )
+        assert "--features cuda" in script
+        assert "-m golden_gen bundle" in script
+        assert '"$BUNDLE_DIR/manifest.json"' in script
+        assert '"$BUNDLE_DIR/goldens-v0.2.tar.gz"' in script
         assert "goldens-v0.1" not in script
         assert "*.safetensors" not in script
+        assert "tools/golden-gen/output" not in script
+
+    def test_publish_stage_is_inert_without_separate_authority(self, tmp_path):
+        script = Path(__file__).resolve().parents[3] / "tools" / "validate-release.sh"
+        result = subprocess.run(
+            ["bash", str(script), "publish", str(tmp_path)],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        assert "VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH" in result.stderr
 
     def test_dry_run_produces_manifest(self, tmp_path):
         """generate --dry-run should produce a fake manifest + fixtures."""
@@ -164,7 +201,7 @@ class TestCLI:
         assert manifest["tolerance_policy"] == {
             "version": "same-prefix-v1",
             "dtype": "bfloat16",
-            "kernel": "sdpa",
+            "kernel": COMPARISON_KERNEL_SCOPE,
             "l1_near_tie_max_abs_logit_gap": 0.0,
             "l2_atol": 0.0,
             "rationale": "pending reviewed policy selection",
@@ -172,6 +209,12 @@ class TestCLI:
         }
         assert len(manifest["fixtures"]) > 0
         assert manifest["model"]["id"] == "Qwen/Qwen3-0.6B"
+        assert manifest["model"]["tokenizer_revision"] == manifest["model"]["revision"]
+        assert manifest["model"]["config_sha256"] == MODEL_CONFIG_SHA256
+        assert manifest["model"]["tokenizer_sha256"] == TOKENIZER_SHA256
+        assert manifest["model"]["weights_sha256"] == MODEL_WEIGHTS_SHA256
+        assert manifest["runtime"]["evidence_mode"] == "dry-run"
+        assert manifest["kernel_paths"]["reference"].endswith("sdpa-math")
 
     def test_dry_run_manifest_declares_every_expected_fixture_contract(self, tmp_path):
         """Every discovered case/oracle pair is declared before release validation."""

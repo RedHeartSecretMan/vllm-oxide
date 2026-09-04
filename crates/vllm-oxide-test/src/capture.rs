@@ -75,6 +75,26 @@ pub(crate) fn generate_with_capture(
     max_tokens: usize,
     fixture_id: &str,
 ) -> Result<CapturedGeneration> {
+    Ok(generate_with_capture_inner(llm, prompt, max_tokens, fixture_id, None)?.0)
+}
+
+pub(crate) fn generate_with_preserved_capture(
+    llm: &mut LLM,
+    prompt: Prompt,
+    max_tokens: usize,
+    fixture_id: &str,
+    destination: &Path,
+) -> Result<(CapturedGeneration, String)> {
+    generate_with_capture_inner(llm, prompt, max_tokens, fixture_id, Some(destination))
+}
+
+fn generate_with_capture_inner(
+    llm: &mut LLM,
+    prompt: Prompt,
+    max_tokens: usize,
+    fixture_id: &str,
+    preserve: Option<&Path>,
+) -> Result<(CapturedGeneration, String)> {
     let call_id = unique_call_id(fixture_id);
     let workspace = CaptureWorkspace::new()?;
     let capture_env = CaptureEnvironment::install(&workspace.path, &call_id)?;
@@ -90,7 +110,22 @@ pub(crate) fn generate_with_capture(
         )
         .context("LLM::generate failed while diagnostic capture was active")?;
     drop(capture_env);
-    read_and_validate_capture(&workspace.path.join(DESTINATION_NAME), &call_id, &outputs)
+    let artifact_path = workspace.path.join(DESTINATION_NAME);
+    let captured = read_and_validate_capture(&artifact_path, &call_id, &outputs)?;
+    let bytes = std::fs::read(&artifact_path).context("reading validated capture for identity")?;
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if let Some(destination) = preserve {
+        if destination.exists() || destination.is_symlink() {
+            bail!("preserved capture destination must be fresh and non-existing");
+        }
+        std::fs::hard_link(&artifact_path, destination).with_context(|| {
+            format!(
+                "publishing validated raw capture to {}",
+                destination.display()
+            )
+        })?;
+    }
+    Ok((captured, sha256))
 }
 
 fn unique_call_id(fixture_id: &str) -> String {

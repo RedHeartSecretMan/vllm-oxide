@@ -4,6 +4,7 @@ from functools import partial
 import pytest
 from pydantic import ValidationError
 
+from golden_gen.config import COMPARISON_KERNEL_SCOPE
 from golden_gen.manifest import (
     build_manifest as _build_manifest,
 )
@@ -21,11 +22,14 @@ from golden_gen.schema import (
     OracleVersions,
     TolerancePolicy,
 )
+from tests.support import pinned_kernel_paths, release_runtime
 
 MODEL_REVISION = "7e4ae267688d671ddfca3122e4528ee980cf3234"
 build_manifest = partial(
     _build_manifest,
     archive=ArchiveInfo(filename="goldens-v0.2.tar.gz", sha256="a" * 64),
+    runtime=release_runtime(),
+    kernel_paths=pinned_kernel_paths(),
 )
 
 
@@ -33,7 +37,7 @@ def same_prefix_policy() -> TolerancePolicy:
     return TolerancePolicy(
         version="same-prefix-v1",
         dtype="bfloat16",
-        kernel="sdpa",
+        kernel=COMPARISON_KERNEL_SCOPE,
         l1_near_tie_max_abs_logit_gap=0.02,
         l2_atol=0.01,
         rationale="Reviewed synthetic policy",

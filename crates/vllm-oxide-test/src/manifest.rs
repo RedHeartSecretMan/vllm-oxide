@@ -6,7 +6,9 @@ use safetensors::SafeTensors;
 
 use crate::types::{
     FixtureData, FixtureFamily, FixtureMetadata, Manifest, OracleName, OracleRole, PromptCategory,
-    RequiredComparison, ARCHIVE_FILENAME, GOLDEN_VERSION, MANIFEST_SCHEMA_VERSION, PRODUCT_VERSION,
+    RequiredComparison, ARCHIVE_FILENAME, BASELINE_KERNEL_PATH, CANDIDATE_KERNEL_PATH,
+    GOLDEN_VERSION, MANIFEST_SCHEMA_VERSION, MODEL_CONFIG_SHA256, MODEL_ID, MODEL_REVISION,
+    MODEL_WEIGHTS_SHA256, PRODUCT_VERSION, REFERENCE_KERNEL_PATH, TOKENIZER_SHA256,
 };
 
 /// Parse a `manifest.json` file.
@@ -18,13 +20,38 @@ pub fn parse_manifest(path: &Path) -> Result<Manifest> {
 
 /// Parse and validate manifest bytes received from a non-filesystem source.
 pub fn parse_manifest_bytes(content: &[u8], source: &str) -> Result<Manifest> {
+    parse_manifest_bytes_for(content, source, ManifestPurpose::Authoritative)
+}
+
+/// Parse the pending zero-threshold manifest without authorizing holdout access.
+pub fn parse_observation_manifest(path: &Path) -> Result<Manifest> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading observation manifest from {}", path.display()))?;
+    parse_manifest_bytes_for(
+        content.as_bytes(),
+        &path.display().to_string(),
+        ManifestPurpose::Observation,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestPurpose {
+    Observation,
+    Authoritative,
+}
+
+fn parse_manifest_bytes_for(
+    content: &[u8],
+    source: &str,
+    purpose: ManifestPurpose,
+) -> Result<Manifest> {
     let manifest: Manifest = serde_json::from_slice(content)
         .map_err(|error| anyhow::anyhow!("parsing manifest from {source}: {error}"))?;
-    validate_manifest_contract(&manifest)?;
+    validate_manifest_contract(&manifest, purpose)?;
     Ok(manifest)
 }
 
-fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
+fn validate_manifest_contract(manifest: &Manifest, purpose: ManifestPurpose) -> Result<()> {
     if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported manifest schema_version {}; expected {MANIFEST_SCHEMA_VERSION}",
@@ -49,6 +76,18 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
     if manifest.model.dtype != "bfloat16" || manifest.generation.attn_implementation != "sdpa" {
         anyhow::bail!("golden manifest requires the Transformers BF16 SDPA reference oracle");
     }
+    if manifest.model.id != MODEL_ID
+        || manifest.model.revision != MODEL_REVISION
+        || manifest.model.tokenizer_revision != MODEL_REVISION
+        || manifest.model.config_sha256 != MODEL_CONFIG_SHA256
+        || manifest.model.tokenizer_sha256 != TOKENIZER_SHA256
+        || manifest.model.weights_sha256 != MODEL_WEIGHTS_SHA256
+        || manifest.model.arch != "Qwen3ForCausalLM"
+        || manifest.model.vocab_size != 151_936
+    {
+        anyhow::bail!("manifest model and tokenizer identity does not match ADR-0012");
+    }
+    validate_runtime_and_kernels(manifest)?;
     let policy = &manifest.tolerance_policy;
     if policy.version != "same-prefix-v1" {
         anyhow::bail!("unsupported tolerance policy version: {}", policy.version);
@@ -61,15 +100,30 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
         anyhow::bail!("tolerance policy thresholds must be finite and non-negative");
     }
     if policy.dtype != manifest.model.dtype
-        || policy.kernel != manifest.generation.attn_implementation
+        || policy.kernel != manifest.kernel_paths.comparison_scope()
     {
-        anyhow::bail!("tolerance policy scope does not match model dtype and kernel");
+        anyhow::bail!("tolerance policy scope does not match model dtype and kernel paths");
     }
-    if policy.rationale.trim().is_empty()
-        || policy.evidence.is_empty()
-        || policy.evidence.iter().any(|item| item.trim().is_empty())
-    {
-        anyhow::bail!("tolerance policy requires non-empty rationale and evidence");
+    match purpose {
+        ManifestPurpose::Observation => {
+            if policy.l1_near_tie_max_abs_logit_gap != 0.0
+                || policy.l2_atol != 0.0
+                || !policy.evidence.is_empty()
+                || !policy.rationale.to_ascii_lowercase().contains("pending")
+            {
+                anyhow::bail!(
+                    "calibration observation requires pending zero-threshold policy metadata"
+                );
+            }
+        }
+        ManifestPurpose::Authoritative => {
+            if policy.rationale.trim().is_empty()
+                || policy.evidence.is_empty()
+                || policy.evidence.iter().any(|item| item.trim().is_empty())
+            {
+                anyhow::bail!("tolerance policy requires non-empty rationale and evidence");
+            }
+        }
     }
     let calibration = &manifest.baseline_calibration;
     if !calibration.candidate_atol.is_finite()
@@ -252,8 +306,86 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+fn validate_runtime_and_kernels(manifest: &Manifest) -> Result<()> {
+    let runtime = &manifest.runtime;
+    if runtime.evidence_mode != "release" {
+        anyhow::bail!("release comparison rejects non-release runtime evidence");
+    }
+    if runtime.registry_install_mode != "locked-wheels-only"
+        || runtime.pythonhashseed != "0"
+        || runtime.cublas_workspace_config != ":4096:8"
+        || runtime.torch_version != "2.10.0"
+        || runtime.torch_cuda_version != "12.8"
+        || runtime.transformers_version != "4.57.6"
+        || runtime.vllm_version != "0.18.1"
+        || runtime.xgrammar_version != "0.2.3"
+        || runtime.triton_version != "3.6.0"
+        || runtime.cuda_toolkit_version != "13.2.51"
+        || runtime.compute_capability != "8.9"
+        || !runtime.python_version.starts_with("3.12.")
+    {
+        anyhow::bail!("manifest runtime does not match the locked ADR-0012 environment");
+    }
+    if manifest.oracle_versions.transformers != runtime.transformers_version
+        || manifest.oracle_versions.vllm != runtime.vllm_version
+    {
+        anyhow::bail!("oracle_versions do not match the pinned runtime");
+    }
+    let live_values = [
+        runtime.rustc_version.as_str(),
+        runtime.nvidia_driver_version.as_str(),
+        runtime.gpu_name.as_str(),
+        runtime.os_kernel.as_str(),
+    ];
+    if live_values.iter().any(|value| {
+        let value = value.to_ascii_lowercase();
+        value.is_empty()
+            || ["unknown", "fallback", "auto", "dry-run"]
+                .iter()
+                .any(|forbidden| value.contains(forbidden))
+    }) || !is_lowercase_hex(&runtime.generator_commit, 40)
+        || !is_lowercase_sha256(&runtime.uv_lock_sha256)
+    {
+        anyhow::bail!("manifest runtime contains an unknown or malformed host identity");
+    }
+
+    let mut wheels = HashMap::new();
+    for wheel in &runtime.wheels {
+        let normalized = wheel.name.to_ascii_lowercase().replace('_', "-");
+        if wheels.insert(normalized, wheel).is_some()
+            || !wheel.filename.ends_with(".whl")
+            || wheel.filename.contains(['/', '\\'])
+            || !is_lowercase_sha256(&wheel.sha256)
+        {
+            anyhow::bail!("runtime resolved wheel identity is malformed or duplicate");
+        }
+    }
+    for (name, version) in [
+        ("torch", "2.10.0"),
+        ("transformers", "4.57.6"),
+        ("vllm", "0.18.1"),
+        ("xgrammar", "0.2.3"),
+        ("triton", "3.6.0"),
+    ] {
+        if wheels.get(name).map(|wheel| wheel.version.as_str()) != Some(version) {
+            anyhow::bail!("runtime locked wheel set is incomplete or version-inconsistent");
+        }
+    }
+    if manifest.kernel_paths.reference != REFERENCE_KERNEL_PATH
+        || manifest.kernel_paths.baseline != BASELINE_KERNEL_PATH
+        || manifest.kernel_paths.candidate != CANDIDATE_KERNEL_PATH
+    {
+        anyhow::bail!("manifest kernel paths do not match ADR-0012");
+    }
+    Ok(())
+}
+
 fn is_lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
+    is_lowercase_hex(value, 64)
+}
+
+fn is_lowercase_hex(value: &str, length: usize) -> bool {
+    value.len() == length
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
@@ -421,6 +553,37 @@ mod tests {
     use super::{load_fixture, parse_manifest};
     use crate::types::{FixtureMetadata, LogitsDtype, OracleName, PromptCategory};
 
+    fn runtime_json() -> Value {
+        json!({
+            "evidence_mode": "release",
+            "registry_install_mode": "locked-wheels-only",
+            "pythonhashseed": "0",
+            "cublas_workspace_config": ":4096:8",
+            "python_version": "3.12.13",
+            "torch_version": "2.10.0",
+            "torch_cuda_version": "12.8",
+            "transformers_version": "4.57.6",
+            "vllm_version": "0.18.1",
+            "xgrammar_version": "0.2.3",
+            "triton_version": "3.6.0",
+            "cuda_toolkit_version": "13.2.51",
+            "rustc_version": "rustc 1.89.0",
+            "nvidia_driver_version": "595.71",
+            "gpu_name": "NVIDIA GeForce RTX 4080",
+            "compute_capability": "8.9",
+            "os_kernel": "Linux 6.18.33.2-microsoft-standard-WSL2",
+            "generator_commit": "1111111111111111111111111111111111111111",
+            "uv_lock_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "wheels": [
+                {"name": "torch", "version": "2.10.0", "filename": "torch.whl", "sha256": "3".repeat(64)},
+                {"name": "transformers", "version": "4.57.6", "filename": "transformers.whl", "sha256": "4".repeat(64)},
+                {"name": "vllm", "version": "0.18.1", "filename": "vllm.whl", "sha256": "5".repeat(64)},
+                {"name": "xgrammar", "version": "0.2.3", "filename": "xgrammar.whl", "sha256": "6".repeat(64)},
+                {"name": "triton", "version": "3.6.0", "filename": "triton.whl", "sha256": "7".repeat(64)}
+            ]
+        })
+    }
+
     fn valid_manifest_json() -> Value {
         json!({
             "schema_version": 4,
@@ -434,11 +597,21 @@ mod tests {
             "model": {
                 "id": "Qwen/Qwen3-0.6B",
                 "revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+                "tokenizer_revision": "7e4ae267688d671ddfca3122e4528ee980cf3234",
+                "config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+                "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+                "weights_sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b",
                 "arch": "Qwen3ForCausalLM",
                 "dtype": "bfloat16",
                 "vocab_size": 151_936
             },
-            "oracle_versions": {"transformers": "5.0", "vllm": "0.26"},
+            "oracle_versions": {"transformers": "4.57.6", "vllm": "0.18.1"},
+            "runtime": runtime_json(),
+            "kernel_paths": {
+                "reference": "transformers-4.57.6/torch-2.10.0/sdpa-math",
+                "baseline": "vllm-0.18.1/flash-attn-v2/eager",
+                "candidate": "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/flash-attn-varlen+paged-windowed"
+            },
             "generation": {
                 "canonical_max_tokens": 64,
                 "regression_max_tokens": 32,
@@ -454,7 +627,7 @@ mod tests {
             "tolerance_policy": {
                 "version": "same-prefix-v1",
                 "dtype": "bfloat16",
-                "kernel": "sdpa",
+                "kernel": "transformers-4.57.6/torch-2.10.0/sdpa-math::vs::vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/flash-attn-varlen+paged-windowed",
                 "l1_near_tie_max_abs_logit_gap": 0.02,
                 "l2_atol": 0.01,
                 "rationale": "Reviewed synthetic policy",
@@ -635,6 +808,31 @@ mod tests {
         assert_eq!(parsed.tolerance_policy.l1_near_tie_max_abs_logit_gap, 0.02);
         assert_eq!(parsed.tolerance_policy.l2_atol, 0.01);
         assert_eq!(parsed.tolerance_policy.evidence, ["synthetic:manifest"]);
+    }
+
+    #[test]
+    fn observation_manifest_requires_zero_thresholds_and_never_passes_authoritative_parse() {
+        let mut manifest = valid_manifest_json();
+        manifest["tolerance_policy"]["l1_near_tie_max_abs_logit_gap"] = json!(0.0);
+        manifest["tolerance_policy"]["l2_atol"] = json!(0.0);
+        manifest["tolerance_policy"]["rationale"] = json!("pending empirical approval");
+        manifest["tolerance_policy"]["evidence"] = json!([]);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+
+        super::parse_manifest_bytes_for(
+            &bytes,
+            "observation manifest",
+            super::ManifestPurpose::Observation,
+        )
+        .unwrap();
+        let error = super::parse_manifest_bytes(&bytes, "authoritative manifest")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("non-empty rationale and evidence"),
+            "{error}"
+        );
     }
 
     #[test]

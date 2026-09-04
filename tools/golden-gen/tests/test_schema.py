@@ -5,6 +5,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from golden_gen.config import (
+    COMPARISON_KERNEL_SCOPE,
+    MODEL_CONFIG_SHA256,
+    MODEL_REVISION,
+    MODEL_WEIGHTS_SHA256,
+    TOKENIZER_SHA256,
+)
 from golden_gen.schema import (
     ArchiveInfo,
     BaselineCalibration,
@@ -17,6 +24,7 @@ from golden_gen.schema import (
     PromptSpec,
     TolerancePolicy,
 )
+from tests.support import pinned_kernel_paths, release_runtime
 
 
 class TestTolerancePolicy:
@@ -315,7 +323,7 @@ class TestManifest:
                 fixture_id="canonical_01.transformers",
                 prompt_id="canonical_01",
                 family="canonical",
-                model_revision="abc123",
+                model_revision=MODEL_REVISION,
                 dtype="bfloat16",
                 oracle="transformers",
                 oracle_role="reference",
@@ -326,7 +334,7 @@ class TestManifest:
                 fixture_id="canonical_01.vllm",
                 prompt_id="canonical_01",
                 family="canonical",
-                model_revision="abc123",
+                model_revision=MODEL_REVISION,
                 dtype="bfloat16",
                 oracle="vllm",
                 oracle_role="baseline",
@@ -342,12 +350,18 @@ class TestManifest:
             generated_at=datetime.now(UTC),
             model=ModelInfo(
                 id="Qwen/Qwen3-0.6B",
-                revision="abc123",
+                revision=MODEL_REVISION,
+                tokenizer_revision=MODEL_REVISION,
+                config_sha256=MODEL_CONFIG_SHA256,
+                tokenizer_sha256=TOKENIZER_SHA256,
+                weights_sha256=MODEL_WEIGHTS_SHA256,
                 arch="Qwen3ForCausalLM",
                 dtype="bfloat16",
                 vocab_size=151936,
             ),
-            oracle_versions=OracleVersions(transformers="4.43.0", vllm="0.26.0"),
+            oracle_versions=OracleVersions(transformers="4.57.6", vllm="0.18.1"),
+            runtime=release_runtime(),
+            kernel_paths=pinned_kernel_paths(),
             generation=GenerationConfig(
                 canonical_max_tokens=64,
                 regression_max_tokens=32,
@@ -357,7 +371,7 @@ class TestManifest:
             tolerance_policy=TolerancePolicy(
                 version="same-prefix-v1",
                 dtype="bfloat16",
-                kernel="sdpa",
+                kernel=COMPARISON_KERNEL_SCOPE,
                 l1_near_tie_max_abs_logit_gap=0.02,
                 l2_atol=0.01,
                 rationale="Reviewed synthetic policy",

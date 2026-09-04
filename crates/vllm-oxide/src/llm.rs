@@ -30,7 +30,7 @@ use crate::sampler::{Sampler, SamplingParams};
 use initialization::initialize_model;
 
 #[cfg(feature = "internal-golden")]
-use crate::golden_capture::CaptureSession;
+use crate::golden_capture::{BenchmarkSession, CaptureSession};
 
 /// Construction-time configuration for `LLM::new`.
 /// Mirrors the supported single-GPU subset of nano-vllm's `Config`.
@@ -220,7 +220,18 @@ impl LLM {
         #[cfg(feature = "internal-golden")]
         let mut capture = CaptureSession::from_env()
             .context("generate: invalid internal golden capture configuration")?;
+        #[cfg(feature = "internal-golden")]
+        let mut benchmark = BenchmarkSession::from_env()
+            .context("generate: invalid internal benchmark telemetry configuration")?;
+        #[cfg(feature = "internal-golden")]
+        if capture.is_some() && benchmark.is_some() {
+            bail!("generate: raw-logit capture and benchmark telemetry are mutually exclusive");
+        }
         if prompts.is_empty() {
+            #[cfg(feature = "internal-golden")]
+            if benchmark.is_some() {
+                bail!("generate: benchmark telemetry requires at least one prompt");
+            }
             #[cfg(feature = "internal-golden")]
             if let Some(capture) = capture.as_mut() {
                 capture.bind_requests(&[])?;
@@ -232,18 +243,27 @@ impl LLM {
             return Ok(Vec::new());
         }
 
-        let mut prompt_lens: Vec<usize> = Vec::with_capacity(prompts.len());
+        let tokenized_prompts = prompts
+            .iter()
+            .map(|prompt| tokenize_prompt(prompt, &self.tokenizer))
+            .collect::<Result<Vec<_>>>()?;
+        let prompt_lens = tokenized_prompts.iter().map(Vec::len).collect::<Vec<_>>();
         let mut request_ids = Vec::with_capacity(prompts.len());
-        for (prompt, params) in prompts.iter().zip(sampling_params.iter()) {
-            let token_ids = tokenize_prompt(prompt, &self.tokenizer)?;
-            let len = token_ids.len();
-            prompt_lens.push(len);
+        #[cfg(feature = "internal-golden")]
+        let admission = Instant::now();
+        for (token_ids, params) in tokenized_prompts.into_iter().zip(sampling_params.iter()) {
             let request_id = self.engine.add_request(token_ids, params.clone());
             request_ids.push(request_id);
         }
         #[cfg(feature = "internal-golden")]
         if let Some(capture) = capture.as_mut() {
             if let Err(error) = capture.bind_requests(&request_ids) {
+                return Err(self.abort_after_capture_error(error));
+            }
+        }
+        #[cfg(feature = "internal-golden")]
+        if let Some(benchmark) = benchmark.as_mut() {
+            if let Err(error) = benchmark.bind_requests(&request_ids) {
                 return Err(self.abort_after_capture_error(error));
             }
         }
@@ -255,7 +275,39 @@ impl LLM {
 
         while self.engine.is_running() {
             #[cfg(feature = "internal-golden")]
-            let outputs = if let Some(capture) = capture.as_mut() {
+            if capture.is_some() || benchmark.is_some() {
+                if let Err(error) = require_diagnostic_host_ram_floor() {
+                    return Err(self.abort_after_capture_error(error));
+                }
+            }
+            #[cfg(feature = "internal-golden")]
+            let outputs = if let Some(benchmark) = benchmark.as_mut() {
+                if let Err(error) = self.device.synchronize() {
+                    return Err(self.abort_after_capture_error(
+                        anyhow!(error).context("generate: synchronizing benchmark step start"),
+                    ));
+                }
+                let started_ns = duration_ns(admission.elapsed())?;
+                let (outputs, step_telemetry) =
+                    self.engine.step_with_telemetry().with_context(|| {
+                        format!(
+                            "generate: runtime failure for {}",
+                            format_request_diagnostics(&request_ids, sampling_params)
+                        )
+                    })?;
+                if let Err(error) = self.device.synchronize() {
+                    return Err(self.abort_after_capture_error(
+                        anyhow!(error).context("generate: synchronizing benchmark step end"),
+                    ));
+                }
+                let ended_ns = duration_ns(admission.elapsed())?;
+                if let Err(error) =
+                    benchmark.record_engine_step(step_telemetry, started_ns, ended_ns)
+                {
+                    return Err(self.abort_after_capture_error(error));
+                }
+                outputs
+            } else if let Some(capture) = capture.as_mut() {
                 let (outputs, step_capture) =
                     self.engine.step_with_capture().with_context(|| {
                         format!(
@@ -328,6 +380,12 @@ impl LLM {
                 .finish(&results)
                 .context("generate: publishing internal golden capture")?;
         }
+        #[cfg(feature = "internal-golden")]
+        if let Some(benchmark) = benchmark.take() {
+            benchmark
+                .finish(&results)
+                .context("generate: publishing internal benchmark telemetry")?;
+        }
 
         Ok(results)
     }
@@ -342,6 +400,31 @@ impl LLM {
             )),
         }
     }
+}
+
+#[cfg(feature = "internal-golden")]
+fn duration_ns(duration: std::time::Duration) -> Result<u64> {
+    u64::try_from(duration.as_nanos()).context("benchmark duration exceeds u64 nanoseconds")
+}
+
+#[cfg(feature = "internal-golden")]
+fn require_diagnostic_host_ram_floor() -> Result<()> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo")
+        .context("reading host memory guard from /proc/meminfo")?;
+    let available_kib = meminfo
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("MemAvailable:")?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .ok_or_else(|| anyhow!("MemAvailable is unavailable; refusing diagnostic GPU work"))?;
+    if available_kib < 16 * 1024 * 1024 {
+        bail!("available host RAM fell below the 16 GiB diagnostic floor");
+    }
+    Ok(())
 }
 
 fn format_request_diagnostics(request_ids: &[usize], sampling_params: &[SamplingParams]) -> String {

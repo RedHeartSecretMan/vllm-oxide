@@ -6,6 +6,7 @@ import pytest
 
 import golden_gen.assets as assets
 from golden_gen.assets import _rename_no_replace, build_fixture_archive, publish_release_bundle
+from golden_gen.config import COMPARISON_KERNEL_SCOPE
 from golden_gen.manifest import (
     build_expected_fixtures,
     build_manifest,
@@ -18,17 +19,18 @@ from golden_gen.schema import (
     FixtureMetadata,
     TolerancePolicy,
 )
+from tests.support import pinned_kernel_paths, release_runtime
 
 
-def _fixture(name: str, payload: bytes) -> FixtureMetadata:
+def _fixture(name: str, payload: bytes, family: str = "canonical") -> FixtureMetadata:
     prompt_id, oracle, _ = name.split(".", maxsplit=2)
     return FixtureMetadata(
         prompt_id=prompt_id,
-        category="canonical",
+        category="regression" if family == "regression" else "canonical",
         oracle=oracle,  # type: ignore[arg-type]
         num_tokens=1,
         logits_dtype="float32",
-        logits_shape=(1, 1),
+        logits_shape=(0, 0) if family == "regression" else (1, 1),
         sha256=hashlib.sha256(payload).hexdigest(),
         filename=name,
     )
@@ -37,20 +39,33 @@ def _fixture(name: str, payload: bytes) -> FixtureMetadata:
 def _ready_fixture_dir(root):
     fixture_dir = root / "fixtures"
     fixture_dir.mkdir()
+    cases = [
+        *[(f"canonical_{index:02d}", "canonical") for index in range(1, 5)],
+        *[(f"canonical_05{suffix}", "batch") for suffix in "abcd"],
+        *[(f"regression_{index:02d}", "regression") for index in range(1, 21)],
+    ]
     payloads = {
-        "canonical_01.transformers.safetensors": b"reference",
-        "canonical_01.vllm.safetensors": b"baseline",
+        f"{prompt_id}.{oracle}.safetensors": f"{prompt_id}:{oracle}".encode()
+        for prompt_id, _family in cases
+        for oracle in ("transformers", "vllm")
     }
+    family_by_id = dict(cases)
     for name, payload in payloads.items():
         (fixture_dir / name).write_bytes(payload)
-    fixtures = [_fixture(name, payload) for name, payload in payloads.items()]
+    fixtures = [
+        _fixture(name, payload, family_by_id[name.split(".", maxsplit=1)[0]])
+        for name, payload in payloads.items()
+    ]
     archive = build_fixture_archive(
         fixture_dir,
         fixtures,
         fixture_dir / "goldens-v0.2.tar.gz",
     )
     expected = build_expected_fixtures(
-        [DiscoveredFixture(prompt_id="canonical_01", family="canonical", prompt="hello")]
+        [
+            DiscoveredFixture(prompt_id=prompt_id, family=family, prompt="contract")
+            for prompt_id, family in cases
+        ]
     )
     manifest = build_manifest(
         fixtures,
@@ -64,15 +79,17 @@ def _ready_fixture_dir(root):
         tolerance_policy=TolerancePolicy(
             version="same-prefix-v1",
             dtype="bfloat16",
-            kernel="sdpa",
+            kernel=COMPARISON_KERNEL_SCOPE,
             l1_near_tie_max_abs_logit_gap=0.02,
             l2_atol=0.01,
             rationale="reviewed test policy",
             evidence=["test:assets"],
         ),
         expected_fixtures=expected,
+        runtime=release_runtime(),
+        kernel_paths=pinned_kernel_paths(),
     )
-    manifest.calibrated_fixtures = ["canonical_01.vllm"]
+    manifest.calibrated_fixtures = [f"{prompt_id}.vllm" for prompt_id, _family in cases]
     write_manifest(manifest, fixture_dir / "manifest.json")
     return fixture_dir
 
@@ -194,7 +211,11 @@ def test_publisher_rejects_incomplete_calibration_and_preserves_existing_destina
     with pytest.raises(ValueError, match="complete baseline calibration"):
         publish_release_bundle(fixture_dir, tmp_path / "release")
 
-    manifest.calibrated_fixtures = ["canonical_01.vllm"]
+    manifest.calibrated_fixtures = [
+        fixture.fixture_id
+        for fixture in manifest.expected_fixtures
+        if fixture.oracle_role == "baseline"
+    ]
     write_manifest(manifest, fixture_dir / "manifest.json")
     release_dir = tmp_path / "existing"
     release_dir.mkdir()

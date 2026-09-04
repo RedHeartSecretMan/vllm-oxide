@@ -13,11 +13,20 @@ publish = false
 name = "vllm-oxide-test"
 path = "src/main.rs"
 
+[[bin]]
+name = "vllm-oxide-benchmark"
+path = "src/bin/benchmark.rs"
+
+[[bin]]
+name = "vllm-oxide-observe"
+path = "src/bin/observe.rs"
+
 [features]
 cuda = ["vllm_oxide/cuda"]
 
 [dependencies]
 vllm_oxide = { path = "../vllm-oxide", features = ["internal-golden"] }
+candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Rebuilt the `goldens-v0.2` workflow around pinned model/tokenizer/runtime and
+  kernel identities, bit-identical oracle/candidate replay, a sealed four-case
+  tolerance holdout, fixed private benchmark telemetry, content-bound stage
+  markers, and a separately authorized exact-two-asset publication stage.
+
 ### Changed
 
 - **Breaking (v0.2.0):** contracted the default `vllm_oxide` crate root to

@@ -11,6 +11,8 @@
 //! This is a **release gate** (manual, GPU). CI green (CPU property tests)
 //! does NOT imply numerical validation — see README.
 
+pub mod approval;
+pub mod benchmark;
 pub mod download;
 pub mod driver;
 pub mod l1;
@@ -18,6 +20,7 @@ pub mod l2;
 pub mod l3;
 pub mod lifecycle;
 pub mod manifest;
+pub mod observation;
 pub mod prompts;
 pub mod report;
 pub mod types;
@@ -30,7 +33,9 @@ pub use l1::{compare_l1, compare_l1_tokens_only, L1Result};
 pub use l2::{compare_l2, L2Result};
 pub use l3::{compare_l3, L3Result};
 pub use lifecycle::LifecycleTracker;
-pub use manifest::{load_fixture, parse_manifest, parse_manifest_bytes};
+pub use manifest::{
+    load_fixture, parse_manifest, parse_manifest_bytes, parse_observation_manifest,
+};
 pub use report::{print_report, ComparisonReport, LifecycleTotals};
 pub use types::{
     ArchiveInfo, BaselineCalibration, ExpectedFixture, FixtureData, FixtureFamily, FixtureMetadata,

@@ -10,11 +10,15 @@ from golden_gen.config import (
     ATTN_IMPLEMENTATION,
     CANONICAL_MAX_TOKENS,
     GOLDEN_VERSION,
+    MODEL_CONFIG_SHA256,
     MODEL_DTYPE,
     MODEL_ID,
     MODEL_REVISION,
+    MODEL_WEIGHTS_SHA256,
     PRODUCT_VERSION,
     REGRESSION_MAX_TOKENS,
+    TOKENIZER_REVISION,
+    TOKENIZER_SHA256,
     VOCAB_SIZE,
 )
 from golden_gen.schema import (
@@ -24,12 +28,14 @@ from golden_gen.schema import (
     ExpectedFixture,
     FixtureMetadata,
     GenerationConfig,
+    KernelPaths,
     Manifest,
     ModelInfo,
     OracleName,
     OracleRole,
     OracleVersions,
     RequiredComparison,
+    RuntimeInfo,
     TolerancePolicy,
 )
 
@@ -88,6 +94,8 @@ def build_manifest(
     archive: ArchiveInfo,
     tolerance_policy: TolerancePolicy,
     expected_fixtures: list[ExpectedFixture],
+    runtime: RuntimeInfo,
+    kernel_paths: KernelPaths,
     generated_at: datetime | None = None,
 ) -> Manifest:
     """Build a Manifest from fixtures, baseline observations, and tolerance policy.
@@ -114,11 +122,20 @@ def build_manifest(
         model=ModelInfo(
             id=MODEL_ID,
             revision=MODEL_REVISION,
+            tokenizer_revision=TOKENIZER_REVISION,
+            config_sha256=MODEL_CONFIG_SHA256,
+            tokenizer_sha256=TOKENIZER_SHA256,
+            weights_sha256=MODEL_WEIGHTS_SHA256,
             arch=ARCH,
             dtype=MODEL_DTYPE,
             vocab_size=VOCAB_SIZE,
         ),
-        oracle_versions=get_oracle_versions(),
+        oracle_versions=OracleVersions(
+            transformers=runtime.transformers_version,
+            vllm=runtime.vllm_version,
+        ),
+        runtime=runtime,
+        kernel_paths=kernel_paths,
         generation=GenerationConfig(
             canonical_max_tokens=CANONICAL_MAX_TOKENS,
             regression_max_tokens=REGRESSION_MAX_TOKENS,
