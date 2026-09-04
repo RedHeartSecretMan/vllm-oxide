@@ -115,7 +115,7 @@ impl Workspace {
         let mut temp_storage_bytes = 0usize;
         let status =
             unsafe { ffi::vllm_oxide_sampling_workspace_bytes(vocab_u32, &mut temp_storage_bytes) };
-        check_status(status, "workspace-size query", None)?;
+        check_status(status, "workspace-size query")?;
 
         let history_capacity = next_capacity(history_len)?;
         let alloc = |shape, dtype, label: &str| {
@@ -231,6 +231,11 @@ fn prepare_batch(
     prepared.history_offsets.push(0);
 
     for (row, (params, history)) in params.iter().zip(token_history).enumerate() {
+        params.validate().map_err(|error| {
+            Error::msg(format!(
+                "sampler CUDA adapter: sampling params at row {row}{error}"
+            ))
+        })?;
         prepared.temperatures.push(params.temperature);
         let top_k = params.top_k.unwrap_or(vocab_size).min(vocab_size);
         prepared.top_ks.push(u32::try_from(top_k).map_err(|_| {
@@ -477,11 +482,12 @@ pub(super) fn sample(
             )
         }
     };
-    check_status(
-        status,
-        stage_name(failed_stage),
-        (failed_row >= 0).then_some(failed_row),
-    )?;
+    if status != 0 && failed_row != -1 {
+        return Err(Error::msg(format!(
+            "sampler CUDA adapter violated error attribution contract: runtime status {status} reported origin row {failed_row}"
+        )));
+    }
+    check_status(status, stage_name(failed_stage))?;
     Ok(selected_tokens)
 }
 
@@ -502,7 +508,7 @@ fn stage_name(stage: c_int) -> &'static str {
     }
 }
 
-fn check_status(status: c_int, stage: &str, row: Option<c_int>) -> Result<()> {
+fn check_status(status: c_int, stage: &str) -> Result<()> {
     if status == 0 {
         return Ok(());
     }
@@ -514,8 +520,15 @@ fn check_status(status: c_int, stage: &str, row: Option<c_int>) -> Result<()> {
             CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
     };
-    let row = row.map_or_else(String::new, |row| format!(" at row {row}"));
     Err(Error::msg(format!(
-        "sampler CUDA {stage} failed{row}: {description} (status {status})"
+        "sampler CUDA error observed during {stage}: {description} (status {status})"
     )))
+}
+
+#[cfg(test)]
+pub(super) fn injected_error_observation(stage: c_int) -> Result<String> {
+    match check_status(1, stage_name(stage)) {
+        Ok(()) => Err(Error::msg("injected CUDA status unexpectedly succeeded")),
+        Err(error) => Ok(error.to_string()),
+    }
 }

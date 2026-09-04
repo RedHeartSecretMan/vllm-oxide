@@ -353,10 +353,11 @@ extern "C" int vllm_oxide_sample_f32(
     *failed_stage = 0;
     *failed_row = -1;
 
-#define TRY_STAGE(expression, stage, row)         \
+#define TRY_STAGE(expression, stage)              \
     do {                                           \
+        /* CUDA APIs may surface an earlier asynchronous error here. */ \
         *failed_stage = (stage);                   \
-        *failed_row = (row);                       \
+        *failed_row = -1;                          \
         status = (expression);                     \
         if (status != cudaSuccess) goto finish;    \
     } while (false)
@@ -376,8 +377,7 @@ extern "C" int vllm_oxide_sample_f32(
                 static_cast<size_t>(history_len) * sizeof(uint32_t),
                 cudaMemcpyHostToDevice,
                 stream),
-            kHistoryH2D,
-            -1);
+            kHistoryH2D);
         TRY_STAGE(
             cudaMemcpyAsync(
                 history_counts_device,
@@ -385,8 +385,7 @@ extern "C" int vllm_oxide_sample_f32(
                 static_cast<size_t>(history_len) * sizeof(uint32_t),
                 cudaMemcpyHostToDevice,
                 stream),
-            kHistoryH2D,
-            -1);
+            kHistoryH2D);
     }
 
     for (uint32_t row = 0; row < batch_size; ++row) {
@@ -397,7 +396,10 @@ extern "C" int vllm_oxide_sample_f32(
             !isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f) {
             status = cudaErrorInvalidValue;
             *failed_stage = 0;
-            *failed_row = static_cast<int>(row);
+            // Rust performs the authoritative synchronous per-row validation.
+            // This defensive CUDA-side guard must not claim an origin row:
+            // runtime APIs may surface an earlier asynchronous failure here.
+            *failed_row = -1;
             goto finish;
         }
 
@@ -416,8 +418,7 @@ extern "C" int vllm_oxide_sample_f32(
                     static_cast<size_t>(vocab_size) * sizeof(float),
                     cudaMemcpyDeviceToDevice,
                     stream),
-                kRowD2D,
-                static_cast<int>(row));
+                kRowD2D);
             apply_penalties_kernel<<<blocks_for(row_history_len), kThreads, 0, stream>>>(
                 keys_in,
                 history_tokens_device + history_begin,
@@ -426,7 +427,7 @@ extern "C" int vllm_oxide_sample_f32(
                 presence_penalties[row],
                 frequency_penalties[row],
                 repetition_penalties[row]);
-            TRY_STAGE(cudaGetLastError(), kPenalty, static_cast<int>(row));
+            TRY_STAGE(cudaGetLastError(), kPenalty);
             source = keys_in;
         }
 
@@ -434,7 +435,7 @@ extern "C" int vllm_oxide_sample_f32(
         if (greedy) {
             greedy_argmax_kernel<<<1, kThreads, 0, stream>>>(
                 source, vocab_size, selected_tokens, row);
-            TRY_STAGE(cudaGetLastError(), kGreedy, static_cast<int>(row));
+            TRY_STAGE(cudaGetLastError(), kGreedy);
             continue;
         }
 
@@ -450,16 +451,16 @@ extern "C" int vllm_oxide_sample_f32(
                 row_seeds[row],
                 selected_tokens,
                 row);
-            TRY_STAGE(cudaGetLastError(), kCategorical, static_cast<int>(row));
+            TRY_STAGE(cudaGetLastError(), kCategorical);
             continue;
         }
 
         scale_temperature_kernel<<<blocks_for(vocab_size), kThreads, 0, stream>>>(
             source, keys_in, vocab_size, temperature);
-        TRY_STAGE(cudaGetLastError(), kTemperature, static_cast<int>(row));
+        TRY_STAGE(cudaGetLastError(), kTemperature);
         init_token_indices_kernel<<<blocks_for(vocab_size), kThreads, 0, stream>>>(
             ids_in, vocab_size);
-        TRY_STAGE(cudaGetLastError(), kTokenIndices, static_cast<int>(row));
+        TRY_STAGE(cudaGetLastError(), kTokenIndices);
 
         size_t available_temp_storage = temp_storage_bytes;
         TRY_STAGE(
@@ -474,18 +475,17 @@ extern "C" int vllm_oxide_sample_f32(
                 0,
                 static_cast<int>(sizeof(float) * 8),
                 stream),
-            kRadixSort,
-            static_cast<int>(row));
+            kRadixSort);
 
         top_k_limit_kernel<<<1, 1, 0, stream>>>(keys_out, top_k, vocab_size, limits);
-        TRY_STAGE(cudaGetLastError(), kTopK, static_cast<int>(row));
+        TRY_STAGE(cudaGetLastError(), kTopK);
         if (top_p < 1.0f) {
             top_p_cutoff_kernel<<<1, kThreads, 0, stream>>>(
                 keys_out, limits, top_p, limits + 1);
-            TRY_STAGE(cudaGetLastError(), kTopP, static_cast<int>(row));
+            TRY_STAGE(cudaGetLastError(), kTopP);
         } else {
             copy_limit_kernel<<<1, 1, 0, stream>>>(limits, limits + 1);
-            TRY_STAGE(cudaGetLastError(), kTopP, static_cast<int>(row));
+            TRY_STAGE(cudaGetLastError(), kTopP);
         }
 
         categorical_gumbel_kernel<<<1, kThreads, 0, stream>>>(
@@ -498,7 +498,7 @@ extern "C" int vllm_oxide_sample_f32(
             row_seeds[row],
             selected_tokens,
             row);
-        TRY_STAGE(cudaGetLastError(), kCategorical, static_cast<int>(row));
+        TRY_STAGE(cudaGetLastError(), kCategorical);
     }
 
 finish:

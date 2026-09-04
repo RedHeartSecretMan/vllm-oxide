@@ -905,12 +905,23 @@ mod tests {
                 )
                 .unwrap_err();
             let message = error.to_string();
-            assert!(message.contains("row 0"), "missing row context: {message}");
-            assert!(message.contains("status"), "missing CUDA status: {message}");
+            assert!(
+                message.contains("sampling params at row 0.top_p=0.0"),
+                "missing synchronous row context: {message}"
+            );
             assert!(
                 HOST_TRANSFERS.with(|transfers| transfers.borrow().is_empty()),
                 "failed CUDA sampling must not fall back or transfer data"
             );
+
+            for stage in [3, 11] {
+                let observed = crate::sampler::cuda::injected_error_observation(stage).unwrap();
+                assert!(observed.contains("error observed during"));
+                assert!(
+                    !observed.contains("row"),
+                    "runtime/CUB error observations must never claim an origin row: {observed}"
+                );
+            }
 
             let retry_logits = logits.get(0).unwrap().unsqueeze(0).unwrap();
             let valid = SamplingParams {
