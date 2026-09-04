@@ -10,9 +10,27 @@ use anyhow::{anyhow, bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 
 use crate::attention::{
-    build_prefill_metadata, AttentionContext, PagedKVCache, PagedKVCacheGeometry,
+    build_decode_metadata, build_prefill_metadata, AttentionContext, PagedKVCache,
+    PagedKVCacheGeometry,
 };
 use crate::causal_lm::CausalLM;
+
+use super::EngineOptions;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DeviceMemory {
+    free_bytes: usize,
+    total_bytes: usize,
+}
+
+impl DeviceMemory {
+    pub(super) const fn new(free_bytes: usize, total_bytes: usize) -> Self {
+        Self {
+            free_bytes,
+            total_bytes,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct KvCacheAllocation {
@@ -21,6 +39,7 @@ pub(super) struct KvCacheAllocation {
     pub(super) bytes_per_block: usize,
     pub(super) pool_bytes: usize,
     pub(super) num_blocks: usize,
+    pub(super) warmup_prefill_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,29 +119,50 @@ impl KvCachePlan {
     }
 }
 
-pub(super) fn allocate_kv_cache(
-    paged_kv: &Arc<Mutex<PagedKVCache>>,
+pub(super) fn initialize_model(
+    model: &mut dyn CausalLM,
+    attn_ctx: &AttentionContext,
     device: &Device,
-    gpu_memory_utilization: f32,
-    max_model_len: usize,
+    options: &EngineOptions,
 ) -> Result<KvCacheAllocation> {
     device
         .synchronize()
         .context("synchronizing CUDA before KV cache sizing")?;
-    let (free_bytes, total_bytes) = cuda_mem_info()?;
-    let plan = allocate_kv_cache_with_available_memory(
-        paged_kv,
+    let (free_bytes, total_bytes) = super::cuda_mem_info()?;
+    initialize_model_with_available_memory(
+        model,
+        attn_ctx,
         device,
-        free_bytes,
-        gpu_memory_utilization,
-        max_model_len,
+        DeviceMemory::new(free_bytes, total_bytes),
+        options,
+    )
+}
+
+pub(super) fn initialize_model_with_available_memory(
+    model: &mut dyn CausalLM,
+    attn_ctx: &AttentionContext,
+    device: &Device,
+    memory: DeviceMemory,
+    options: &EngineOptions,
+) -> Result<KvCacheAllocation> {
+    let warmup_prefill_tokens = options
+        .max_num_batched_tokens
+        .min(options.max_model_len.saturating_sub(1));
+    let plan = allocate_kv_cache_with_available_memory(
+        &attn_ctx.paged_kv,
+        device,
+        memory.free_bytes,
+        options.gpu_memory_utilization,
+        options.max_model_len,
     )?;
+    warmup_model(model, attn_ctx, device, warmup_prefill_tokens)?;
     Ok(KvCacheAllocation {
-        free_bytes,
-        total_bytes,
+        free_bytes: memory.free_bytes,
+        total_bytes: memory.total_bytes,
         bytes_per_block: plan.bytes_per_block,
         pool_bytes: plan.pool_bytes,
         num_blocks: plan.num_blocks,
+        warmup_prefill_tokens,
     })
 }
 
@@ -174,7 +214,7 @@ pub(super) fn warmup_model(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| anyhow!("warmup slot mapping does not fit i64"))?;
 
-    let (cache_dtype, cache_slots) = {
+    let (cache_dtype, cache_slots, block_size) = {
         let cache = attn_ctx
             .paged_kv
             .lock()
@@ -183,19 +223,35 @@ pub(super) fn warmup_model(
             .num_blocks()
             .checked_mul(cache.block_size())
             .ok_or_else(|| anyhow!("KV cache capacity overflows addressable slots"))?;
-        (cache.dtype(), slots)
+        (cache.dtype(), slots, cache.block_size())
     };
-    if warmup_tokens > cache_slots {
+    let context_tokens = warmup_tokens
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("warmup shape overflows decode context length"))?;
+    if context_tokens > cache_slots {
         bail!(
-            "KV cache capacity is limiting: warmup requires {warmup_tokens} slots, \
+            "KV cache capacity is limiting: warmup requires {context_tokens} slots, \
              but the allocated cache has {cache_slots}"
         );
     }
+    let context_tokens_u32 = u32::try_from(context_tokens).map_err(|_| {
+        anyhow!("warmup shape is limiting: {context_tokens} context tokens do not fit u32")
+    })?;
+    let decode_slot =
+        i64::try_from(warmup_tokens).map_err(|_| anyhow!("warmup decode slot does not fit i64"))?;
+    let decode_blocks = (0..context_tokens.div_ceil(block_size))
+        .map(i32::try_from)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| anyhow!("warmup block table does not fit i32"))?;
 
     let input_ids = Tensor::zeros(warmup_tokens, DType::U32, device)?;
     let positions = Tensor::from_vec(positions, warmup_tokens, device)?;
+    let decode_input_ids = Tensor::zeros(1, DType::U32, device)?;
+    let decode_positions = Tensor::from_vec(vec![warmup_tokens_u32], 1, device)?;
     let warmup_meta =
         build_prefill_metadata(&[warmup_tokens_u32], &[warmup_tokens_u32], &slot_mapping);
+    let decode_meta =
+        build_decode_metadata(&[context_tokens_u32], &[decode_blocks], &[decode_slot]);
     let previous_meta = {
         let mut metadata = attn_ctx
             .attn_meta
@@ -205,32 +261,49 @@ pub(super) fn warmup_model(
     };
 
     let warmup_result = (|| -> Result<()> {
-        let hidden = model
-            .forward(&input_ids, &positions)
-            .context("warmup model forward")?;
-        if hidden.dim(0)? != warmup_tokens {
-            bail!(
-                "warmup model shape contract failed: expected {warmup_tokens} hidden rows, got {}",
-                hidden.dim(0)?
-            );
+        let mut execute_step =
+            |phase: &str, input_ids: &Tensor, positions: &Tensor| -> Result<()> {
+                let expected_rows = input_ids.dim(0)?;
+                let hidden = model
+                    .forward(input_ids, positions)
+                    .with_context(|| format!("warmup {phase} model forward"))?;
+                if hidden.dim(0)? != expected_rows {
+                    bail!(
+                        "warmup {phase} shape contract failed: expected {expected_rows} hidden \
+                         rows, got {}",
+                        hidden.dim(0)?
+                    );
+                }
+                if hidden.dtype() != cache_dtype {
+                    bail!(
+                        "warmup {phase} dtype contract failed: model produced {:?}, KV cache uses \
+                         {cache_dtype:?}",
+                        hidden.dtype()
+                    );
+                }
+                let final_hidden = hidden.get(expected_rows - 1)?.unsqueeze(0)?;
+                let logits = model
+                    .compute_logits(&final_hidden)
+                    .with_context(|| format!("warmup {phase} logits projection"))?;
+                if logits.dims() != [1, model.vocab_size()] {
+                    bail!(
+                        "warmup {phase} logits shape contract failed: expected [1, {}], got {:?}",
+                        model.vocab_size(),
+                        logits.dims()
+                    );
+                }
+                Ok(())
+            };
+
+        execute_step("prefill", &input_ids, &positions)?;
+        {
+            let mut metadata = attn_ctx
+                .attn_meta
+                .lock()
+                .map_err(|error| anyhow!("attn_meta lock for warmup decode: {error}"))?;
+            *metadata = decode_meta;
         }
-        if hidden.dtype() != cache_dtype {
-            bail!(
-                "warmup dtype contract failed: model produced {:?}, KV cache uses {cache_dtype:?}",
-                hidden.dtype()
-            );
-        }
-        let final_hidden = hidden.get(warmup_tokens - 1)?.unsqueeze(0)?;
-        let logits = model
-            .compute_logits(&final_hidden)
-            .context("warmup logits projection")?;
-        if logits.dims() != [1, model.vocab_size()] {
-            bail!(
-                "warmup logits shape contract failed: expected [1, {}], got {:?}",
-                model.vocab_size(),
-                logits.dims()
-            );
-        }
+        execute_step("decode", &decode_input_ids, &decode_positions)?;
         device
             .synchronize()
             .context("synchronizing representative warmup")?;
@@ -246,26 +319,6 @@ pub(super) fn warmup_model(
     }
 
     warmup_result.context("representative model warmup failed")
-}
-
-/// Query CUDA free and total memory (in bytes) via the CUDA driver API.
-#[cfg(feature = "cuda")]
-#[allow(unsafe_code)]
-fn cuda_mem_info() -> Result<(usize, usize)> {
-    use candle_core::cuda::cudarc::driver::sys;
-
-    let mut free: usize = 0;
-    let mut total: usize = 0;
-    let result = unsafe { sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize) };
-    if result != sys::CUresult::CUDA_SUCCESS {
-        bail!("cuMemGetInfo_v2 failed with error code {}", result as i32);
-    }
-    Ok((free, total))
-}
-
-#[cfg(not(feature = "cuda"))]
-fn cuda_mem_info() -> Result<(usize, usize)> {
-    bail!("CUDA memory information requires the `cuda` feature")
 }
 
 #[cfg(test)]
@@ -416,9 +469,9 @@ mod tests {
     struct WarmupObservation {
         forward_calls: usize,
         logits_calls: usize,
-        input_ids: Vec<u32>,
-        positions: Vec<u32>,
-        attention: Option<AttnMetadata>,
+        input_ids: Vec<Vec<u32>>,
+        positions: Vec<Vec<u32>>,
+        attention: Vec<AttnMetadata>,
     }
 
     struct RecordingModel {
@@ -436,9 +489,11 @@ mod tests {
         ) -> candle_core::Result<Tensor> {
             let mut observation = self.observation.lock().unwrap();
             observation.forward_calls += 1;
-            observation.input_ids = input_ids.to_vec1()?;
-            observation.positions = positions.to_vec1()?;
-            observation.attention = Some(self.attn_ctx.attn_meta.lock().unwrap().clone());
+            observation.input_ids.push(input_ids.to_vec1()?);
+            observation.positions.push(positions.to_vec1()?);
+            observation
+                .attention
+                .push(self.attn_ctx.attn_meta.lock().unwrap().clone());
             Tensor::zeros((input_ids.dim(0)?, 4), self.dtype, &self.device)
         }
 
@@ -458,21 +513,26 @@ mod tests {
 
     struct FailingModel {
         device: Device,
+        forward_calls: usize,
     }
 
     impl CausalLM for FailingModel {
         fn forward(
             &mut self,
-            _input_ids: &Tensor,
+            input_ids: &Tensor,
             _positions: &Tensor,
         ) -> candle_core::Result<Tensor> {
-            Err(candle_core::Error::Msg(
-                "injected model execution failure".to_string(),
-            ))
+            self.forward_calls += 1;
+            if self.forward_calls == 2 {
+                return Err(candle_core::Error::Msg(
+                    "injected model execution failure".to_string(),
+                ));
+            }
+            Tensor::zeros((input_ids.dim(0)?, 1), DType::F32, &self.device)
         }
 
-        fn compute_logits(&self, _hidden_states: &Tensor) -> candle_core::Result<Tensor> {
-            unreachable!("forward failure must stop warmup")
+        fn compute_logits(&self, hidden_states: &Tensor) -> candle_core::Result<Tensor> {
+            Tensor::zeros((hidden_states.dim(0)?, 10), DType::F32, &self.device)
         }
 
         fn vocab_size(&self) -> usize {
@@ -506,13 +566,16 @@ mod tests {
         warmup_model(&mut model, &attn_ctx, &device, 6).unwrap();
 
         let observation = observation.lock().unwrap();
-        assert_eq!(observation.forward_calls, 1);
-        assert_eq!(observation.logits_calls, 1);
-        assert_eq!(observation.input_ids, vec![0; 6]);
-        assert_eq!(observation.positions, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(observation.forward_calls, 2);
+        assert_eq!(observation.logits_calls, 2);
+        assert_eq!(observation.input_ids, vec![vec![0; 6], vec![0]]);
+        assert_eq!(observation.positions, vec![vec![0, 1, 2, 3, 4, 5], vec![6]]);
         assert_eq!(
             observation.attention,
-            Some(build_prefill_metadata(&[6], &[6], &[0, 1, 2, 3, 4, 5]))
+            vec![
+                build_prefill_metadata(&[6], &[6], &[0, 1, 2, 3, 4, 5]),
+                build_decode_metadata(&[7], &[vec![0, 1]], &[6]),
+            ]
         );
         drop(observation);
         assert_eq!(*attn_ctx.attn_meta.lock().unwrap(), original_meta);
@@ -531,11 +594,13 @@ mod tests {
         };
         let mut model = FailingModel {
             device: device.clone(),
+            forward_calls: 0,
         };
 
         let error = warmup_model(&mut model, &attn_ctx, &device, 2).unwrap_err();
 
         assert!(format!("{error:#}").contains("injected model execution failure"));
+        assert!(format!("{error:#}").contains("warmup decode model forward"));
         assert!(error
             .to_string()
             .contains("representative model warmup failed"));

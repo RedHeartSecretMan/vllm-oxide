@@ -26,7 +26,7 @@ use crate::loader::model_identity::ResolvedModel;
 use crate::models::registry::{resolved_factory, BuiltModel};
 use crate::sampler::{Sampler, SamplingParams};
 
-use initialization::{allocate_kv_cache, warmup_model};
+use initialization::initialize_model;
 
 /// Construction-time configuration for `LLM::new`.
 /// Mirrors nano-vllm's `Config` with v0.1 scope.
@@ -106,9 +106,9 @@ impl LLM {
     ///
     /// Side effects: resolves architecture via registry, loads weights, sizes
     /// and allocates one KV cache from resolved geometry and remaining free GPU
-    /// memory, runs a representative prefill + logits warmup, and validates the
-    /// CUDA device compute capability (≥ sm_89). No request is admitted until
-    /// all initialization work succeeds.
+    /// memory, runs representative prefill and paged-decode forwards with logits,
+    /// and validates the CUDA device compute capability (≥ sm_89). No request is
+    /// admitted until all initialization work succeeds.
     pub fn new(model: impl Into<Source>, options: EngineOptions) -> Result<Self> {
         let source: Source = model.into();
 
@@ -154,12 +154,7 @@ impl LLM {
             attn_ctx,
         } = build_resolved_model(&resolved_model, &device, options.max_model_len)?;
 
-        let cache_allocation = allocate_kv_cache(
-            &attn_ctx.paged_kv,
-            &device,
-            options.gpu_memory_utilization,
-            options.max_model_len,
-        )?;
+        let cache_allocation = initialize_model(model.as_mut(), &attn_ctx, &device, &options)?;
         let num_gpu_blocks = cache_allocation.num_blocks;
 
         tracing::info!(
@@ -168,12 +163,9 @@ impl LLM {
             kv_pool_mb = cache_allocation.pool_bytes / (1024 * 1024),
             bytes_per_block = cache_allocation.bytes_per_block,
             num_gpu_blocks,
-            "allocated KV cache pool"
+            warmup_prefill_tokens = cache_allocation.warmup_prefill_tokens,
+            "allocated and warmed KV cache pool"
         );
-
-        let warmup_tokens = options.max_num_batched_tokens.min(options.max_model_len);
-        tracing::info!(warmup_tokens, "running representative model warmup");
-        warmup_model(model.as_mut(), &attn_ctx, &device, warmup_tokens)?;
 
         let scheduler = Scheduler::new_with_eos_token_ids(
             options.max_num_batched_tokens,
@@ -454,11 +446,31 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
 #[allow(dead_code)]
 fn validate_sm_version(_device: &Device) {}
 
+/// Query CUDA free and total memory (in bytes) via the CUDA driver API.
+#[cfg(feature = "cuda")]
+#[allow(unsafe_code)]
+fn cuda_mem_info() -> Result<(usize, usize)> {
+    use candle_core::cuda::cudarc::driver::sys;
+
+    let mut free: usize = 0;
+    let mut total: usize = 0;
+    let result = unsafe { sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize) };
+    if result != sys::CUresult::CUDA_SUCCESS {
+        bail!("cuMemGetInfo_v2 failed with error code {}", result as i32);
+    }
+    Ok((free, total))
+}
+
+#[cfg(not(feature = "cuda"))]
+fn cuda_mem_info() -> Result<(usize, usize)> {
+    bail!("CUDA memory information requires the `cuda` feature")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::attention::{build_prefill_metadata, AttentionContext};
+    use crate::attention::{build_prefill_metadata, AttentionContext, PagedKVCacheGeometry};
     use crate::causal_lm::CausalLM;
     use crate::engine::sequence::BLOCK_SIZE;
     use candle_core::Tensor;
@@ -467,6 +479,106 @@ mod tests {
     struct MockModel {
         device: Device,
         fail_forward: bool,
+    }
+
+    struct CacheAwareModel {
+        device: Device,
+        attn_ctx: AttentionContext,
+        physical_tokens: Arc<Mutex<HashMap<usize, u32>>>,
+    }
+
+    impl CausalLM for CacheAwareModel {
+        #[allow(clippy::cast_precision_loss)]
+        fn forward(
+            &mut self,
+            input_ids: &Tensor,
+            positions: &Tensor,
+        ) -> candle_core::Result<Tensor> {
+            let input_ids = input_ids.to_vec1::<u32>()?;
+            let positions = positions.to_vec1::<u32>()?;
+            let metadata = self.attn_ctx.attn_meta.lock().unwrap().clone();
+            if input_ids.len() != positions.len() || input_ids.len() != metadata.slot_mapping.len()
+            {
+                candle_core::bail!("cache-aware model received inconsistent step metadata");
+            }
+            let block_size = self.attn_ctx.paged_kv.lock().unwrap().block_size();
+            let mut physical_tokens = self.physical_tokens.lock().unwrap();
+            for ((&token_id, &position), &slot) in
+                input_ids.iter().zip(&positions).zip(&metadata.slot_mapping)
+            {
+                let slot = usize::try_from(slot).map_err(|_| {
+                    candle_core::Error::Msg("cache-aware model received a negative slot".into())
+                })?;
+                physical_tokens.insert(slot, token_id.wrapping_add(position));
+            }
+
+            let hidden = if metadata.is_prefill {
+                input_ids
+                    .iter()
+                    .zip(&positions)
+                    .map(|(&token_id, &position)| token_id.wrapping_add(position) as f32)
+                    .collect::<Vec<_>>()
+            } else {
+                let context_len = metadata
+                    .cu_seqlens_k
+                    .last()
+                    .copied()
+                    .ok_or_else(|| candle_core::Error::Msg("missing decode context".into()))?
+                    as usize;
+                let block_table = metadata
+                    .block_table
+                    .first()
+                    .ok_or_else(|| candle_core::Error::Msg("missing decode block table".into()))?;
+                let mut fingerprint = 0u32;
+                for logical_position in 0..context_len {
+                    let block_id =
+                        *block_table
+                            .get(logical_position / block_size)
+                            .ok_or_else(|| {
+                                candle_core::Error::Msg("decode block table is too short".into())
+                            })?;
+                    let block_id = usize::try_from(block_id).map_err(|_| {
+                        candle_core::Error::Msg("decode block id is negative".into())
+                    })?;
+                    let physical_slot = block_id
+                        .checked_mul(block_size)
+                        .and_then(|base| base.checked_add(logical_position % block_size))
+                        .ok_or_else(|| {
+                            candle_core::Error::Msg("decode physical slot overflow".into())
+                        })?;
+                    fingerprint = fingerprint.wrapping_add(
+                        *physical_tokens.get(&physical_slot).ok_or_else(|| {
+                            candle_core::Error::Msg("decode read an unwritten cache slot".into())
+                        })?,
+                    );
+                }
+                vec![(fingerprint % 100) as f32]
+            };
+            Tensor::from_vec(hidden, (input_ids.len(), 1), &self.device)?.to_dtype(DType::F16)
+        }
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        fn compute_logits(&self, hidden_states: &Tensor) -> candle_core::Result<Tensor> {
+            let rows = hidden_states.dim(0)?;
+            let hidden = hidden_states
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let mut logits = vec![-100.0_f32; rows * 100];
+            for (row, value) in hidden.into_iter().enumerate() {
+                let target = value.round() as usize % 100;
+                logits[row * 100 + target] = 100.0;
+            }
+            Tensor::from_vec(logits, (rows, 100), &self.device)
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
     }
 
     impl CausalLM for MockModel {
@@ -501,33 +613,11 @@ mod tests {
         }
     }
 
-    fn test_llm_with_configuration(fail_forward: bool, warmup_before_engine: bool) -> LLM {
-        let device = Device::Cpu;
-        let paged_kv = Arc::new(Mutex::new(
-            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
-        ));
-        let attn_ctx = AttentionContext {
-            paged_kv: paged_kv.clone(),
-            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
-        };
-        let scheduler = Scheduler::new(16, 16, 0.9);
-        let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, attn_ctx.paged_kv.clone());
-        let mut model: Box<dyn CausalLM> = Box::new(MockModel {
-            device: device.clone(),
-            fail_forward,
-        });
-        if warmup_before_engine {
-            warmup_model(model.as_mut(), &attn_ctx, &device, 4).unwrap();
-        }
-        let engine = EngineCore::new(
-            scheduler,
-            kv_cache_manager,
-            model,
-            Sampler::new_with_seed(0),
-            attn_ctx,
-            device.clone(),
-        );
-
+    fn finish_test_llm(
+        engine: EngineCore,
+        paged_kv: Arc<Mutex<PagedKVCache>>,
+        device: Device,
+    ) -> LLM {
         let vocab = (0..100_u32)
             .map(|token_id| (format!("token-{token_id}"), token_id))
             .collect::<Vocab>();
@@ -559,16 +649,102 @@ mod tests {
         }
     }
 
+    fn test_llm_with_configuration(fail_forward: bool) -> LLM {
+        let device = Device::Cpu;
+        let paged_kv = Arc::new(Mutex::new(
+            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
+        ));
+        let attn_ctx = AttentionContext {
+            paged_kv: paged_kv.clone(),
+            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+        };
+        let scheduler = Scheduler::new(16, 16, 0.9);
+        let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        let model: Box<dyn CausalLM> = Box::new(MockModel {
+            device: device.clone(),
+            fail_forward,
+        });
+        let engine = EngineCore::new(
+            scheduler,
+            kv_cache_manager,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device.clone(),
+        );
+        finish_test_llm(engine, paged_kv, device)
+    }
+
     fn test_llm_with_forward_failure(fail_forward: bool) -> LLM {
-        test_llm_with_configuration(fail_forward, false)
+        test_llm_with_configuration(fail_forward)
     }
 
     fn test_llm() -> LLM {
         test_llm_with_forward_failure(false)
     }
 
-    fn test_llm_after_warmup() -> LLM {
-        test_llm_with_configuration(false, true)
+    fn cache_aware_test_llm(run_warmup: bool) -> LLM {
+        let device = Device::Cpu;
+        let paged_kv = Arc::new(Mutex::new(PagedKVCache::deferred(PagedKVCacheGeometry {
+            num_layers: 1,
+            block_size: BLOCK_SIZE,
+            num_kv_heads: 1,
+            head_dim: 1,
+            dtype: DType::F16,
+        })));
+        let attn_ctx = AttentionContext {
+            paged_kv: paged_kv.clone(),
+            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+        };
+        let physical_tokens = Arc::new(Mutex::new(HashMap::new()));
+        let mut model: Box<dyn CausalLM> = Box::new(CacheAwareModel {
+            device: device.clone(),
+            attn_ctx: attn_ctx.clone(),
+            physical_tokens: physical_tokens.clone(),
+        });
+        let options = EngineOptions {
+            max_num_batched_tokens: 2,
+            max_num_seqs: 1,
+            max_model_len: 8,
+            gpu_memory_utilization: 0.5,
+            enforce_eager: true,
+            dtype: Some(DType::F16),
+        };
+
+        let num_blocks = if run_warmup {
+            let allocation = initialization::initialize_model_with_available_memory(
+                model.as_mut(),
+                &attn_ctx,
+                &device,
+                initialization::DeviceMemory::new(4096, 8192),
+                &options,
+            )
+            .unwrap();
+            assert_eq!(physical_tokens.lock().unwrap().len(), 3);
+            allocation.num_blocks
+        } else {
+            paged_kv.lock().unwrap().allocate(2, &device).unwrap();
+            assert!(physical_tokens.lock().unwrap().is_empty());
+            2
+        };
+        assert_eq!(paged_kv.lock().unwrap().allocation_count(), 1);
+
+        let scheduler = Scheduler::new(
+            options.max_num_batched_tokens,
+            options.max_num_seqs,
+            options.gpu_memory_utilization,
+        );
+        let kv_cache_manager =
+            KvCacheManager::new(num_blocks, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        let engine = EngineCore::new(
+            scheduler,
+            kv_cache_manager,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device.clone(),
+        );
+        finish_test_llm(engine, paged_kv, device)
     }
 
     mod engine_options {
@@ -608,8 +784,8 @@ mod tests {
 
         #[test]
         fn first_generation_matches_the_non_mutating_reference_scenario() {
-            let mut warmed = test_llm_after_warmup();
-            let mut reference = test_llm();
+            let mut warmed = cache_aware_test_llm(true);
+            let mut reference = cache_aware_test_llm(false);
             let prompts = [Prompt::TokenIds(vec![1, 2, 3])];
             let params = [SamplingParams {
                 temperature: 0.0,
@@ -622,6 +798,8 @@ mod tests {
             let reference_output = reference.generate(&prompts, &params).unwrap();
 
             assert_eq!(warmed_output.len(), 1);
+            assert_eq!(warmed_output[0].request_id, 0);
+            assert_eq!(warmed_output[0].token_ids, vec![5, 17, 38]);
             assert_eq!(warmed_output[0].request_id, reference_output[0].request_id);
             assert_eq!(warmed_output[0].token_ids, reference_output[0].token_ids);
             assert_eq!(warmed_output[0].text, reference_output[0].text);
