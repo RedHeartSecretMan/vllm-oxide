@@ -25,11 +25,43 @@ impl std::fmt::Display for CacheOperation {
     }
 }
 
-/// Execution phase for one immutable engine step.
+/// Aggregate execution phase for one immutable engine step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepPhase {
     Prefill,
     Decode,
+    Mixed,
+}
+
+/// Execution phase for one sequence inside a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SequencePhase {
+    Prefill,
+    Decode,
+}
+
+/// Why the FIFO head could not be admitted in this scheduling decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionBlockedReason {
+    TokenBudget,
+    SequenceLimit,
+    KvCache,
+}
+
+impl std::fmt::Display for AdmissionBlockedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TokenBudget => f.write_str("token budget"),
+            Self::SequenceLimit => f.write_str("sequence limit"),
+            Self::KvCache => f.write_str("KV cache"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockedAdmission {
+    pub(crate) request_id: usize,
+    pub(crate) reason: AdmissionBlockedReason,
 }
 
 /// Immutable description of one scheduler-selected engine step.
@@ -43,6 +75,8 @@ pub(crate) struct StepPlan {
     pub(crate) sequences: Vec<SequenceStepPlan>,
     pub(crate) token_budget: usize,
     pub(crate) attention: AttnMetadata,
+    /// Diagnostic only: this request contributed no work to the plan.
+    pub(crate) blocked_admission: Option<BlockedAdmission>,
 }
 
 /// Immutable work assigned to one sequence within a [`StepPlan`].
@@ -50,6 +84,7 @@ pub(crate) struct StepPlan {
 pub(crate) struct SequenceStepPlan {
     pub(crate) request_id: usize,
     pub(crate) sequence_id: usize,
+    pub(crate) phase: SequencePhase,
     pub(crate) token_range: Range<usize>,
     pub(crate) logical_positions: Range<usize>,
     pub(crate) token_budget: usize,
@@ -111,6 +146,7 @@ pub(crate) enum StepPlanError {
         running_sequences: usize,
         token_budget: usize,
         free_blocks: usize,
+        blocked_admission: Option<BlockedAdmission>,
     },
 }
 
@@ -165,10 +201,21 @@ impl std::fmt::Display for StepPlanError {
                 running_sequences,
                 token_budget,
                 free_blocks,
-            } => write!(
-                f,
-                "scheduler made no progress: waiting={waiting_sequences}, running={running_sequences}, token_budget={token_budget}, free_blocks={free_blocks}"
-            ),
+                blocked_admission,
+            } => {
+                write!(
+                    f,
+                    "scheduler made no progress: waiting={waiting_sequences}, running={running_sequences}, token_budget={token_budget}, free_blocks={free_blocks}"
+                )?;
+                if let Some(blocked) = blocked_admission {
+                    write!(
+                        f,
+                        ", blocked_admission=request {} ({})",
+                        blocked.request_id, blocked.reason
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }

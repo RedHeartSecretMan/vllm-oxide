@@ -952,7 +952,10 @@ mod tests {
         finish_test_llm(engine, paged_kv, device)
     }
 
-    fn causal_fingerprint_test_llm(max_num_batched_tokens: usize) -> LLM {
+    fn causal_fingerprint_test_llm_with_limits(
+        max_num_batched_tokens: usize,
+        max_num_seqs: usize,
+    ) -> LLM {
         let device = Device::Cpu;
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
@@ -961,7 +964,7 @@ mod tests {
             paged_kv: paged_kv.clone(),
             attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
         };
-        let scheduler = Scheduler::new(max_num_batched_tokens, 16, 0.9);
+        let scheduler = Scheduler::new(max_num_batched_tokens, max_num_seqs, 0.9);
         let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, paged_kv.clone());
         let model: Box<dyn CausalLM> = Box::new(CausalFingerprintModel {
             device: device.clone(),
@@ -977,6 +980,10 @@ mod tests {
             device.clone(),
         );
         finish_test_llm(engine, paged_kv, device)
+    }
+
+    fn causal_fingerprint_test_llm(max_num_batched_tokens: usize) -> LLM {
+        causal_fingerprint_test_llm_with_limits(max_num_batched_tokens, 16)
     }
 
     mod engine_options {
@@ -1108,6 +1115,57 @@ mod tests {
                     isolated_output[0].token_ids
                 );
                 assert_eq!(mixed_outputs[input_position].text, isolated_output[0].text);
+            }
+        }
+    }
+
+    mod continuous_batching {
+        use super::*;
+
+        fn deterministic_params(max_tokens: usize) -> SamplingParams {
+            SamplingParams {
+                temperature: 0.0,
+                max_tokens,
+                ignore_eos: true,
+                ..SamplingParams::default()
+            }
+        }
+
+        #[test]
+        fn generate_preserves_order_and_outputs_when_admission_interleaves_with_decode() {
+            let prompts = [
+                Prompt::TokenIds(vec![2]),
+                Prompt::TokenIds(vec![7]),
+                Prompt::TokenIds(vec![11, 13, 17, 19, 23]),
+            ];
+            let params = [
+                deterministic_params(1),
+                deterministic_params(3),
+                deterministic_params(2),
+            ];
+            let mut mixed = causal_fingerprint_test_llm_with_limits(4, 2);
+
+            let outputs = mixed.generate(&prompts, &params).unwrap();
+
+            assert_eq!(outputs.len(), prompts.len());
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|output| output.request_id)
+                    .collect::<Vec<_>>(),
+                vec![0, 1, 2]
+            );
+            for (input_position, (prompt, params)) in prompts.iter().zip(&params).enumerate() {
+                let mut isolated = causal_fingerprint_test_llm(32);
+                let isolated_output = isolated
+                    .generate(std::slice::from_ref(prompt), std::slice::from_ref(params))
+                    .unwrap();
+                assert!(outputs[input_position].finished);
+                assert_eq!(
+                    outputs[input_position].token_ids,
+                    isolated_output[0].token_ids
+                );
+                assert_eq!(outputs[input_position].text, isolated_output[0].text);
             }
         }
     }

@@ -31,8 +31,8 @@ pub use scheduler::{RequestOutput, Scheduler};
 pub use sequence::{Sequence, SequenceStatus};
 
 pub(crate) use step::{
-    CacheOperation, SequenceCachePlan, SequenceStepPlan, SequenceStepResult, StepPhase, StepPlan,
-    StepPlanError, StepResult,
+    AdmissionBlockedReason, BlockedAdmission, CacheOperation, SequenceCachePlan, SequencePhase,
+    SequenceStepPlan, SequenceStepResult, StepPhase, StepPlan, StepPlanError, StepResult,
 };
 
 /// In-process engine core — collapses V1/nano-vllm's `ModelRunner` (ADR-0004).
@@ -484,5 +484,78 @@ mod tests {
         assert_eq!(outputs[0].token_ids, vec![42, 42]);
         assert_eq!(outputs[1].request_id, 1);
         assert_eq!(outputs[1].token_ids, vec![42, 42]);
+    }
+
+    #[test]
+    fn staggered_arrivals_interleave_and_complete_once_with_stable_identity() {
+        let device = Device::Cpu;
+        let scheduler = Scheduler::new(3, 3, 0.9);
+        let attn_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        let seen_input_ids = Arc::new(Mutex::new(Vec::new()));
+        let model = Box::new(RecordingModel {
+            seen_input_ids: seen_input_ids.clone(),
+            device: device.clone(),
+        });
+        let mut engine = EngineCore::new(
+            scheduler,
+            kv_mgr,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device,
+        );
+        engine.add_request(
+            vec![1],
+            SamplingParams {
+                max_tokens: 3,
+                ..SamplingParams::default()
+            },
+        );
+        assert!(engine.step().unwrap().is_empty());
+        engine.add_request(
+            vec![4, 5],
+            SamplingParams {
+                max_tokens: 1,
+                ..SamplingParams::default()
+            },
+        );
+        engine.add_request(
+            vec![6, 7, 8, 9],
+            SamplingParams {
+                max_tokens: 2,
+                ..SamplingParams::default()
+            },
+        );
+
+        let mut outputs = Vec::new();
+        for _ in 0..10 {
+            if !engine.is_running() {
+                break;
+            }
+            outputs.extend(engine.step().unwrap());
+        }
+
+        assert!(!engine.is_running());
+        assert_eq!(
+            &seen_input_ids.lock().unwrap()[..3],
+            &[vec![1], vec![42, 4, 5], vec![42, 6, 7]]
+        );
+        outputs.sort_by_key(|output| output.request_id);
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| (output.request_id, output.token_ids.clone(), output.finished))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, vec![42, 42, 42], true),
+                (1, vec![42], true),
+                (2, vec![42, 42], true),
+            ]
+        );
     }
 }

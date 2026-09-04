@@ -1,9 +1,8 @@
 //! Token-level scheduler — `Scheduler` (V1 parity, nano-vllm algorithm).
 //!
-//! One `plan_step()` is either **pure-prefill** or **pure-decode**
-//! (nano-vllm parity — simplifies attention metadata). Every participating
-//! sequence spends from one global token budget, and sequences with no
-//! positive work remain outside the plan. Preemption is **recompute-only**:
+//! One `plan_step()` may mix prefill and decode work while every participating
+//! sequence spends from one global token budget and sequences with no positive
+//! work remain outside the plan. Preemption is **recompute-only**:
 //! deallocate the sequence's blocks and requeue at the front of `waiting`
 //! (V1 parity; v0.1 never swaps KV to host — V0 `swap_space` dropped).
 //!
@@ -21,8 +20,8 @@ use crate::attention::{
 use crate::engine::kv_cache_manager::{KvCacheError, KvCacheManager};
 use crate::engine::sequence::{Sequence, SequenceStatus};
 use crate::engine::{
-    CacheOperation, SequenceCachePlan, SequenceStepPlan, StepPhase, StepPlan, StepPlanError,
-    StepResult,
+    AdmissionBlockedReason, BlockedAdmission, CacheOperation, SequenceCachePlan, SequencePhase,
+    SequenceStepPlan, StepPhase, StepPlan, StepPlanError, StepResult,
 };
 use crate::SamplingParams;
 
@@ -63,12 +62,13 @@ fn block_tables_for_plan(sequences: &[SequenceStepPlan]) -> Result<Vec<Vec<i32>>
 struct WorkSelection {
     phase: StepPhase,
     is_prefill_continuation: bool,
+    blocked_admission: Option<BlockedAdmission>,
 }
 
 /// Token-level scheduler — the algorithmic heart of the engine.
 ///
 /// Maintains `waiting` / `running` deques of `Sequence`s. One `plan_step()`
-/// call produces either a pure-prefill or pure-decode [`StepPlan`].
+/// call produces an immutable [`StepPlan`] that may mix prefill and decode.
 /// `apply_step_result()` advances state and produces `RequestOutput`s for
 /// finished sequences.
 ///
@@ -158,30 +158,65 @@ impl Scheduler {
     /// Select runnable work and capture its phase and cache-hit count before
     /// `plan_step()` snapshots the immutable execution inputs.
     ///
-    /// # Algorithm (nano-vllm parity)
+    /// # Algorithm
     ///
     /// 1. **Preempt** running sequences if there aren't enough free blocks
     ///    (recompute-only: deallocate + requeue at front of waiting).
-    /// 2. If any running seq still needs prefill (chunked prefill
-    ///    continuation): **prefill** step — schedule more prompt tokens.
-    /// 3. If `running` is non-empty (all prefilling done): **decode**
-    ///    step — schedule at most 1 token per sequence within the global budget.
-    /// 4. If `running` is empty and `waiting` is non-empty: **prefill**
-    ///    step — schedule waiting sequences within the global budget.
+    /// 2. Reserve one token for the FIFO waiting head whenever token, sequence,
+    ///    and cache capacity all permit admission.
+    /// 3. Schedule bounded running continuation or decode work from the same
+    ///    global token budget, then spend the reservation on waiting prefill.
+    /// 4. Reserve decode append blocks transactionally. If aggregate cache
+    ///    pressure rejects admission, roll it back and keep decode progress.
+    ///
+    /// FIFO arrivals never overtake one another. Therefore, while every
+    /// decision retains enough token, sequence, and cache capacity for at least
+    /// one admission, a waiter initially at zero-based position `p` is selected
+    /// within at most `p + 1` decisions.
     fn select_work(&mut self, kv_mgr: &mut KvCacheManager) -> Result<WorkSelection, StepPlanError> {
         self.preempt_if_needed(kv_mgr)?;
 
-        // Chunked prefill continuation: running sequences that still need
-        // more prompt tokens before they can decode.
-        if self.running.iter().any(|s| s.is_prefill) {
-            return Ok(self.schedule_prefill_continue());
-        }
+        let blocked_before_selection = self.admission_block(kv_mgr, 0);
+        let reserve_admission_token =
+            !self.waiting.is_empty() && blocked_before_selection.is_none();
+        let running_budget = self
+            .max_num_batched_tokens
+            .saturating_sub(usize::from(reserve_admission_token));
 
         if !self.running.is_empty() {
-            return self.schedule_decode(kv_mgr);
+            let running_before_admission = self.running.len();
+            self.schedule_running(running_budget);
+            let running_tokens = self.scheduled_tokens();
+            if let Err(error) = self.schedule_prefill_with_budget(
+                kv_mgr,
+                self.max_num_batched_tokens.saturating_sub(running_tokens),
+            ) {
+                self.reset_scheduled_work();
+                return Err(error);
+            }
+            if let Err(error) = self.reserve_decode_cache(kv_mgr) {
+                if self.running.len() == running_before_admission {
+                    self.reset_scheduled_work();
+                    return Err(error);
+                }
+                if let Err(error) = self.rollback_admissions(kv_mgr, running_before_admission) {
+                    self.reset_scheduled_work();
+                    return Err(error);
+                }
+                if let Err(error) = self.reserve_decode_cache(kv_mgr) {
+                    self.reset_scheduled_work();
+                    return Err(error);
+                }
+            }
+            let blocked_admission = blocked_before_selection
+                .or_else(|| self.admission_block(kv_mgr, self.scheduled_tokens()));
+            return Ok(self.selected_work(running_before_admission, blocked_admission));
         }
 
-        self.schedule_prefill(kv_mgr)
+        let mut prefill = self.schedule_prefill(kv_mgr)?;
+        prefill.blocked_admission = blocked_before_selection
+            .or_else(|| self.admission_block(kv_mgr, self.scheduled_tokens()));
+        Ok(prefill)
     }
 
     /// Select work and capture everything EngineCore needs in one immutable plan.
@@ -194,14 +229,22 @@ impl Scheduler {
         }
 
         let output = self.select_work(kv_mgr)?;
+        if let Some(blocked) = output.blocked_admission {
+            tracing::debug!(
+                request_id = blocked.request_id,
+                reason = %blocked.reason,
+                "request remains waiting because admission capacity is unavailable"
+            );
+        }
         let mut sequences = Vec::new();
 
         for sequence in &mut self.running {
             if sequence.num_scheduled_tokens == 0 {
                 continue;
             }
-            let (token_range, sampling_allowed) = match output.phase {
-                StepPhase::Prefill => {
+            let sequence_phase = Self::sequence_phase(sequence);
+            let (token_range, sampling_allowed) = match sequence_phase {
+                SequencePhase::Prefill => {
                     let start = sequence.num_cached_tokens;
                     let end = start
                         .checked_add(sequence.num_scheduled_tokens)
@@ -209,7 +252,7 @@ impl Scheduler {
                         .min(sequence.num_prompt_tokens);
                     (start..end, end == sequence.num_prompt_tokens)
                 }
-                StepPhase::Decode => {
+                SequencePhase::Decode => {
                     let start = sequence
                         .num_tokens
                         .checked_sub(1)
@@ -238,6 +281,7 @@ impl Scheduler {
             sequences.push(SequenceStepPlan {
                 request_id: sequence.request_id,
                 sequence_id: sequence.seq_id,
+                phase: sequence_phase,
                 logical_positions: token_range.clone(),
                 input_token_ids: sequence.token_ids[token_range.clone()].to_vec(),
                 token_range,
@@ -256,6 +300,7 @@ impl Scheduler {
                     running_sequences: self.running.len(),
                     token_budget: self.max_num_batched_tokens,
                     free_blocks: kv_mgr.num_free_blocks(),
+                    blocked_admission: output.blocked_admission,
                 });
             }
             return Ok(None);
@@ -296,6 +341,23 @@ impl Scheduler {
                 let block_tables = block_tables_for_plan(&sequences)?;
                 build_decode_metadata(&context_lengths, &block_tables, &slot_mapping)
             }
+            StepPhase::Mixed => {
+                let scheduled_tokens = sequences
+                    .iter()
+                    .map(|sequence| usize_to_u32(sequence.token_budget, "scheduled token count"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let kv_lengths = sequences
+                    .iter()
+                    .map(|sequence| usize_to_u32(sequence.cache.kv_length, "KV length"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let block_tables = block_tables_for_plan(&sequences)?;
+                build_continued_prefill_metadata(
+                    &scheduled_tokens,
+                    &kv_lengths,
+                    &block_tables,
+                    &slot_mapping,
+                )
+            }
         };
 
         let plan = StepPlan {
@@ -304,6 +366,7 @@ impl Scheduler {
             sequences,
             token_budget,
             attention,
+            blocked_admission: output.blocked_admission,
         };
         self.next_plan_id += 1;
         self.in_flight = Some(plan.clone());
@@ -468,6 +531,163 @@ impl Scheduler {
 
     // ── Private helpers ─────────────────────────────────────────────
 
+    fn scheduled_tokens(&self) -> usize {
+        self.running
+            .iter()
+            .map(|sequence| sequence.num_scheduled_tokens)
+            .sum()
+    }
+
+    fn sequence_phase(sequence: &Sequence) -> SequencePhase {
+        if sequence.num_cached_tokens < sequence.num_prompt_tokens {
+            SequencePhase::Prefill
+        } else {
+            SequencePhase::Decode
+        }
+    }
+
+    fn selected_work(
+        &self,
+        running_before_admission: usize,
+        blocked_admission: Option<BlockedAdmission>,
+    ) -> WorkSelection {
+        let mut has_prefill = false;
+        let mut has_decode = false;
+        let mut has_continued_prefill = false;
+        for (index, sequence) in self.running.iter().enumerate() {
+            if sequence.num_scheduled_tokens == 0 {
+                continue;
+            }
+            match Self::sequence_phase(sequence) {
+                SequencePhase::Prefill => {
+                    has_prefill = true;
+                    has_continued_prefill |= index < running_before_admission;
+                }
+                SequencePhase::Decode => has_decode = true,
+            }
+        }
+        let phase = match (has_prefill, has_decode) {
+            (true, true) => StepPhase::Mixed,
+            (true, false) => StepPhase::Prefill,
+            (false, true) => StepPhase::Decode,
+            (false, false) if self.running.iter().any(|sequence| sequence.is_prefill) => {
+                StepPhase::Prefill
+            }
+            (false, false) => StepPhase::Decode,
+        };
+        WorkSelection {
+            phase,
+            is_prefill_continuation: has_prefill && (has_decode || has_continued_prefill),
+            blocked_admission,
+        }
+    }
+
+    fn schedule_running(&mut self, token_budget: usize) {
+        let mut scheduled_tokens = 0;
+        for sequence in &mut self.running {
+            sequence.num_scheduled_tokens = 0;
+            let budget = token_budget.saturating_sub(scheduled_tokens);
+            if budget == 0 {
+                continue;
+            }
+            let num_tokens = match Self::sequence_phase(sequence) {
+                SequencePhase::Prefill => sequence
+                    .num_prompt_tokens
+                    .saturating_sub(sequence.num_cached_tokens)
+                    .min(budget),
+                SequencePhase::Decode => 1,
+            };
+            sequence.num_scheduled_tokens = num_tokens;
+            sequence.is_prefill =
+                sequence.num_cached_tokens.saturating_add(num_tokens) < sequence.num_prompt_tokens;
+            scheduled_tokens += num_tokens;
+        }
+    }
+
+    fn reset_scheduled_work(&mut self) {
+        for sequence in &mut self.running {
+            sequence.num_scheduled_tokens = 0;
+            sequence.is_prefill = sequence.num_cached_tokens < sequence.num_prompt_tokens;
+        }
+    }
+
+    fn reserve_decode_cache(&mut self, kv_mgr: &mut KvCacheManager) -> Result<(), StepPlanError> {
+        let decode_indices = self
+            .running
+            .iter()
+            .enumerate()
+            .filter(|(_, sequence)| {
+                sequence.num_scheduled_tokens > 0
+                    && sequence.num_cached_tokens >= sequence.num_prompt_tokens
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if decode_indices.is_empty() {
+            return Ok(());
+        }
+        let mut selected = decode_indices
+            .iter()
+            .map(|&index| self.running[index].clone())
+            .collect::<Vec<_>>();
+        let selected_sequence_id = selected[0].seq_id;
+        kv_mgr.may_append_batch(&mut selected).map_err(|source| {
+            StepPlanError::cache(
+                CacheOperation::AppendAllocation,
+                selected_sequence_id,
+                source,
+            )
+        })?;
+        for (&index, reserved) in decode_indices.iter().zip(selected) {
+            self.running[index].block_table = reserved.block_table;
+        }
+        Ok(())
+    }
+
+    fn rollback_admissions(
+        &mut self,
+        kv_mgr: &mut KvCacheManager,
+        running_before_admission: usize,
+    ) -> Result<(), StepPlanError> {
+        while self.running.len() > running_before_admission {
+            // The length check guarantees a newly admitted sequence exists.
+            #[allow(clippy::unwrap_used)]
+            let mut sequence = self.running.pop_back().unwrap();
+            let sequence_id = sequence.seq_id;
+            kv_mgr
+                .deallocate(&mut sequence)
+                .map_err(KvCacheError::from)
+                .map_err(|source| {
+                    StepPlanError::cache(CacheOperation::AllocationRollback, sequence_id, source)
+                })?;
+            sequence.status = SequenceStatus::Waiting;
+            sequence.num_scheduled_tokens = 0;
+            sequence.is_prefill = true;
+            self.waiting.push_front(sequence);
+        }
+        Ok(())
+    }
+
+    fn admission_block(
+        &self,
+        kv_mgr: &KvCacheManager,
+        scheduled_tokens: usize,
+    ) -> Option<BlockedAdmission> {
+        let sequence = self.waiting.front()?;
+        let reason = if scheduled_tokens >= self.max_num_batched_tokens {
+            AdmissionBlockedReason::TokenBudget
+        } else if self.running.len() >= self.max_num_seqs {
+            AdmissionBlockedReason::SequenceLimit
+        } else if kv_mgr.can_allocate(sequence).is_none() {
+            AdmissionBlockedReason::KvCache
+        } else {
+            return None;
+        };
+        Some(BlockedAdmission {
+            request_id: sequence.request_id,
+            reason,
+        })
+    }
+
     /// Preempt running sequences when there aren't enough free blocks.
     ///
     /// If the next budget-bounded decode batch cannot reserve all required
@@ -505,91 +725,25 @@ impl Scheduler {
         }
     }
 
-    /// Schedule a decode step: at most one token per running sequence and no
-    /// more than the global token budget across the plan.
-    fn schedule_decode(
-        &mut self,
-        kv_mgr: &mut KvCacheManager,
-    ) -> Result<WorkSelection, StepPlanError> {
-        for sequence in &mut self.running {
-            sequence.num_scheduled_tokens = 0;
-        }
-
-        let scheduled_count = self.running.len().min(self.max_num_batched_tokens);
-        let mut selected = Vec::with_capacity(scheduled_count);
-        for _ in 0..scheduled_count {
-            // scheduled_count is bounded by running.len().
-            #[allow(clippy::unwrap_used)]
-            selected.push(self.running.pop_front().unwrap());
-        }
-        let selected_sequence_id = selected.first().map_or(0, |sequence| sequence.seq_id);
-        if let Err(source) = kv_mgr.may_append_batch(&mut selected) {
-            for sequence in selected.into_iter().rev() {
-                self.running.push_front(sequence);
-            }
-            return Err(StepPlanError::cache(
-                CacheOperation::AppendAllocation,
-                selected_sequence_id,
-                source,
-            ));
-        }
-        for sequence in &mut selected {
-            sequence.num_scheduled_tokens = 1;
-            sequence.is_prefill = false;
-        }
-        for sequence in selected.into_iter().rev() {
-            self.running.push_front(sequence);
-        }
-
-        Ok(WorkSelection {
-            phase: StepPhase::Decode,
-            is_prefill_continuation: false,
-        })
-    }
-
-    /// Continue a chunked prefill: schedule more prompt tokens for
-    /// running sequences that still have `is_prefill` set.
-    fn schedule_prefill_continue(&mut self) -> WorkSelection {
-        let mut total_tokens = 0;
-        for seq in self.running.iter_mut() {
-            if !seq.is_prefill {
-                seq.num_scheduled_tokens = 0;
-                continue;
-            }
-            let remaining = seq.num_prompt_tokens.saturating_sub(seq.num_cached_tokens);
-            if remaining == 0 {
-                seq.is_prefill = false;
-                seq.num_scheduled_tokens = 0;
-                continue;
-            }
-            let budget = self.max_num_batched_tokens.saturating_sub(total_tokens);
-            let n_tokens = remaining.min(budget);
-            if n_tokens == 0 {
-                seq.num_scheduled_tokens = 0;
-                continue;
-            }
-            seq.num_scheduled_tokens = n_tokens;
-            total_tokens += n_tokens;
-            if seq.num_cached_tokens + n_tokens >= seq.num_prompt_tokens {
-                seq.is_prefill = false;
-            }
-        }
-        WorkSelection {
-            phase: StepPhase::Prefill,
-            is_prefill_continuation: true,
-        }
-    }
-
     /// Schedule a prefill step: pick sequences from `waiting`, spend one global
     /// token budget in queue order, allocate blocks, and move them to `running`.
     fn schedule_prefill(
         &mut self,
         kv_mgr: &mut KvCacheManager,
     ) -> Result<WorkSelection, StepPlanError> {
+        self.schedule_prefill_with_budget(kv_mgr, self.max_num_batched_tokens)
+    }
+
+    fn schedule_prefill_with_budget(
+        &mut self,
+        kv_mgr: &mut KvCacheManager,
+        token_budget: usize,
+    ) -> Result<WorkSelection, StepPlanError> {
         if self.waiting.is_empty() {
             return Ok(WorkSelection {
                 phase: StepPhase::Prefill,
                 is_prefill_continuation: false,
+                blocked_admission: None,
             });
         }
 
@@ -604,7 +758,7 @@ impl Scheduler {
             if remaining_before_allocation == 0 {
                 continue;
             }
-            let budget = self.max_num_batched_tokens.saturating_sub(total_tokens);
+            let budget = token_budget.saturating_sub(total_tokens);
             if budget == 0 {
                 break;
             }
@@ -677,6 +831,7 @@ impl Scheduler {
         Ok(WorkSelection {
             phase: StepPhase::Prefill,
             is_prefill_continuation: false,
+            blocked_admission: None,
         })
     }
 }
@@ -759,6 +914,20 @@ mod tests {
         }
     }
 
+    fn begin_decoding(
+        scheduler: &mut Scheduler,
+        kv: &mut KvCacheManager,
+        prompt: Vec<u32>,
+        max_tokens: usize,
+        sampled_token: u32,
+    ) {
+        scheduler.add_request(prompt, make_params(max_tokens));
+        let prefill = scheduler.plan_step(kv).unwrap().unwrap();
+        scheduler
+            .apply_step_result(&result_for_plan(&prefill, sampled_token), kv)
+            .unwrap();
+    }
+
     mod add_request {
         use super::*;
 
@@ -832,25 +1001,6 @@ mod tests {
             let output = s.select_work(&mut kv).unwrap();
             assert_eq!(output.phase, StepPhase::Prefill);
             assert_eq!(s.num_running(), 0);
-        }
-
-        #[test]
-        fn pure_prefill_no_running_allowed() {
-            let mut s = make_scheduler();
-            let mut kv = make_kv_mgr(100);
-            // Add one request, prefill it.
-            s.add_request(vec![1, 2, 3], make_params(16));
-            s.select_work(&mut kv).unwrap();
-            assert_eq!(s.num_running(), 1);
-            assert_eq!(s.num_waiting(), 0);
-
-            // Add another request. Since running is non-empty, next schedule
-            // should be decode (not prefill).
-            s.add_request(vec![4, 5, 6], make_params(16));
-            let output = s.select_work(&mut kv).unwrap();
-            assert_eq!(output.phase, StepPhase::Decode);
-            // waiting should still have the new request.
-            assert_eq!(s.num_waiting(), 1);
         }
 
         #[test]
@@ -1163,7 +1313,7 @@ mod tests {
         }
 
         #[test]
-        fn next_plan_excludes_running_sequences_with_no_scheduled_tokens() {
+        fn next_plan_mixes_only_positive_running_work() {
             let mut scheduler = Scheduler::new(5, 512, 0.9);
             let mut kv = make_kv_mgr(100);
             scheduler.add_request(vec![11, 12, 13], make_params(2));
@@ -1176,10 +1326,15 @@ mod tests {
             let next = scheduler.plan_step(&mut kv).unwrap().unwrap();
 
             assert_eq!(scheduler.num_running(), 2);
-            assert_eq!(next.sequences.len(), 1);
-            assert_eq!(next.sequences[0].sequence_id, 1);
-            assert_eq!(next.sequences[0].token_range, 2..4);
-            assert_eq!(next.sequences[0].token_budget, 2);
+            assert_eq!(next.phase, StepPhase::Mixed);
+            assert_eq!(next.sequences.len(), 2);
+            assert_eq!(next.sequences[0].sequence_id, 0);
+            assert_eq!(next.sequences[0].phase, SequencePhase::Decode);
+            assert_eq!(next.sequences[0].token_budget, 1);
+            assert_eq!(next.sequences[1].sequence_id, 1);
+            assert_eq!(next.sequences[1].phase, SequencePhase::Prefill);
+            assert_eq!(next.sequences[1].token_range, 2..4);
+            assert_eq!(next.sequences[1].token_budget, 2);
             assert!(next
                 .sequences
                 .iter()
@@ -1196,8 +1351,18 @@ mod tests {
 
             assert_eq!(
                 error.to_string(),
-                "scheduler made no progress: waiting=1, running=0, token_budget=0, free_blocks=100"
+                "scheduler made no progress: waiting=1, running=0, token_budget=0, free_blocks=100, blocked_admission=request 0 (token budget)"
             );
+            assert!(matches!(
+                error,
+                StepPlanError::NoProgress {
+                    blocked_admission: Some(BlockedAdmission {
+                        request_id: 0,
+                        reason: AdmissionBlockedReason::TokenBudget,
+                    }),
+                    ..
+                }
+            ));
             assert_eq!(scheduler.num_waiting(), 1);
             assert_eq!(scheduler.num_running(), 0);
             assert!(scheduler.in_flight.is_none());
@@ -1213,29 +1378,349 @@ mod tests {
             let mut kv = make_kv_mgr(100);
             s.add_request(vec![1, 2, 3], make_params(16));
             // Prefill first.
-            s.select_work(&mut kv).unwrap();
+            let prefill = s.plan_step(&mut kv).unwrap().unwrap();
+            s.apply_step_result(&result_for_plan(&prefill, 42), &mut kv)
+                .unwrap();
             assert_eq!(s.num_running(), 1);
 
             // Next step should be decode.
-            let output = s.select_work(&mut kv).unwrap();
-            assert_eq!(output.phase, StepPhase::Decode);
+            let plan = s.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(plan.phase, StepPhase::Decode);
             let seq = &s.running[0];
             assert!(!seq.is_prefill, "decode must set is_prefill=false");
             assert_eq!(seq.num_scheduled_tokens, 1);
         }
 
         #[test]
-        fn decode_does_not_touch_waiting() {
-            let mut s = make_scheduler();
+        fn waiting_prefill_joins_decode_plan_when_budgets_allow() {
+            let mut scheduler = Scheduler::new(4, 4, 0.9);
             let mut kv = make_kv_mgr(100);
-            s.add_request(vec![1, 2, 3], make_params(16));
-            s.select_work(&mut kv).unwrap(); // prefill → running
-            s.add_request(vec![4, 5, 6], make_params(16)); // stays waiting
+            scheduler.add_request(vec![1], make_params(2));
+            let prefill = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            scheduler
+                .apply_step_result(&result_for_plan(&prefill, 42), &mut kv)
+                .unwrap();
+            scheduler.add_request(vec![4, 5], make_params(1));
 
-            let output = s.select_work(&mut kv).unwrap(); // decode
-            assert_eq!(output.phase, StepPhase::Decode);
-            assert_eq!(s.num_running(), 1);
-            assert_eq!(s.num_waiting(), 1);
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.token_budget, 3);
+            assert_eq!(
+                plan.sequences
+                    .iter()
+                    .map(|sequence| sequence.sequence_id)
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
+            );
+            assert_eq!(scheduler.num_waiting(), 0);
+            assert_eq!(scheduler.num_running(), 2);
+        }
+    }
+
+    mod continuous_admission {
+        use super::*;
+
+        #[test]
+        fn fifo_waiters_are_admitted_within_their_position_bound() {
+            let mut scheduler = Scheduler::new(2, 8, 0.9);
+            let mut kv = make_kv_mgr(100);
+            begin_decoding(&mut scheduler, &mut kv, vec![1], 10, 42);
+            for prompt_start in [10, 20, 30] {
+                scheduler.add_request(
+                    vec![prompt_start, prompt_start + 1, prompt_start + 2],
+                    make_params(1),
+                );
+            }
+
+            let mut admitted_at = [None; 3];
+            let mut admission_order = Vec::new();
+            for decision in 0..3 {
+                let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+                for sequence in &plan.sequences {
+                    if let Some(waiter_index) = sequence.request_id.checked_sub(1) {
+                        if waiter_index < admitted_at.len() && admitted_at[waiter_index].is_none() {
+                            admitted_at[waiter_index] = Some(decision);
+                            admission_order.push(sequence.request_id);
+                        }
+                    }
+                }
+                scheduler
+                    .apply_step_result(&result_for_plan(&plan, 42), &mut kv)
+                    .unwrap();
+                if decision == 0 {
+                    scheduler.add_request(vec![40, 41, 42], make_params(1));
+                }
+            }
+
+            assert_eq!(admitted_at, [Some(0), Some(1), Some(2)]);
+            assert_eq!(admission_order, vec![1, 2, 3]);
+        }
+
+        #[test]
+        fn cache_blocked_waiter_stays_waiting_with_a_plan_reason() {
+            let mut scheduler = Scheduler::new(4, 4, 0.9);
+            let mut kv = make_kv_mgr(1);
+            begin_decoding(&mut scheduler, &mut kv, vec![1], 2, 42);
+            scheduler.add_request(vec![4, 5], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(
+                plan.blocked_admission,
+                Some(BlockedAdmission {
+                    request_id: 1,
+                    reason: AdmissionBlockedReason::KvCache,
+                })
+            );
+            assert_eq!(
+                plan.sequences
+                    .iter()
+                    .map(|sequence| sequence.request_id)
+                    .collect::<Vec<_>>(),
+                vec![0]
+            );
+            assert_eq!(scheduler.num_waiting(), 1);
+            assert_eq!(scheduler.waiting[0].status, SequenceStatus::Waiting);
+            assert_eq!(scheduler.waiting[0].num_scheduled_tokens, 0);
+            assert!(scheduler.waiting[0].block_table.is_empty());
+        }
+
+        #[test]
+        fn mixed_admission_failure_rolls_back_decode_cache_reservation() {
+            let mut scheduler = Scheduler::new(300, 4, 0.9);
+            let mut kv = make_kv_mgr(3);
+            begin_decoding(
+                &mut scheduler,
+                &mut kv,
+                (0..BLOCK_SIZE as u32).collect(),
+                2,
+                42,
+            );
+            scheduler.add_request(vec![4], make_params(1));
+            scheduler.waiting[0].block_table.push(0);
+            let free_before = kv.num_free_blocks();
+            let decode_blocks_before = scheduler.running[0].block_table.clone();
+
+            let error = scheduler.plan_step(&mut kv).unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("cache allocation failed for sequence 1"));
+            assert_eq!(kv.num_free_blocks(), free_before);
+            assert_eq!(scheduler.running[0].block_table, decode_blocks_before);
+            assert_eq!(scheduler.running[0].num_scheduled_tokens, 0);
+            assert_eq!(scheduler.num_running(), 1);
+            assert_eq!(scheduler.num_waiting(), 1);
+            assert_eq!(scheduler.waiting[0].status, SequenceStatus::Waiting);
+            assert_eq!(scheduler.waiting[0].num_scheduled_tokens, 0);
+            assert!(scheduler.in_flight.is_none());
+        }
+
+        #[test]
+        fn aggregate_cache_pressure_defers_admission_but_keeps_decode_progress() {
+            let mut scheduler = Scheduler::new(300, 4, 0.9);
+            let mut kv = make_kv_mgr(2);
+            begin_decoding(
+                &mut scheduler,
+                &mut kv,
+                (0..BLOCK_SIZE as u32).collect(),
+                2,
+                42,
+            );
+            scheduler.add_request(vec![4], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Decode);
+            assert_eq!(plan.token_budget, 1);
+            assert_eq!(plan.sequences[0].request_id, 0);
+            assert_eq!(
+                plan.blocked_admission,
+                Some(BlockedAdmission {
+                    request_id: 1,
+                    reason: AdmissionBlockedReason::KvCache,
+                })
+            );
+            assert_eq!(scheduler.num_running(), 1);
+            assert_eq!(scheduler.num_waiting(), 1);
+            assert_eq!(scheduler.waiting[0].status, SequenceStatus::Waiting);
+            assert_eq!(scheduler.waiting[0].num_scheduled_tokens, 0);
+            assert!(scheduler.waiting[0].block_table.is_empty());
+            assert_eq!(kv.num_free_blocks(), 0);
+        }
+
+        #[test]
+        fn mixed_plan_preserves_per_sequence_phase_and_causal_state() {
+            let mut scheduler = Scheduler::new(3, 4, 0.9);
+            let mut kv = make_kv_mgr(100);
+            begin_decoding(&mut scheduler, &mut kv, vec![1], 2, 42);
+            scheduler.add_request(vec![4, 5], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Mixed);
+            assert_eq!(plan.token_budget, 3);
+            assert_eq!(
+                plan.sequences
+                    .iter()
+                    .map(|sequence| (
+                        sequence.request_id,
+                        sequence.phase,
+                        sequence.token_range.clone(),
+                        sequence.sampling_allowed,
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (0, SequencePhase::Decode, 1..2, true),
+                    (1, SequencePhase::Prefill, 0..2, true),
+                ]
+            );
+            assert_eq!(plan.attention.cu_seqlens_q, vec![0, 1, 3]);
+            assert_eq!(plan.attention.cu_seqlens_k, vec![0, 2, 4]);
+            assert_eq!(plan.attention.block_table.len(), 2);
+            let outputs = scheduler
+                .apply_step_result(&result_for_plan(&plan, 77), &mut kv)
+                .unwrap();
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|output| (output.request_id, output.token_ids.clone()))
+                    .collect::<Vec<_>>(),
+                vec![(0, vec![42, 77]), (1, vec![77])]
+            );
+            assert!(!scheduler.is_running());
+        }
+
+        #[test]
+        fn sequence_limit_defers_waiter_with_a_plan_reason() {
+            let mut scheduler = Scheduler::new(4, 1, 0.9);
+            let mut kv = make_kv_mgr(100);
+            begin_decoding(&mut scheduler, &mut kv, vec![1], 2, 42);
+            scheduler.add_request(vec![4], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(
+                plan.blocked_admission,
+                Some(BlockedAdmission {
+                    request_id: 1,
+                    reason: AdmissionBlockedReason::SequenceLimit,
+                })
+            );
+            assert_eq!(plan.sequences.len(), 1);
+            assert_eq!(plan.sequences[0].request_id, 0);
+            assert_eq!(scheduler.num_waiting(), 1);
+        }
+
+        #[test]
+        fn cache_only_stall_is_not_reported_as_successful_progress() {
+            let mut scheduler = Scheduler::new(4, 4, 0.9);
+            let mut kv = make_kv_mgr(0);
+            scheduler.add_request(vec![1], make_params(1));
+
+            let error = scheduler.plan_step(&mut kv).unwrap_err();
+
+            assert!(matches!(
+                error,
+                StepPlanError::NoProgress {
+                    blocked_admission: Some(BlockedAdmission {
+                        request_id: 0,
+                        reason: AdmissionBlockedReason::KvCache,
+                    }),
+                    ..
+                }
+            ));
+            assert_eq!(scheduler.num_waiting(), 1);
+            assert_eq!(scheduler.num_running(), 0);
+            assert_eq!(scheduler.waiting[0].num_scheduled_tokens, 0);
+            assert!(scheduler.in_flight.is_none());
+        }
+
+        #[test]
+        fn mixed_incomplete_prefill_cannot_sample_or_change_decode_history() {
+            let mut scheduler = Scheduler::new(3, 4, 0.9);
+            let mut kv = make_kv_mgr(100);
+            begin_decoding(&mut scheduler, &mut kv, vec![1], 3, 42);
+            scheduler.add_request(vec![4, 5, 6], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Mixed);
+            assert_eq!(plan.token_budget, 3);
+            assert!(plan.sequences[0].sampling_allowed);
+            assert!(!plan.sequences[1].sampling_allowed);
+            let outputs = scheduler
+                .apply_step_result(&result_for_plan(&plan, 77), &mut kv)
+                .unwrap();
+            assert!(outputs.is_empty());
+            let decoder = scheduler
+                .running
+                .iter()
+                .find(|sequence| sequence.request_id == 0)
+                .unwrap();
+            assert_eq!(decoder.completion_token_ids(), &[42, 77]);
+            let prefilling = scheduler
+                .running
+                .iter()
+                .find(|sequence| sequence.request_id == 1)
+                .unwrap();
+            assert_eq!(prefilling.num_cached_tokens, 2);
+            assert!(prefilling.completion_token_ids().is_empty());
+            assert!(prefilling.is_prefill);
+        }
+
+        #[test]
+        fn decode_continues_while_an_admitted_prefill_finishes_its_next_chunk() {
+            let mut scheduler = Scheduler::new(3, 4, 0.9);
+            let mut kv = make_kv_mgr(100);
+            begin_decoding(&mut scheduler, &mut kv, vec![1], 3, 42);
+            scheduler.add_request(vec![4, 5, 6, 7], make_params(1));
+            let admission = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(admission.phase, StepPhase::Mixed);
+            scheduler
+                .apply_step_result(&result_for_plan(&admission, 77), &mut kv)
+                .unwrap();
+
+            let continuation = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(continuation.phase, StepPhase::Mixed);
+            assert_eq!(continuation.token_budget, 3);
+            assert_eq!(
+                continuation
+                    .sequences
+                    .iter()
+                    .map(|sequence| (
+                        sequence.request_id,
+                        sequence.phase,
+                        sequence.token_range.clone(),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (0, SequencePhase::Decode, 2..3),
+                    (1, SequencePhase::Prefill, 2..4),
+                ]
+            );
+            assert_eq!(continuation.attention.cu_seqlens_q, vec![0, 1, 3]);
+            assert_eq!(continuation.attention.cu_seqlens_k, vec![0, 3, 7]);
+            assert_eq!(continuation.attention.block_table.len(), 2);
+        }
+
+        #[test]
+        fn one_token_horizon_admits_prefill_without_mislabeling_unscheduled_decode() {
+            let mut scheduler = Scheduler::new(1, 4, 0.9);
+            let mut kv = make_kv_mgr(100);
+            begin_decoding(&mut scheduler, &mut kv, vec![1], 2, 42);
+            scheduler.add_request(vec![4], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Prefill);
+            assert_eq!(plan.token_budget, 1);
+            assert_eq!(plan.sequences.len(), 1);
+            assert_eq!(plan.sequences[0].request_id, 1);
+            assert_eq!(plan.sequences[0].phase, SequencePhase::Prefill);
+            assert_eq!(scheduler.running[0].num_scheduled_tokens, 0);
+            assert_eq!(scheduler.running[0].completion_token_ids(), &[42]);
         }
     }
 
@@ -1403,6 +1888,7 @@ mod tests {
                     &make_params(16),
                 );
                 kv.allocate(&mut sequence, 0).unwrap();
+                sequence.num_cached_tokens = BLOCK_SIZE;
                 sequence.append_token(42);
                 sequence.status = SequenceStatus::Running;
                 sequence.is_prefill = false;
@@ -1561,6 +2047,7 @@ mod tests {
                 let mut sequence =
                     Sequence::new(sequence_id, sequence_id, vec![10, 11], &make_params(16));
                 kv.allocate(&mut sequence, 0).unwrap();
+                sequence.num_cached_tokens = sequence.num_prompt_tokens;
                 sequence.status = SequenceStatus::Running;
                 sequence.is_prefill = false;
                 scheduler.running.push_back(sequence);
