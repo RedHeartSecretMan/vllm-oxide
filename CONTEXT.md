@@ -147,6 +147,18 @@ _Avoid_: secondary oracle, calibration oracle.
 The versioned, dtype- and kernel-specific numerical acceptance policy derived from observed same-prefix error distributions and recorded with its evidence and rationale.
 _Avoid_: hidden tolerance, pass-until-green threshold.
 
+**Calibration observation**:
+A non-accepting, zero-threshold run that records complete same-prefix numerical distributions and root-cause evidence before any tolerance is approved. It can propose a policy but can never satisfy the release gate.
+_Avoid_: calibration pass, auto-tuned tolerance, baseline acceptance.
+
+**Performance baseline**:
+The reproducible, evidence-only measurements for fixed single-request and batch workloads: prefill throughput, decode throughput, time to first token, inter-token latency, and peak device memory. It is not a cross-hardware latency promise.
+_Avoid_: benchmark gate, performance SLA, vLLM parity claim.
+
+**Golden release evidence report**:
+The committed Markdown record that binds the exact environment, kernels, corpus, approved tolerance, comparison totals, performance samples, limitations, and two release-asset hashes for `goldens-v0.2`. It is release evidence, not a third release asset.
+_Avoid_: release manifest, benchmark artifact, extra golden asset.
+
 **Near-tie classification (L1)**:
 A reference-token mismatch classified from the relevant same-prefix candidate logits under the versioned `Tolerance policy`. It is an explicit result, never a skipped comparison or a classification borrowed from the baseline oracle.
 _Avoid_: near-tie skip, epsilon skip, close-call skip.

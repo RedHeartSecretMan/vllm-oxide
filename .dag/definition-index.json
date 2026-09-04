@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "6baba0832544897b20325cb80ab2a874157fc5dc"
+      "blob_oid": "dcbcc3e6160275cd746f2b4855fae7bce9a79ac3"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -52,6 +52,10 @@
     {
       "path": "docs/adr/0011-public-generation-contract.md",
       "blob_oid": "0d29209e69f85a290bee0fc83023ad10d843a6c5"
+    },
+    {
+      "path": "docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md",
+      "blob_oid": "9df938ddf8d9479ec2b635580d2570c68856b5f6"
     }
   ]
 }
