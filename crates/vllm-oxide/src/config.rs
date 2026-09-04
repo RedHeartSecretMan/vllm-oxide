@@ -2,16 +2,16 @@
 //!
 //! Three concerns live here:
 //!
-//! 1. [`Source`] — the loader's input: a local directory or a HuggingFace Hub
-//!    repo id. Tag carries the data the loader needs to resolve shards.
+//! 1. [`Source`] — the public `LLM::new` input: a local directory or a
+//!    HuggingFace Hub repo id.
 //! 2. [`is_hf_hub_offline`] — verbatim port of mistral.rs's
 //!    `mistralrs-core/src/pipeline/hf.rs:28-37` shim. hf-hub 0.5 lacks a
 //!    native `HF_HUB_OFFLINE` (zero source matches at that rev); we mirror
 //!    mistral.rs's accepted values so the behaviour is identical.
-//! 3. [`default_dtype`] — reads `config.json`'s `torch_dtype` field. This is
+//! 3. `default_dtype` — internally reads `config.json`'s `torch_dtype` field. This is
 //!    the fix for nano-vllm's latent bug (`model_runner.py:29` reads the
 //!    nonexistent `hf_config.dtype` attribute). User-overridable via the
-//!    `dtype` parameter on [`crate::loader::load_weights`].
+//!    the source of the default when `EngineOptions::dtype` is `None`.
 
 use candle_core::DType;
 use serde::Deserialize;
@@ -22,13 +22,12 @@ pub const HF_HUB_OFFLINE_ENV: &str = "HF_HUB_OFFLINE";
 
 /// Where to load weights from.
 ///
-/// The loader resolves either variant to a list of `*.safetensors` paths,
-/// then mmaps them via candle's `ShardedSafeTensors::var_builder`. See
-/// [`crate::loader::load_weights`].
+/// `LLM::new` resolves either variant once into configuration, tokenizer, and
+/// safetensors artifacts with one immutable model identity.
 ///
 /// `Local` is the parity anchor (golden comparison runs against a local
-/// snapshot); `Hub` is for ad-hoc / interactive use. `Hub` honours
-/// [`is_hf_hub_offline`] and short-circuits to the local cache when offline.
+/// snapshot); `Hub` is for ad-hoc / interactive use. `Hub` honours the
+/// `HF_HUB_OFFLINE` process setting and short-circuits to the local cache.
 #[derive(Debug, Clone)]
 pub enum Source {
     /// Absolute or relative path to a directory containing one of:
@@ -84,7 +83,7 @@ pub struct HFConfig {
 /// - `Ok(BF16)` for `"bfloat16"`
 /// - `Ok(F16)` for `"float16"`
 /// - `Ok(F32)` for `"float32"`
-/// - `Err` if `torch_dtype` is missing or unrecognised — v0.1 refuses to
+/// - `Err` if `torch_dtype` is missing or unrecognised — v0.2.0 refuses to
 ///   guess. The caller decides whether to surface the error or supply a
 ///   user override.
 pub fn default_dtype(config: &HFConfig) -> anyhow::Result<DType> {
@@ -98,7 +97,7 @@ pub fn default_dtype(config: &HFConfig) -> anyhow::Result<DType> {
         "float32" | "fp32" | "float" => Ok(DType::F32),
         "float64" | "fp64" | "double" => Ok(DType::F64),
         other => Err(anyhow::anyhow!(
-            "config.json `torch_dtype={other}` is not a recognised v0.1 dtype \
+            "config.json `torch_dtype={other}` is not a recognised v0.2.0 dtype \
              (supported: bfloat16, float16, float32, float64)"
         )),
     }

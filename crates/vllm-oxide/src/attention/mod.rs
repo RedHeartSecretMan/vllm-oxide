@@ -22,7 +22,7 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use crate::utils::kv_cache_layout_shape;
 
 pub(crate) use metadata::{build_continued_prefill_metadata, PreparedAttention};
-pub use metadata::{build_decode_metadata, build_prefill_metadata, AttnMetadata};
+pub(crate) use metadata::{build_decode_metadata, build_prefill_metadata, AttnMetadata};
 
 /// Shared attention state crossing the `engine ↔ model` seam.
 ///
@@ -32,13 +32,13 @@ pub use metadata::{build_decode_metadata, build_prefill_metadata, AttnMetadata};
 /// [`AttnMetadata`] value into device tensors and binds it to that StepPlan's
 /// epoch. Every layer then borrows the same immutable prepared value. The
 /// active value is released after plan execution, including error and unwind
-/// paths, so a later step cannot silently consume stale metadata. Until #44
-/// contracts the public surface, the exact v0.1 public fields remain intact;
-/// the crate-private runtime sidecar lives in [`PagedKVCache`].
+/// paths, so a later step cannot silently consume stale metadata. The context
+/// owns that lifecycle directly; neither its fields nor the physical cache are
+/// part of the public generation interface (ADR-0011).
 #[derive(Clone)]
-pub struct AttentionContext {
-    pub paged_kv: Arc<Mutex<PagedKVCache>>,
-    pub attn_meta: Arc<Mutex<AttnMetadata>>,
+pub(crate) struct AttentionContext {
+    pub(crate) paged_kv: Arc<Mutex<PagedKVCache>>,
+    runtime: Arc<Mutex<AttentionState>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,6 @@ pub(crate) enum AttentionEpoch {
     StepPlan(u64),
     WarmupPrefill,
     WarmupDecode,
-    DirectForward(u64),
 }
 
 impl std::fmt::Display for AttentionEpoch {
@@ -55,7 +54,6 @@ impl std::fmt::Display for AttentionEpoch {
             Self::StepPlan(plan_id) => write!(formatter, "StepPlan({plan_id})"),
             Self::WarmupPrefill => formatter.write_str("WarmupPrefill"),
             Self::WarmupDecode => formatter.write_str("WarmupDecode"),
-            Self::DirectForward(epoch) => write!(formatter, "DirectForward({epoch})"),
         }
     }
 }
@@ -71,7 +69,6 @@ enum AttentionLifecycle {
 struct AttentionState {
     lifecycle: AttentionLifecycle,
     bound_consumer: Option<AttentionEpoch>,
-    next_direct_forward_epoch: u64,
     prepare_calls: usize,
     device_tensor_uploads: usize,
 }
@@ -81,7 +78,6 @@ impl Default for AttentionState {
         Self {
             lifecycle: AttentionLifecycle::Idle,
             bound_consumer: None,
-            next_direct_forward_epoch: 0,
             prepare_calls: 0,
             device_tensor_uploads: 0,
         }
@@ -92,7 +88,7 @@ impl AttentionContext {
     pub(crate) fn new(paged_kv: Arc<Mutex<PagedKVCache>>) -> Self {
         Self {
             paged_kv,
-            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+            runtime: Arc::new(Mutex::new(AttentionState::default())),
         }
     }
 
@@ -109,13 +105,13 @@ impl AttentionContext {
         device: &Device,
     ) -> Result<AttentionStepGuard> {
         self.reserve(epoch)?;
-        self.complete_preparation(epoch, device, || Ok(logical))
+        self.complete_preparation(epoch, logical, device)
     }
 
     /// Bind the only model consumer allowed to use the active epoch.
     pub(crate) fn bind_consumer(&self, expected: AttentionEpoch) -> Result<AttentionConsumerGuard> {
-        let runtime = self.runtime_state()?;
-        let mut state = lock_attention_state(&runtime)?;
+        let runtime = self.runtime_state();
+        let mut state = lock_attention_state(runtime)?;
         match &state.lifecycle {
             AttentionLifecycle::Ready(active) if active.epoch() != expected => {
                 candle_core::bail!(
@@ -143,32 +139,14 @@ impl AttentionContext {
         Ok(AttentionConsumerGuard {
             context: self.clone(),
             epoch: expected,
-            owned_step: None,
             armed: true,
         })
     }
 
-    /// For the semver-visible direct `CausalLM::forward` path, prepare and bind
-    /// one private epoch from the public logical metadata only when idle.
-    /// Engine and warmup callers arrive with an already-ready epoch and receive
-    /// `None`; their independently owned consumer guard remains authoritative.
-    pub(crate) fn bind_direct_forward_if_idle(
-        &self,
-        device: &Device,
-    ) -> Result<Option<AttentionConsumerGuard>> {
-        let Some(epoch) = self.reserve_direct_forward()? else {
-            return Ok(None);
-        };
-        let step = self.complete_preparation(epoch, device, || self.logical_snapshot())?;
-        let mut consumer = self.bind_consumer(epoch)?;
-        consumer.owned_step = Some(step);
-        Ok(Some(consumer))
-    }
-
     /// Borrow only when a consumer is explicitly bound to the ready epoch.
     pub(crate) fn prepared_for_bound_consumer(&self) -> Result<Arc<PreparedAttention>> {
-        let runtime = self.runtime_state()?;
-        let state = lock_attention_state(&runtime)?;
+        let runtime = self.runtime_state();
+        let state = lock_attention_state(runtime)?;
         match (&state.lifecycle, state.bound_consumer) {
             (AttentionLifecycle::Ready(prepared), Some(bound)) if prepared.epoch() == bound => {
                 Ok(prepared.clone())
@@ -191,8 +169,8 @@ impl AttentionContext {
 
     fn reserve(&self, epoch: AttentionEpoch) -> Result<()> {
         {
-            let runtime = self.runtime_state()?;
-            let mut state = lock_attention_state(&runtime)?;
+            let runtime = self.runtime_state();
+            let mut state = lock_attention_state(runtime)?;
             if let Some(bound) = state.bound_consumer {
                 candle_core::bail!(
                     "attention context has bound consumer {bound}; cannot prepare {epoch}"
@@ -218,65 +196,28 @@ impl AttentionContext {
         Ok(())
     }
 
-    fn reserve_direct_forward(&self) -> Result<Option<AttentionEpoch>> {
-        let runtime = self.runtime_state()?;
-        let mut state = lock_attention_state(&runtime)?;
-        match &state.lifecycle {
-            AttentionLifecycle::Idle => {
-                if let Some(bound) = state.bound_consumer {
-                    candle_core::bail!(
-                        "idle attention context unexpectedly has bound consumer {bound}"
-                    )
-                }
-                let epoch = AttentionEpoch::DirectForward(state.next_direct_forward_epoch);
-                state.next_direct_forward_epoch = state
-                    .next_direct_forward_epoch
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        candle_core::Error::Msg(
-                            "direct attention forward epoch exhausted".to_string(),
-                        )
-                    })?;
-                state.lifecycle = AttentionLifecycle::Preparing(epoch);
-                Ok(Some(epoch))
-            }
-            AttentionLifecycle::Ready(_) => Ok(None),
-            AttentionLifecycle::Preparing(epoch) => candle_core::bail!(
-                "cannot start direct attention forward while {epoch} is still preparing"
-            ),
-        }
-    }
-
     fn complete_preparation(
         &self,
         epoch: AttentionEpoch,
+        logical: AttnMetadata,
         device: &Device,
-        logical: impl FnOnce() -> Result<AttnMetadata>,
     ) -> Result<AttentionStepGuard> {
         let mut reservation = AttentionPreparationReservation {
             context: self.clone(),
             epoch,
             armed: true,
         };
-        let logical = logical()?;
         let prepared = PreparedAttention::prepare(epoch, logical, device)?;
         let device_tensor_uploads = prepared.device_tensor_uploads();
-        let logical = prepared.logical().clone();
         let prepared = Arc::new(prepared);
 
         {
-            let runtime = self.runtime_state()?;
-            let mut state = lock_attention_state(&runtime)?;
+            let runtime = self.runtime_state();
+            let mut state = lock_attention_state(runtime)?;
             match state.lifecycle {
                 AttentionLifecycle::Preparing(current)
                     if current == epoch && state.bound_consumer.is_none() =>
                 {
-                    let mut attn_meta = self.attn_meta.lock().map_err(|error| {
-                        candle_core::Error::Msg(format!(
-                            "attention logical metadata lock poisoned: {error}"
-                        ))
-                    })?;
-                    *attn_meta = logical;
                     state.lifecycle = AttentionLifecycle::Ready(prepared);
                     state.prepare_calls += 1;
                     state.device_tensor_uploads += device_tensor_uploads;
@@ -295,28 +236,12 @@ impl AttentionContext {
         })
     }
 
-    fn logical_snapshot(&self) -> Result<AttnMetadata> {
-        self.attn_meta
-            .lock()
-            .map(|metadata| metadata.clone())
-            .map_err(|error| {
-                candle_core::Error::Msg(format!(
-                    "attention logical metadata lock poisoned: {error}"
-                ))
-            })
-    }
-
-    fn runtime_state(&self) -> Result<Arc<Mutex<AttentionState>>> {
-        let cache = self.paged_kv.lock().map_err(|error| {
-            candle_core::Error::Msg(format!("paged KV cache lock poisoned: {error}"))
-        })?;
-        Ok(cache.attention_runtime())
+    fn runtime_state(&self) -> &Mutex<AttentionState> {
+        &self.runtime
     }
 
     fn cancel_preparation(&self, epoch: AttentionEpoch) {
-        let Ok(runtime) = self.runtime_state() else {
-            return;
-        };
+        let runtime = self.runtime_state();
         if let Ok(mut state) = runtime.lock() {
             if matches!(state.lifecycle, AttentionLifecycle::Preparing(current) if current == epoch)
             {
@@ -326,8 +251,8 @@ impl AttentionContext {
     }
 
     fn release_consumer(&self, epoch: AttentionEpoch) -> Result<()> {
-        let runtime = self.runtime_state()?;
-        let mut state = lock_attention_state(&runtime)?;
+        let runtime = self.runtime_state();
+        let mut state = lock_attention_state(runtime)?;
         match state.bound_consumer {
             Some(bound) if bound == epoch => {
                 state.bound_consumer = None;
@@ -343,8 +268,8 @@ impl AttentionContext {
     }
 
     fn release(&self, epoch: AttentionEpoch) -> Result<()> {
-        let runtime = self.runtime_state()?;
-        let mut state = lock_attention_state(&runtime)?;
+        let runtime = self.runtime_state();
+        let mut state = lock_attention_state(runtime)?;
         if let Some(bound) = state.bound_consumer {
             candle_core::bail!(
                 "cannot release attention epoch {epoch}; consumer {bound} is still bound"
@@ -371,8 +296,7 @@ impl AttentionContext {
     #[cfg(test)]
     #[allow(clippy::unwrap_used)]
     pub(crate) fn instrumentation(&self) -> AttentionInstrumentation {
-        let runtime = self.runtime_state().unwrap();
-        let state = runtime.lock().unwrap();
+        let state = self.runtime.lock().unwrap();
         AttentionInstrumentation {
             prepare_calls: state.prepare_calls,
             device_tensor_uploads: state.device_tensor_uploads,
@@ -382,8 +306,7 @@ impl AttentionContext {
     #[cfg(test)]
     #[allow(clippy::unwrap_used)]
     pub(crate) fn is_idle(&self) -> bool {
-        let runtime = self.runtime_state().unwrap();
-        let state = runtime.lock().unwrap();
+        let state = self.runtime.lock().unwrap();
         matches!(state.lifecycle, AttentionLifecycle::Idle) && state.bound_consumer.is_none()
     }
 }
@@ -405,7 +328,6 @@ pub(crate) struct AttentionStepGuard {
 pub(crate) struct AttentionConsumerGuard {
     context: AttentionContext,
     epoch: AttentionEpoch,
-    owned_step: Option<AttentionStepGuard>,
     armed: bool,
 }
 
@@ -413,9 +335,6 @@ impl AttentionConsumerGuard {
     pub(crate) fn finish(mut self) -> Result<()> {
         self.context.release_consumer(self.epoch)?;
         self.armed = false;
-        if let Some(step) = self.owned_step.take() {
-            step.finish()?;
-        }
         Ok(())
     }
 }
@@ -488,7 +407,6 @@ pub struct PagedKVCache {
     buffer: Option<Tensor>,
     geometry: PagedKVCacheGeometry,
     num_blocks: usize,
-    attention_runtime: Arc<Mutex<AttentionState>>,
 }
 
 impl PagedKVCache {
@@ -518,7 +436,6 @@ impl PagedKVCache {
             buffer: None,
             geometry,
             num_blocks: 0,
-            attention_runtime: Arc::new(Mutex::new(AttentionState::default())),
         }
     }
 
@@ -601,10 +518,6 @@ impl PagedKVCache {
 
     pub(crate) fn geometry(&self) -> PagedKVCacheGeometry {
         self.geometry
-    }
-
-    fn attention_runtime(&self) -> Arc<Mutex<AttentionState>> {
-        self.attention_runtime.clone()
     }
 
     #[cfg(test)]
@@ -798,10 +711,6 @@ mod tests {
 
         let unbound = context.prepared_for_bound_consumer().unwrap_err();
         assert!(unbound.to_string().contains("has no bound consumer"));
-        assert!(context
-            .bind_direct_forward_if_idle(&Device::Cpu)
-            .unwrap()
-            .is_none());
         let stale = context
             .bind_consumer(AttentionEpoch::StepPlan(8))
             .err()
@@ -818,57 +727,6 @@ mod tests {
         );
         consumer.finish().unwrap();
         step.finish().unwrap();
-        assert!(context.is_idle());
-    }
-
-    #[test]
-    fn direct_forward_uses_unique_epochs_and_owns_its_step_scope() {
-        let context = context();
-        *context.attn_meta.lock().unwrap() = build_prefill_metadata(&[1], &[1], &[0]);
-
-        let first = context
-            .bind_direct_forward_if_idle(&Device::Cpu)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            context.prepared_for_bound_consumer().unwrap().epoch(),
-            AttentionEpoch::DirectForward(0)
-        );
-        first.finish().unwrap();
-        assert!(context.is_idle());
-
-        let second = context
-            .bind_direct_forward_if_idle(&Device::Cpu)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            context.prepared_for_bound_consumer().unwrap().epoch(),
-            AttentionEpoch::DirectForward(1)
-        );
-        second.finish().unwrap();
-
-        assert!(context.is_idle());
-        assert_eq!(context.instrumentation().prepare_calls, 2);
-        assert_eq!(context.instrumentation().device_tensor_uploads, 6);
-    }
-
-    #[test]
-    fn direct_forward_consumer_unwinds_before_its_owned_step() {
-        let context = context();
-        *context.attn_meta.lock().unwrap() = build_prefill_metadata(&[1], &[1], &[0]);
-        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
-            let context = context.clone();
-            move || {
-                let _consumer = context
-                    .bind_direct_forward_if_idle(&Device::Cpu)
-                    .unwrap()
-                    .unwrap();
-                context.prepared_for_bound_consumer().unwrap();
-                panic!("injected direct forward panic");
-            }
-        }));
-
-        assert!(unwind.is_err());
         assert!(context.is_idle());
     }
 

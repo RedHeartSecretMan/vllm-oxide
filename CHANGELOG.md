@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (v0.2.0):** contracted the default `vllm_oxide` crate root to
+  exactly `LLM`, `EngineOptions`, `Prompt`, `SamplingParams`, `RequestOutput`,
+  and `Source`. The supported operations on `LLM` are now only `LLM::new` and
+  `LLM::generate`; callers should migrate all inference through that
+  composition-root interface.
+- The GPU golden harness now obtains raw logits through the default-off,
+  diagnostic-only `internal-golden` capture protocol while still constructing
+  and invoking the engine exclusively through the supported generation
+  interface. Capture is inert without explicit process configuration and
+  publishes one caller-private, self-validated artifact with atomic
+  no-replace semantics.
+
+### Removed
+
+- Removed crate-root access to scheduler and sequence types, block/KV-cache
+  types, attention metadata and context, model loader and resolved identity,
+  registry/model factories, `CausalLM`, `Sampler`, and internal utility
+  helpers. No compatibility aliases remain.
+- Removed the public `LLM::generate_logits` diagnostic method and the temporary
+  public-field/direct-forward attention compatibility bridge.
+
+`LLM::new` and `LLM::generate` continue to return `anyhow::Result`, and
+`EngineOptions::dtype` continues to use `Option<candle_core::DType>`; these are
+transitive external signature types, not new crate-root re-exports.
+
 ## [0.1.0] - 2025-07-29
 
 ### Added

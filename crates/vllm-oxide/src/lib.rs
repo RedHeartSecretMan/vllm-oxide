@@ -1,9 +1,100 @@
-//! `vllm_oxide` — Rust port of nano-vllm trending toward vLLM V1.
+//! `vllm_oxide` provides synchronous, offline Qwen3 generation on one CUDA GPU.
 //!
-//! v0.1 scope: single-GPU, Qwen3-only, offline `LLM::generate` Rust API,
-//! paged KV cache (`block_size = 256`), continuous batching, prefix caching,
-//! BF16/FP16, recompute-only preemption. TP=1 hardcoded with the
-//! `ParallelStyle` seam preserved for v0.2 NCCL wiring.
+//! The supported v0.2.0 interface is the composition root [`LLM`], its
+//! constructor [`LLM::new`], and generation through [`LLM::generate`]. The
+//! crate root exposes only the six types needed to use that interface:
+//! [`LLM`], [`EngineOptions`], [`Prompt`], [`SamplingParams`],
+//! [`RequestOutput`], and [`Source`].
+//! `LLM::new` and `LLM::generate` retain `anyhow::Result` signatures, and
+//! `EngineOptions::dtype` retains `Option<candle_core::DType>`; those are
+//! transitive external types, not additional root exports.
+//!
+//! ```no_run
+//! use vllm_oxide::{
+//!     EngineOptions, LLM, Prompt, RequestOutput, SamplingParams, Source,
+//! };
+//!
+//! let source = Source::Hub {
+//!     repo: "Qwen/Qwen3-0.6B".to_string(),
+//!     revision: None,
+//! };
+//! let mut llm = LLM::new(source, EngineOptions::default()).unwrap();
+//! let outputs: Vec<RequestOutput> = llm
+//!     .generate(
+//!         &[Prompt::Text("The meaning of life is".to_string())],
+//!         &[SamplingParams::default()],
+//!     )
+//!     .unwrap();
+//! assert_eq!(outputs.len(), 1);
+//! ```
+//!
+//! Engine, scheduler, cache, attention, loader, registry, model, sampler, and
+//! utility mechanics are intentionally internal. These compile-fail examples
+//! guard representative paths as an external crate would see them.
+//!
+//! ```compile_fail
+//! use vllm_oxide::Scheduler;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::PagedKVCache;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::AttentionContext;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::Sequence;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::ResolvedModel;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::load_weights;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::Sampler;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::CausalLM;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::ModelEntry;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::build_model;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::build_prefill_metadata;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::kv_cache_layout_shape;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::engine::Scheduler;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::golden_capture;
+//! ```
+//!
+//! ```compile_fail
+//! use vllm_oxide::{LLM, Prompt};
+//!
+//! fn raw_logits_are_not_a_supported_method(llm: &mut LLM, prompt: &Prompt) {
+//!     let _ = llm.generate_logits(prompt, 1);
+//! }
+//! ```
 //!
 //! This file is the **only** module that issues top-level `pub use`
 //! (ADR-0004 R4). Internal modules default to `pub(crate)` or stricter;
@@ -11,41 +102,17 @@
 
 pub(crate) mod utils;
 
-// Public API surface: per ADR-0004 R4, `lib.rs` is the ONLY module that issues
-// top-level `pub use`. Internal modules stay at `pub(crate)` or stricter.
-pub use sampler::{Sampler, SamplingParams};
-pub use utils::{kv_cache_layout_shape, round_up};
+#[cfg(feature = "internal-golden")]
+mod golden_capture;
 
-pub use attention::{
-    build_decode_metadata, build_prefill_metadata, AttentionContext, AttnMetadata, PagedKVCache,
-};
+// Public generation contract (ADR-0011). Keep this list exact: internal
+// modules and their implementation types are reachable only within the crate.
+pub use config::Source;
+pub use engine::scheduler::RequestOutput;
+pub use llm::{EngineOptions, Prompt, LLM};
+pub use sampler::SamplingParams;
 
-// T2/#20 — engine data model: Sequence (carries its own request_id), BlockPool,
-// KVCacheManager. The former 1:1 SequenceGroup wrapper has been absorbed.
-// T2/#21 — Scheduler + EngineCore: the live control loop.
-// The scheduler imports only KvCacheManager (and Sequence) — never BlockPool
-// or PagedKVCache directly (ADR-0004 seam contract).
-pub use engine::{
-    BlockPoolError, EngineCore, KvCacheManager, RequestOutput, Scheduler, Sequence, SequenceStatus,
-};
-
-// T15 — weight loader + config (ADR-0002). Loader is model-agnostic: returns
-// a candle `ShardedVarBuilder`; all fusion (q/k/v, gate/up) lives in
-// `Linear::<P>::from_vb` (T3, lands later).
-pub use config::{
-    default_dtype, default_dtype_from_config_json, is_hf_hub_offline, is_offline_value, HFConfig,
-    Source, HF_HUB_OFFLINE_ENV,
-};
-pub use loader::model_identity::{ModelIdentity, ResolvedModel};
-pub use loader::{load_resolved_weights_vb, load_weights, load_weights_vb};
-
-pub use causal_lm::CausalLM;
-pub use models::registry::{BuiltModel, ModelEntry};
-
-pub use llm::{build_model, EngineOptions, Prompt, LLM};
-
-// Module stubs — working code lands in downstream tickets (T2 engine,
-// T3 layers/loader, T4 attention, T5 model). Dependency DAG per ADR-0004:
+// Internal module DAG per ADR-0004:
 // layers / attention / loader / sampler are leaves; models depends on
 // layers + attention + loader; engine does not depend on models; llm is
 // the only composition root.

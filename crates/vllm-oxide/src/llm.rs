@@ -1,4 +1,5 @@
-//! Composition root — `LLM` public API surface (ADR-0004).
+//! Composition root for the contracted v0.2.0 generation interface
+//! (ADR-0004, ADR-0011).
 //!
 //! The ONLY module that simultaneously imports `engine`, `models::registry`,
 //! `loader`, `sampler`, and `attention`. Port of nano-vllm `llm.py` /
@@ -28,8 +29,11 @@ use crate::sampler::{Sampler, SamplingParams};
 
 use initialization::initialize_model;
 
+#[cfg(feature = "internal-golden")]
+use crate::golden_capture::CaptureSession;
+
 /// Construction-time configuration for `LLM::new`.
-/// Mirrors nano-vllm's `Config` with v0.1 scope.
+/// Mirrors the supported single-GPU subset of nano-vllm's `Config`.
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
     /// Maximum number of tokens processed in one prefill step.
@@ -40,7 +44,7 @@ pub struct EngineOptions {
     pub max_model_len: usize,
     /// Fraction of free GPU memory to allocate to the KV cache pool (0.0–1.0).
     pub gpu_memory_utilization: f32,
-    /// Always `true` in v0.1 — CUDA graph capture is deferred to v0.2.
+    /// Must remain `true`; CUDA Graphs are outside the v0.2.0 boundary.
     pub enforce_eager: bool,
     /// Override the dtype read from `config.json`'s `torch_dtype`. `None`
     /// means "use the checkpoint's dtype" (BF16 for Qwen3).
@@ -78,19 +82,6 @@ pub struct LLM {
     device: Device,
 }
 
-/// Build a registered model from one `ResolvedModel`.
-pub fn build_model(source: Source, device: &Device, max_model_len: usize) -> Result<BuiltModel> {
-    let resolved_model = ResolvedModel::resolve(source, None)?;
-    let built = build_resolved_model(&resolved_model, device, max_model_len)?;
-    built
-        .attn_ctx
-        .paged_kv
-        .lock()
-        .map_err(|error| anyhow!("paged_kv lock: {error}"))?
-        .allocate(100, device)?;
-    Ok(built)
-}
-
 fn build_resolved_model(
     resolved_model: &ResolvedModel,
     device: &Device,
@@ -113,10 +104,10 @@ impl LLM {
         let source: Source = model.into();
 
         let device = Device::cuda_if_available(0).map_err(|e| {
-            anyhow!("CUDA device unavailable: {e}. vllm-oxide v0.1 requires a GPU.")
+            anyhow!("CUDA device unavailable: {e}. vllm-oxide v0.2.0 requires one CUDA GPU.")
         })?;
         if !device.is_cuda() {
-            bail!("vllm-oxide v0.1 requires a CUDA device. CPU-only inference is not supported.");
+            bail!("vllm-oxide v0.2.0 requires one CUDA GPU. CPU-only inference is not supported.");
         }
 
         #[cfg(feature = "cuda")]
@@ -226,7 +217,18 @@ impl LLM {
                 .validate()
                 .map_err(|error| anyhow!("generate: sampling_params[{batch_position}]{error}"))?;
         }
+        #[cfg(feature = "internal-golden")]
+        let mut capture = CaptureSession::from_env()
+            .context("generate: invalid internal golden capture configuration")?;
         if prompts.is_empty() {
+            #[cfg(feature = "internal-golden")]
+            if let Some(capture) = capture.as_mut() {
+                capture.bind_requests(&[])?;
+            }
+            #[cfg(feature = "internal-golden")]
+            if let Some(capture) = capture.take() {
+                capture.finish(&[])?;
+            }
             return Ok(Vec::new());
         }
 
@@ -239,6 +241,12 @@ impl LLM {
             let request_id = self.engine.add_request(token_ids, params.clone());
             request_ids.push(request_id);
         }
+        #[cfg(feature = "internal-golden")]
+        if let Some(capture) = capture.as_mut() {
+            if let Err(error) = capture.bind_requests(&request_ids) {
+                return Err(self.abort_after_capture_error(error));
+            }
+        }
 
         let start = Instant::now();
         let mut step_count: usize = 0;
@@ -246,6 +254,28 @@ impl LLM {
         let mut completed_outputs = Vec::with_capacity(prompts.len());
 
         while self.engine.is_running() {
+            #[cfg(feature = "internal-golden")]
+            let outputs = if let Some(capture) = capture.as_mut() {
+                let (outputs, step_capture) =
+                    self.engine.step_with_capture().with_context(|| {
+                        format!(
+                            "generate: runtime failure for {}",
+                            format_request_diagnostics(&request_ids, sampling_params)
+                        )
+                    })?;
+                if let Err(error) = capture.record_engine_step(step_capture) {
+                    return Err(self.abort_after_capture_error(error));
+                }
+                outputs
+            } else {
+                self.engine.step().with_context(|| {
+                    format!(
+                        "generate: runtime failure for {}",
+                        format_request_diagnostics(&request_ids, sampling_params)
+                    )
+                })?
+            };
+            #[cfg(not(feature = "internal-golden"))]
             let outputs = self.engine.step().with_context(|| {
                 format!(
                     "generate: runtime failure for {}",
@@ -292,52 +322,25 @@ impl LLM {
             );
         }
 
+        #[cfg(feature = "internal-golden")]
+        if let Some(capture) = capture.take() {
+            capture
+                .finish(&results)
+                .context("generate: publishing internal golden capture")?;
+        }
+
         Ok(results)
     }
 
-    /// Run greedy generation and return the pre-sampling logits at every step.
-    ///
-    /// This runs the full generation loop (prefill + `max_tokens` decode steps)
-    /// with greedy sampling (temperature=0), collecting the raw logits tensor
-    /// `[batch, vocab_size]` before each sampling step. The logits are stacked
-    /// into a single tensor of shape `[total_steps, vocab_size]` (FP32).
-    ///
-    /// Used for L2 golden comparison (#23). The caller controls `max_tokens`
-    /// to match the fixture's `num_tokens`.
-    pub fn generate_logits(
-        &mut self,
-        prompt: &Prompt,
-        max_tokens: usize,
-    ) -> Result<candle_core::Tensor> {
-        let token_ids = tokenize_prompt(prompt, &self.tokenizer)?;
-        let params = SamplingParams {
-            temperature: 0.0,
-            max_tokens,
-            ignore_eos: true,
-            ..SamplingParams::default()
-        };
-        self.engine.add_request(token_ids, params);
-
-        let mut logits_list: Vec<candle_core::Tensor> = Vec::new();
-
-        while self.engine.is_running() {
-            let (_outputs, step_logits) = self.engine.step_with_logits()?;
-            if step_logits.dims().iter().all(|&d| d == 0) {
-                continue;
-            }
-            logits_list.push(step_logits);
+    #[cfg(feature = "internal-golden")]
+    fn abort_after_capture_error(&mut self, error: anyhow::Error) -> anyhow::Error {
+        match self.engine.abort_generation() {
+            Ok(()) => error.context("generate: internal golden capture failed"),
+            Err(cleanup_error) => error.context(format!(
+                "generate: internal golden capture failed; request cleanup also failed: \
+                 {cleanup_error}"
+            )),
         }
-
-        if logits_list.is_empty() {
-            return Ok(candle_core::Tensor::zeros(
-                (0, 0),
-                DType::F32,
-                &self.device,
-            )?);
-        }
-
-        let refs: Vec<&candle_core::Tensor> = logits_list.iter().collect();
-        Ok(candle_core::Tensor::cat(&refs, 0)?)
     }
 }
 
@@ -459,7 +462,7 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
     if sm < 89 {
         bail!(
             "GPU compute capability sm_{major}{minor} (sm_{sm}) is below the minimum \
-             required sm_89. vllm-oxide v0.1 flash-attention kernels and Qwen3 BF16 \
+             required sm_89. vllm-oxide v0.2.0 flash-attention kernels and Qwen3 BF16 \
              matmuls require Ada Lovelace (sm_89) or Hopper (sm_90) architecture. \
              Supported GPUs: RTX 40-series (Ada), H100/H200 (Hopper), and newer."
         );
@@ -675,10 +678,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             100
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     impl CausalLM for CacheAwareModel {
@@ -757,10 +756,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             100
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     impl CausalLM for MockModel {
@@ -789,10 +784,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             100
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     impl CausalLM for ControlledLogitsModel {
@@ -816,10 +807,6 @@ mod tests {
 
         fn vocab_size(&self) -> usize {
             100
-        }
-
-        fn device(&self) -> &Device {
-            &self.device
         }
     }
 
@@ -2148,6 +2135,132 @@ mod tests {
             assert!(message.contains("frequency_penalty: -0.5"));
             assert!(message.contains("repetition_penalty: 1.25"));
             assert!(!message.contains("sequence_id"));
+        }
+    }
+
+    #[cfg(feature = "internal-golden")]
+    mod internal_golden_capture {
+        use super::*;
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_TEST_CHILD";
+
+        struct EnvironmentRestore {
+            previous: Vec<(&'static str, Option<OsString>)>,
+        }
+
+        impl EnvironmentRestore {
+            fn install(values: &[(&'static str, Option<&std::ffi::OsStr>)]) -> Self {
+                let mut previous = Vec::with_capacity(values.len());
+                for &(name, value) in values {
+                    previous.push((name, std::env::var_os(name)));
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+                Self { previous }
+            }
+        }
+
+        impl Drop for EnvironmentRestore {
+            fn drop(&mut self) {
+                for (name, value) in self.previous.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+
+        fn enter_isolated_test(test_name: &str) -> bool {
+            if std::env::var_os(CHILD_ENV).is_some() {
+                return true;
+            }
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated capture test process failed");
+            false
+        }
+
+        #[test]
+        fn configured_generate_publishes_complete_capture_through_the_normal_method() {
+            if !enter_isolated_test(
+                "llm::tests::internal_golden_capture::configured_generate_publishes_complete_capture_through_the_normal_method",
+            ) {
+                return;
+            }
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let destination = OsString::from("capture.jsonl");
+            let call_id = OsString::from("llm-generate-call-1");
+            let _environment = EnvironmentRestore::install(&[
+                (
+                    crate::golden_capture::TEMP_DIR_ENV,
+                    Some(temp.path().as_os_str()),
+                ),
+                (
+                    crate::golden_capture::DESTINATION_ENV,
+                    Some(destination.as_os_str()),
+                ),
+                (
+                    crate::golden_capture::CALL_ID_ENV,
+                    Some(call_id.as_os_str()),
+                ),
+            ]);
+            let mut llm = test_llm();
+
+            let outputs = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[deterministic_causal_params(2)],
+                )
+                .unwrap();
+
+            assert_eq!(outputs[0].token_ids, vec![42, 42]);
+            let artifact = std::fs::read_to_string(temp.path().join(destination)).unwrap();
+            let lines = artifact.lines().collect::<Vec<_>>();
+            assert_eq!(lines.len(), 4);
+            assert!(lines[0].contains("llm-generate-call-1"));
+            assert!(lines[3].contains("\"complete\":true"));
+            assert!(lines[3].contains("\"tensor_shape\":[2,100]"));
+        }
+
+        #[test]
+        fn partial_capture_configuration_fails_before_request_admission() {
+            if !enter_isolated_test(
+                "llm::tests::internal_golden_capture::partial_capture_configuration_fails_before_request_admission",
+            ) {
+                return;
+            }
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let _environment = EnvironmentRestore::install(&[
+                (
+                    crate::golden_capture::TEMP_DIR_ENV,
+                    Some(temp.path().as_os_str()),
+                ),
+                (crate::golden_capture::DESTINATION_ENV, None),
+                (crate::golden_capture::CALL_ID_ENV, None),
+            ]);
+            let mut llm = test_llm();
+
+            let error = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[deterministic_causal_params(1)],
+                )
+                .unwrap_err();
+
+            assert!(format!("{error:#}").contains("configuration is incomplete"));
+            assert!(!llm.engine.is_running());
+            assert_eq!(llm.engine.scheduler.num_waiting(), 0);
+            assert_eq!(llm.engine.scheduler.num_running(), 0);
         }
     }
 }

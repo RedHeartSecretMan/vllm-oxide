@@ -252,12 +252,6 @@ pub(super) fn warmup_model(
         build_prefill_metadata(&[warmup_tokens_u32], &[warmup_tokens_u32], &slot_mapping);
     let decode_meta =
         build_decode_metadata(&[context_tokens_u32], &[decode_blocks], &[decode_slot]);
-    let previous_meta = attn_ctx
-        .attn_meta
-        .lock()
-        .map_err(|error| anyhow!("attention logical metadata lock: {error}"))?
-        .clone();
-
     let warmup_result = (|| -> Result<()> {
         let mut execute_step = |phase: &str,
                                 epoch: AttentionEpoch,
@@ -329,18 +323,6 @@ pub(super) fn warmup_model(
         Ok(())
     })();
 
-    let restore_result = attn_ctx
-        .attn_meta
-        .lock()
-        .map_err(|error| anyhow!("restoring attention logical metadata after warmup: {error}"))
-        .map(|mut metadata| *metadata = previous_meta);
-    let warmup_result = match (warmup_result, restore_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(warmup_error), Err(restore_error)) => Err(warmup_error.context(format!(
-            "restoring attention logical metadata also failed: {restore_error}"
-        ))),
-    };
     warmup_result.context("representative model warmup failed")
 }
 
@@ -531,10 +513,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             10
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     struct FailingModel {
@@ -564,10 +542,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             10
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     #[test]
@@ -577,8 +551,6 @@ mod tests {
             PagedKVCache::new(2, 4, 4, 2, 8, DType::F16, &device).unwrap(),
         ));
         let attn_ctx = AttentionContext::new(paged_kv);
-        let original_meta = build_decode_metadata(&[1], &[vec![3]], &[12]);
-        *attn_ctx.attn_meta.lock().unwrap() = original_meta.clone();
         let observation = Arc::new(Mutex::new(WarmupObservation::default()));
         let mut model = RecordingModel {
             device: device.clone(),
@@ -610,7 +582,6 @@ mod tests {
             }
         );
         assert!(attn_ctx.is_idle());
-        assert_eq!(*attn_ctx.attn_meta.lock().unwrap(), original_meta);
     }
 
     #[test]
@@ -620,8 +591,6 @@ mod tests {
             PagedKVCache::new(1, 4, 4, 1, 1, DType::F32, &device).unwrap(),
         ));
         let attn_ctx = AttentionContext::new(paged_kv);
-        let original_meta = build_decode_metadata(&[1], &[vec![2]], &[8]);
-        *attn_ctx.attn_meta.lock().unwrap() = original_meta.clone();
         let mut model = FailingModel {
             device: device.clone(),
             forward_calls: 0,
@@ -637,6 +606,5 @@ mod tests {
         assert_eq!(attn_ctx.instrumentation().prepare_calls, 2);
         assert_eq!(attn_ctx.instrumentation().device_tensor_uploads, 7);
         assert!(attn_ctx.is_idle());
-        assert_eq!(*attn_ctx.attn_meta.lock().unwrap(), original_meta);
     }
 }

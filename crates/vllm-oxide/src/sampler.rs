@@ -14,7 +14,7 @@
 //! # Divergence from nano-vllm
 //!
 //! nano-vllm's `Sampler` (`nanovllm/layers/sampler.py`) only supports
-//! temperature sampling and asserts `temperature > 1e-10`. v0.1 explicitly
+//! temperature sampling and asserts `temperature > 1e-10`. v0.2.0 explicitly
 //! supports greedy decoding (`temperature == 0`) and adds top-k, top-p, and
 //! the three penalties (per the issue #17 spec). Sampler correctness rests
 //! on T8 property tests — goldens validate the model forward pass
@@ -104,7 +104,7 @@ fn sampling_execution(is_cuda: bool) -> SamplingExecution {
 /// tests and golden fixtures").
 ///
 /// `max_tokens` and `ignore_eos` are honoured by the engine loop (#21), not
-/// by [`Sampler`] itself — the sampler is single-step (one token per call)
+/// by the internal `Sampler` itself — sampling is single-step (one token per call)
 /// and stateless across steps. They live here, not in `engine/sequence.rs`,
 /// because nano-vllm's `sampling_params.py` is top-level and `LLM::generate`
 /// accepts them user-facing (ADR-0004 M1).
@@ -112,7 +112,7 @@ fn sampling_execution(is_cuda: bool) -> SamplingExecution {
 pub struct SamplingParams {
     /// Softmax temperature. `0.0` short-circuits to greedy argmax. NaN and
     /// negative values are rejected; positive infinity is the uniform
-    /// pre-filter corner case. nano-vllm asserts `> 1e-10`; v0.1 supports 0.
+    /// pre-filter corner case. nano-vllm asserts `> 1e-10`; v0.2.0 supports 0.
     pub temperature: f32,
 
     /// Top-k truncation: keep only the `k` highest-logit tokens, mask the
@@ -127,7 +127,7 @@ pub struct SamplingParams {
     pub top_p: Option<f32>,
 
     /// Maximum completion tokens to generate. Must be at least one. Enforced
-    /// by the engine loop (#21), not by [`Sampler`].
+    /// by the engine loop (#21), not by the internal `Sampler`.
     pub max_tokens: usize,
 
     /// If `true`, do not stop generation when the sampler returns a resolved
@@ -244,7 +244,7 @@ impl SamplingParams {
     }
 
     /// Whether any of the three penalties is active (non-default). Skips the
-    /// penalty pass when all are at no-op values — the typical case in v0.1
+    /// penalty pass when all are at no-op values — the typical greedy case
     /// greedy runs.
     fn has_penalties(&self) -> bool {
         self.presence_penalty != 0.0

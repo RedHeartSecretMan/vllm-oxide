@@ -2608,6 +2608,7 @@ dependencies = [
  "inventory",
  "rand 0.8.7",
  "rand_distr 0.4.3",
+ "rustix",
  "safetensors 0.4.5",
  "serde",
  "serde_json",
@@ -2632,7 +2633,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "candle-core",
  "clap",
  "flate2",
  "rustix",

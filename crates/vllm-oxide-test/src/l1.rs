@@ -1,5 +1,4 @@
 use anyhow::Result;
-use candle_core::{DType, Tensor};
 
 use crate::types::{FixtureData, TolerancePolicy};
 
@@ -46,24 +45,24 @@ pub enum L1PositionDetail {
 ///
 /// `generated_tokens` are the output from `LLM::generate` (greedy, temp=0).
 /// `fixture` holds the golden token_ids.
-/// `generated_logits` provides the raw logits for near-tie detection — shape
-/// `[n, vocab_size]` (from `generate_logits`).
+/// `generated_logits` provides the private diagnostic capture and vocabulary
+/// width for near-tie detection. Rows are ordered by completion step.
 pub fn compare_l1(
     fixture: &FixtureData,
     generated_tokens: &[u32],
-    generated_logits: Option<&Tensor>,
+    generated_logits: Option<(&[f32], usize)>,
     policy: &TolerancePolicy,
 ) -> Result<L1Result> {
     compare_tokens_loop(fixture, generated_tokens, policy, |i, expected, actual| {
         if expected == actual {
             return Ok(None);
         }
-        let Some(logits) = generated_logits else {
+        let Some((logits, vocab_size)) = generated_logits else {
             return Ok(Some(MismatchKind::Deterministic));
         };
         // Expected and actual are validated token ids bounded by vocab_size.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let gap = candidate_logit_gap(logits, i, expected as usize, actual as usize)?;
+        let gap = candidate_logit_gap(logits, vocab_size, i, expected as usize, actual as usize)?;
         if gap <= policy.l1_near_tie_max_abs_logit_gap {
             Ok(Some(MismatchKind::NearTie(gap)))
         } else {
@@ -173,18 +172,25 @@ where
 
 /// Compute the absolute gap between the expected and actual candidate logits.
 fn candidate_logit_gap(
-    logits: &Tensor,
+    logits: &[f32],
+    vocab_size: usize,
     position: usize,
     expected_token: usize,
     actual_token: usize,
 ) -> Result<f64> {
-    let row = logits.get(position)?;
-    let row_f32 = row.to_dtype(DType::F32)?;
-    let values = row_f32.to_vec1::<f32>()?;
-    let expected = values.get(expected_token).ok_or_else(|| {
+    let start = position
+        .checked_mul(vocab_size)
+        .ok_or_else(|| anyhow::anyhow!("candidate logits row offset overflow"))?;
+    let end = start
+        .checked_add(vocab_size)
+        .ok_or_else(|| anyhow::anyhow!("candidate logits row end overflow"))?;
+    let row = logits
+        .get(start..end)
+        .ok_or_else(|| anyhow::anyhow!("candidate logits have no row {position}"))?;
+    let expected = row.get(expected_token).ok_or_else(|| {
         anyhow::anyhow!("expected token {expected_token} is outside candidate logits")
     })?;
-    let actual = values.get(actual_token).ok_or_else(|| {
+    let actual = row.get(actual_token).ok_or_else(|| {
         anyhow::anyhow!("actual token {actual_token} is outside candidate logits")
     })?;
     Ok(f64::from((actual - expected).abs()))
@@ -269,10 +275,10 @@ mod tests {
             top5_logits: None,
         };
         let generated: Vec<u32> = vec![2];
-        let logits = Tensor::new(&[[0.0_f32, 9.99, 10.0]], &candle_core::Device::Cpu).unwrap();
+        let logits = vec![0.0_f32, 9.99, 10.0];
         let policy = make_policy();
 
-        let result = compare_l1(&fixture, &generated, Some(&logits), &policy).unwrap();
+        let result = compare_l1(&fixture, &generated, Some((&logits, 3)), &policy).unwrap();
 
         assert!(result.passed);
         assert_eq!(result.near_ties, 1);
@@ -294,13 +300,9 @@ mod tests {
             top5_logits: None,
         };
         let generated: Vec<u32> = vec![2, 2];
-        let logits = Tensor::new(
-            &[[0.0_f32, 9.99, 10.0], [0.0, 0.0, 10.0]],
-            &candle_core::Device::Cpu,
-        )
-        .unwrap();
+        let logits = vec![0.0_f32, 9.99, 10.0, 0.0, 0.0, 10.0];
 
-        let result = compare_l1(&fixture, &generated, Some(&logits), &make_policy()).unwrap();
+        let result = compare_l1(&fixture, &generated, Some((&logits, 3)), &make_policy()).unwrap();
 
         assert!(result.passed);
         assert_eq!(result.near_ties, 1);
@@ -322,9 +324,9 @@ mod tests {
             top5_logits: None,
         };
         let generated = vec![2_u32];
-        let logits = Tensor::new(&[[0.0_f32, 9.99, 10.0]], &candle_core::Device::Cpu).unwrap();
+        let logits = vec![0.0_f32, 9.99, 10.0];
 
-        let result = compare_l1(&fixture, &generated, Some(&logits), &make_policy()).unwrap();
+        let result = compare_l1(&fixture, &generated, Some((&logits, 3)), &make_policy()).unwrap();
 
         assert!(result.passed);
         assert_eq!(result.near_ties, 1);

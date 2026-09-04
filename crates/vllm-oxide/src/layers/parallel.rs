@@ -3,7 +3,7 @@
 //! The TP (tensor-parallel) seam: each style tag is a zero-sized marker encoding
 //! which projection this `Linear<P>` IS (QKV-fused / gate-up-fused / row-parallel).
 //! The trait carries per-style constants (`SHARD_DIM`, `num_shards`) and the
-//! `slice_for_rank` weight-slicing hook — v0.1 ships the identity default
+//! `slice_for_rank` weight-slicing hook — v0.2.0 ships the identity default
 //! (`Cow::Borrowed`, zero-cost); v0.2 overrides per style with real GQA math
 //! for `QkvMerged`, 2-way split for `GateUpMerged`, dim-1 narrow for `Row`.
 
@@ -30,7 +30,7 @@ pub enum ShardId {
 /// - [`ParallelStyle::num_shards`] — how many sub-projections the style fuses.
 ///   `Row=1`, `GateUpMerged=2`, `QkvMerged=3`.
 ///
-/// `slice_for_rank` is the weight-loader TP seam (ADR-0002). v0.1 ships the
+/// `slice_for_rank` is the weight-loader TP seam (ADR-0002). v0.2.0 ships the
 /// identity default (`Cow::Borrowed`, zero-cost), suitable for hardcoded TP=1.
 /// v0.2 overrides it per style with the real rank-slicing math (GQA replica
 /// for `QkvMerged`, dim-0 chunk for `GateUpMerged`, dim-1 narrow for `Row`).
@@ -120,21 +120,19 @@ impl ParallelStyle for Row {
     }
 }
 
-/// Tensor-parallel configuration. v0.1 ships [`TpConfig::Single`] only;
-/// [`TpConfig::Sharded`] is the named-but-non-constructible v0.2 contract.
+/// Internal tensor-parallel feasibility seam. v0.2.0 executes
+/// [`TpConfig::Single`] only; [`TpConfig::Sharded`] is non-constructible.
 ///
-/// `Sharded`'s inner type is `pub(crate)` — the variant exists in the public
-/// enum so downstream `match` arms compile today, but it cannot be built
-/// outside this crate until the NCCL communicator wiring lands in v0.2.
+/// `Sharded`'s inner type is crate-private and cannot be built outside this
+/// internal module graph. Runtime NCCL support is deferred beyond v0.2.0.
 ///
-/// Model code never reads `TpConfig` at runtime in v0.1 — the field exists
-/// only as the forward-compat anchor so v0.2 NCCL wiring touches zero model
-/// files (it lands entirely in `ParallelStyle` impls + `TpConfig` construction).
+/// Model code does not read `TpConfig` at runtime in v0.2.0; the field remains
+/// only as an internal feasibility anchor.
 #[derive(Debug, Clone)]
 pub enum TpConfig {
-    /// Single-GPU (TP=1). The only constructible variant in v0.1.
+    /// Single-GPU (TP=1). The only constructible variant in v0.2.0.
     Single,
-    /// v0.2 tensor-parallel contract. Named-but-non-constructible at v0.1.
+    /// Future tensor-parallel feasibility shape; not supported in v0.2.0.
     Sharded(ShardedParams),
 }
 

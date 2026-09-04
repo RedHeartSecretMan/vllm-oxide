@@ -124,8 +124,18 @@ excluded because their causal histories differ.
 
 ### L2: Logits tensor comparison
 
-Drives the engine via `LLM::generate_logits` and compares the raw pre-sampling
-logits `[n, vocab_size]` against golden logits using:
+Drives the engine through the same supported `LLM::generate` method as normal
+users. The workspace-only, default-off `internal-golden` feature captures raw
+pre-sampling logits into one caller-private JSONL artifact only when all three
+reserved process settings are present. The feature adds no public Rust method,
+module, trait, or type and is unsupported outside release tooling.
+
+The producer streams one vocabulary row at a time through private staging,
+self-validates the complete artifact, and publishes it with atomic NOREPLACE.
+The consumer verifies call identity, input position, stable request identity,
+selected token, zero-based completion step, request-major row order, shape,
+dtype, completeness, and agreement with `RequestOutput` before comparing raw
+logits `[n, vocab_size]` using:
 
 ```
 |actual - expected| <= tolerance_policy.l2_atol
@@ -135,10 +145,16 @@ The divergence row is still comparable because it was produced from the shared
 prefix. L2 stops immediately after that token is selected and excludes every
 later row from aggregate metrics.
 
+Absent capture configuration performs no diagnostic I/O. Partial or invalid
+configuration, a reused or symlink destination, capture/serialization/write
+failure, malformed or stale rows, and publication collision all fail the
+generation call without exposing a partial destination. Full-logit device-to-
+host transfer occurs only for this explicitly configured diagnostic path.
+
 ### L3: Per-layer activations (debug)
 
-Skeleton in v0.1. When model introspection lands in v0.2, this will compare
-per-layer hidden states to localise divergence sources.
+Skeleton in v0.2.0. A future model-introspection contract may compare per-layer
+hidden states to localise divergence sources.
 
 ## Release Gate vs CI Gate
 
@@ -162,6 +178,7 @@ crates/vllm-oxide-test/
 └── src/
     ├── lib.rs         # Public API
     ├── main.rs        # CLI entrypoint
+    ├── capture.rs     # private fail-closed raw-logit artifact consumer
     ├── types.rs       # Manifest schema types (matches Python schema.py)
     ├── manifest.rs    # Manifest parsing + fixture loading
     ├── lifecycle.rs   # Discovery, asset preflight, and exact coverage accounting

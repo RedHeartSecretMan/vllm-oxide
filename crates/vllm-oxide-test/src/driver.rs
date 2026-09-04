@@ -3,17 +3,17 @@
 //!
 //! This module owns the "ceremony" that [`main`](crate) previously duplicated
 //! across canonical and regression loops: prompt lookup, fixture loading,
-//! engine init, `generate_logits`, logits flattening, and greedy-token
-//! extraction. Adding a new fixture category is one new `match` arm here —
+//! engine init, private diagnostic capture, artifact validation, and
+//! comparison dispatch. Adding a new fixture category is one new `match` arm here —
 //! zero changes to the CLI entrypoint.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
-use candle_core::DType;
 use vllm_oxide::{EngineOptions, Prompt, Source, LLM};
 
+use crate::capture::generate_with_capture;
 use crate::l1::{compare_l1, compare_l1_tokens_only};
 use crate::l2::compare_l2;
 use crate::l3::compare_l3;
@@ -33,7 +33,7 @@ pub struct DriverOptions {
 /// Run all golden comparisons described by `manifest`.
 ///
 /// Iterates every fixture once, loading the engine per fixture, generating
-/// logits, extracting greedy tokens, and dispatching to the comparison layer
+/// captured logits and selected tokens, and dispatching to the comparison layer
 /// indicated by `FixtureMetadata::category`.
 ///
 /// Returns a [`ComparisonReport`] with all L1/L2/L3 results collected.
@@ -140,32 +140,37 @@ fn compare_reference_case(
         Source::Local(model_path.to_path_buf()),
         EngineOptions::default(),
     )?;
-    let logits = llm.generate_logits(&prompt, max_tokens)?;
-    let logits_f32 = logits.to_dtype(DType::F32)?;
-    let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
-    let (n_steps, vocab_size) =
-        generated_logits_geometry(logits.dims(), logits_vals.len(), manifest.model.vocab_size)?;
-    let generated_tokens = extract_greedy_tokens(&logits_vals, n_steps, vocab_size)?;
+    let captured = generate_with_capture(&mut llm, prompt, max_tokens, &case.expected.fixture_id)?;
+    let (captured_steps, captured_vocab_size) = captured.tensor_shape;
+    let (_n_steps, vocab_size) = generated_logits_geometry(
+        &[captured_steps, captured_vocab_size],
+        captured.logits.len(),
+        manifest.model.vocab_size,
+    )?;
+    let generated_tokens = captured
+        .tokens_by_input
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("diagnostic capture has no request rows"))?;
 
     let (l1, l2) = match case.metadata.category {
         PromptCategory::Canonical => (
             Some(compare_l1(
                 &case.fixture,
-                &generated_tokens,
-                Some(&logits),
+                generated_tokens,
+                Some((&captured.logits, vocab_size)),
                 &manifest.tolerance_policy,
             )?),
             Some(compare_l2(
                 &case.fixture,
-                &logits_vals,
-                &generated_tokens,
+                &captured.logits,
+                generated_tokens,
                 &manifest.tolerance_policy,
             )?),
         ),
         PromptCategory::Regression => (
             Some(compare_l1_tokens_only(
                 &case.fixture,
-                &generated_tokens,
+                generated_tokens,
                 &manifest.tolerance_policy,
             )?),
             None,
@@ -205,64 +210,10 @@ fn generated_logits_geometry(
     Ok((*n_steps, *vocab_size))
 }
 
-/// Extract greedy tokens from flat F32 logits via per-step argmax.
-///
-/// `logits_vals` is a row-major flat array of shape `[n_steps * vocab_size]`.
-/// Returns one token id per step.
-fn extract_greedy_tokens(
-    logits_vals: &[f32],
-    n_steps: usize,
-    vocab_size: usize,
-) -> Result<Vec<u32>> {
-    let mut tokens = Vec::with_capacity(n_steps);
-    for step in 0..n_steps {
-        let start = step * vocab_size;
-        let end = start + vocab_size;
-        let mut max_val = f32::NEG_INFINITY;
-        let mut max_idx = 0u32;
-        // vocab size ≤ 200k; truncation impossible
-        #[allow(clippy::cast_possible_truncation)]
-        for (j, &val) in logits_vals[start..end].iter().enumerate() {
-            if !val.is_finite() {
-                anyhow::bail!("non-finite generated logit at step {step}, token {j}");
-            }
-            if val > max_val {
-                max_val = val;
-                max_idx = j as u32;
-            }
-        }
-        tokens.push(max_idx);
-    }
-    Ok(tokens)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn argmax_extracts_greedy_tokens() {
-        // 2 steps × 4 vocab: row 0 → argmax at idx 2 (val 0.9),
-        // row 1 → argmax at idx 0 (val 0.7).
-        let logits: Vec<f32> = vec![0.1, 0.2, 0.9, 0.3, 0.7, 0.5, 0.1, 0.4];
-        let tokens = extract_greedy_tokens(&logits, 2, 4).unwrap();
-        assert_eq!(tokens, vec![2, 0]);
-    }
-
-    #[test]
-    fn argmax_single_step() {
-        let logits: Vec<f32> = vec![0.1, 0.8, 0.3];
-        let tokens = extract_greedy_tokens(&logits, 1, 3).unwrap();
-        assert_eq!(tokens, vec![1]);
-    }
-
-    #[test]
-    fn regression_argmax_rejects_non_finite_logits() {
-        let error = extract_greedy_tokens(&[f32::NAN, 1.0, 0.0], 1, 3).unwrap_err();
-
-        assert!(error.to_string().contains("non-finite generated logit"));
-    }
 
     #[test]
     fn runtime_shape_supplies_vocab_width_for_regression_fixture() {

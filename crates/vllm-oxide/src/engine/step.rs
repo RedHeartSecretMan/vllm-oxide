@@ -100,6 +100,9 @@ pub(crate) struct SequenceStepPlan {
     pub(crate) input_token_ids: Vec<u32>,
     pub(crate) sampling_params: SamplingParams,
     pub(crate) token_history: Vec<u32>,
+    /// Zero-based completion position selected by this plan, when sampling is
+    /// allowed. Recovery prefill preserves the existing completion count.
+    pub(crate) completion_step: usize,
 }
 
 /// Cache state and mappings captured for one planned sequence.

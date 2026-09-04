@@ -22,6 +22,8 @@ pub mod prompts;
 pub mod report;
 pub mod types;
 
+mod capture;
+
 pub use download::{download_release, load_from_dir};
 pub use driver::{run_comparison, DriverOptions};
 pub use l1::{compare_l1, compare_l1_tokens_only, L1Result};

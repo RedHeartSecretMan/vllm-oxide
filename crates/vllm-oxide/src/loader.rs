@@ -1,20 +1,11 @@
-//! Model-agnostic weight loader (ADR-0002).
+//! Internal model-agnostic weight loader (ADR-0002, ADR-0011).
 //!
-//! One public function — [`load_weights`] — resolves a [`Source`] to a list
-//! of `*.safetensors` files, then mmaps them into a candle
-//! [`ShardedVarBuilder`]. The loader does NOT do any model-specific work:
+//! The composition root resolves a source into one immutable
+//! [`ResolvedModel`], then this module mmaps that exact weight set into a
+//! candle [`VarBuilder`]. The loader does NOT do any model-specific work:
 //! no QKV fusion, no gate/up fusion, no per-rank slicing. All of that lives
 //! in `Linear::<P>::from_vb` (T3) and `ParallelStyle::slice_for_rank`
 //! (v0.2). HF checkpoint tensor names map 1:1 with what the model expects.
-//!
-//! # Resolution
-//!
-//! - [`Source::Local`] walks the fallback chain: `model.safetensors.index.json`
-//!   (multi-shard) → single `model.safetensors` → glob `*.safetensors`.
-//! - [`Source::Hub`] uses hf-hub 0.5 sync [`Api`]. When `HF_HUB_OFFLINE=1`
-//!   is set, switches to the local [`Cache`] lookup so air-gapped / CI runs
-//!   don't hang on the network (shimmed from mistral.rs because hf-hub 0.5
-//!   lacks a native offline switch).
 //!
 //! # Lazy mmap
 //!
@@ -24,17 +15,15 @@
 //! # `unsafe` boundary
 //!
 //! This module is the only `vllm_oxide` module that calls `unsafe` code at
-//! T15. The single unsafe call site is [`ShardedSafeTensors::var_builder`],
-//! whose unsafe is inherited from [`memmap2::MmapOptions`] (a file mapped
+//! the weight-loading seam. The single unsafe call maps the already-resolved
+//! safetensors through `MmapedSafetensors::multi`; its risk is inherited from
+//! `memmap2::MmapOptions` (a file mapped
 //! from disk can produce UB if mutated externally while mapped). We accept
 //! this risk the same way upstream candle / mistral.rs / HF tooling do:
 //! checkpoint files are read-only after download, and the VarBuilder's
 //! lifetime is bounded by the caller's framing of a single model load.
 //!
-//! [`Api`]: hf_hub::api::sync::Api
-//! [`Cache`]: hf_hub::Cache
-//! [`ShardedVarBuilder`]: candle_nn::var_builder::ShardedVarBuilder
-//! [`ShardedSafeTensors::var_builder`]: candle_nn::var_builder::ShardedSafeTensors::var_builder
+//! [`VarBuilder`]: candle_nn::VarBuilder
 
 #![allow(unsafe_code)]
 // `unsafe_code = "deny"` at workspace level is relaxed specifically for this
@@ -47,72 +36,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{DType, Device};
-use candle_nn::var_builder::{
-    ShardedSafeTensors, ShardedVarBuilder, SimpleBackend, VarBuilder, VarBuilderArgs,
-};
+use candle_nn::var_builder::{SimpleBackend, VarBuilder, VarBuilderArgs};
 use serde::Deserialize;
-
-use crate::config::{is_hf_hub_offline, Source};
 
 pub(crate) mod model_identity;
 use model_identity::ResolvedModel;
-
-/// Mmap one or more `*.safetensors` files and return a candle
-/// [`ShardedVarBuilder`] over them.
-///
-/// `dtype` is the canonical dtype for the returned builder: each tensor is
-/// cast-on-`get` to this dtype (a no-op when the checkpoint already matches).
-/// The caller picks the dtype (typically via [`crate::config::default_dtype`]
-/// from `config.json`'s `torch_dtype`).
-///
-/// Returns `Err` if no shards resolve, if a multi-shard index references
-/// missing files, or if the underlying mmap fails.
-pub fn load_weights(
-    source: Source,
-    dtype: DType,
-    device: &Device,
-) -> Result<ShardedVarBuilder<'static>> {
-    let paths = match source {
-        Source::Local(dir) => resolve_local_shards(&dir)
-            .with_context(|| format!("resolving local shards under {}", dir.display()))?,
-        Source::Hub { repo, revision } => resolve_hub_shards(&repo, revision.as_deref())
-            .with_context(|| format!("resolving Hub shards for {repo}"))?,
-    };
-    if paths.is_empty() {
-        return Err(anyhow!(
-            "resolved zero safetensors shards from the requested source"
-        ));
-    }
-    tracing::debug!(
-        count = paths.len(),
-        first = ?paths.first().map(|p| p.display().to_string()),
-        "loading safetensors shards via ShardedSafeTensors::var_builder"
-    );
-    // SAFETY: see module docs — `ShardedSafeTensors::var_builder` mmaps the
-    // paths; the unsafe is inherited from memmap2's MmapOptions. Checkpoint
-    // files are treated as read-only by convention; same risk surface as
-    // upstream candle, mistral.rs, and HF tooling.
-    let vb = unsafe { ShardedSafeTensors::var_builder(&paths, dtype, device)? };
-    Ok(vb)
-}
-
-pub(crate) fn resolve_paths(source: &Source) -> Result<Vec<PathBuf>> {
-    match source {
-        Source::Local(dir) => resolve_local_shards(dir)
-            .with_context(|| format!("resolving local shards under {}", dir.display())),
-        Source::Hub { repo, revision } => resolve_hub_shards(repo, revision.as_deref())
-            .with_context(|| format!("resolving Hub shards for {repo}")),
-    }
-}
-
-pub fn load_weights_vb(
-    source: Source,
-    dtype: DType,
-    device: &Device,
-) -> Result<VarBuilder<'static>> {
-    let paths = resolve_paths(&source)?;
-    var_builder_from_paths(&paths, dtype, device, "requested source")
-}
 
 fn var_builder_from_paths(
     paths: &[PathBuf],
@@ -132,7 +60,7 @@ fn var_builder_from_paths(
 /// Build a candle [`VarBuilder`] from the already-resolved artifact paths and
 /// dtype. This is the construction path used by model factories: it cannot
 /// re-resolve a local path or follow a moving Hub revision.
-pub fn load_resolved_weights_vb(
+pub(crate) fn load_resolved_weights_vb(
     resolved: &ResolvedModel,
     device: &Device,
 ) -> Result<VarBuilder<'static>> {
@@ -243,70 +171,6 @@ fn parse_index_shard_names(index_path: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(unique)
-}
-
-/// Hub-path shard resolution. Honours `HF_HUB_OFFLINE` (online path will hang
-/// on the network otherwise; the offline branch uses the local cache only).
-fn resolve_hub_shards(repo: &str, revision: Option<&str>) -> Result<Vec<PathBuf>> {
-    let rev = revision.unwrap_or("main");
-    if is_hf_hub_offline() {
-        return resolve_hub_shards_offline(repo, rev);
-    }
-    resolve_hub_shards_online(repo, rev)
-}
-
-fn resolve_hub_shards_online(repo: &str, revision: &str) -> Result<Vec<PathBuf>> {
-    let api = hf_hub::api::sync::ApiBuilder::new()
-        .with_progress(true)
-        .build()
-        .context("building hf-hub sync Api")?;
-    let repo_handle = api.repo(hf_hub::Repo::with_revision(
-        repo.to_string(),
-        hf_hub::RepoType::Model,
-        revision.to_string(),
-    ));
-
-    match repo_handle.get("model.safetensors.index.json") {
-        Ok(index_path) => {
-            let dir = index_path
-                .parent()
-                .ok_or_else(|| anyhow!("cached index path has no parent dir"))?
-                .to_path_buf();
-            parse_index_shards(&index_path, &dir)
-        }
-        Err(_) => {
-            let p = repo_handle
-                .get("model.safetensors")
-                .context("downloading single-file `model.safetensors` from Hub")?;
-            Ok(vec![p])
-        }
-    }
-}
-
-fn resolve_hub_shards_offline(repo: &str, revision: &str) -> Result<Vec<PathBuf>> {
-    let cache = hf_hub::Cache::from_env();
-    let repo_handle = cache.repo(hf_hub::Repo::with_revision(
-        repo.to_string(),
-        hf_hub::RepoType::Model,
-        revision.to_string(),
-    ));
-
-    if let Some(index_path) = repo_handle.get("model.safetensors.index.json") {
-        let dir = index_path
-            .parent()
-            .ok_or_else(|| anyhow!("cached index path has no parent dir"))?
-            .to_path_buf();
-        return parse_index_shards(&index_path, &dir);
-    }
-    if let Some(p) = repo_handle.get("model.safetensors") {
-        return Ok(vec![p]);
-    }
-
-    Err(anyhow!(
-        "`HF_HUB_OFFLINE=1` is set and no local snapshot of `{repo}` (revision `{revision}`) \
-         was found in the HF cache. Pre-download with `huggingface-cli download {repo}` or \
-         unset `HF_HUB_OFFLINE` to allow network access."
-    ))
 }
 
 #[cfg(test)]
@@ -523,59 +387,8 @@ mod tests {
         }
     }
 
-    mod load_weights_local {
+    mod load_resolved_weights {
         use super::*;
-        use candle_core::Device;
-
-        #[test]
-        fn single_file_load_round_trip() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_safetensors_fixture(
-                &tmp.path().join("model.safetensors"),
-                "embed.weight",
-                &[1.0_f32, 2.0, 3.0, 4.0],
-            );
-
-            let device = Device::Cpu;
-            let vb =
-                load_weights(Source::Local(tmp.path().to_path_buf()), DType::F32, &device).unwrap();
-
-            // The VarBuilder's prefix starts empty; HF tensor names map 1:1.
-            let t = vb.get((4,), "embed.weight").unwrap();
-            let got: Vec<f32> = t.to_vec1().unwrap();
-            assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0]);
-        }
-
-        #[test]
-        fn multi_shard_load_round_trip() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_multishard_fixture(tmp.path(), &["shard-a.safetensors", "shard-b.safetensors"]);
-
-            let device = Device::Cpu;
-            let vb =
-                load_weights(Source::Local(tmp.path().to_path_buf()), DType::F32, &device).unwrap();
-
-            // write_multishard_fixture puts `layer.<i>.weight` in shard i.
-            let t0 = vb.get((4,), "layer.0.weight").unwrap();
-            let t1 = vb.get((4,), "layer.1.weight").unwrap();
-            assert_eq!(t0.to_vec1::<f32>().unwrap(), vec![0.0; 4]);
-            assert_eq!(t1.to_vec1::<f32>().unwrap(), vec![1.0; 4]);
-        }
-
-        #[test]
-        fn dtype_cast_on_get_when_checkpoint_mismatches() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_safetensors_fixture(&tmp.path().join("model.safetensors"), "w", &[1.0_f32, 2.0]);
-
-            let device = Device::Cpu;
-            // Request F16 even though the file is F32 — candle casts lazily
-            // on `get`. Verifies the `dtype` parameter threads all the way
-            // through ShardedSafeTensors::var_builder.
-            let vb =
-                load_weights(Source::Local(tmp.path().to_path_buf()), DType::F16, &device).unwrap();
-            let t = vb.get((2,), "w").unwrap();
-            assert_eq!(t.dtype(), DType::F16);
-        }
 
         #[test]
         fn resolved_model_dtype_reaches_weight_builder() {
@@ -587,70 +400,16 @@ mod tests {
             )
             .unwrap();
             std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
-            let resolved =
-                ResolvedModel::resolve(Source::Local(tmp.path().to_path_buf()), Some(DType::F16))
-                    .unwrap();
+            let resolved = ResolvedModel::resolve(
+                crate::Source::Local(tmp.path().to_path_buf()),
+                Some(DType::F16),
+            )
+            .unwrap();
 
             let vb = load_resolved_weights_vb(&resolved, &Device::Cpu).unwrap();
             let tensor = vb.get((2,), "w").unwrap();
 
             assert_eq!(tensor.dtype(), DType::F16);
-        }
-
-        #[test]
-        fn missing_tensor_errors_cannot_find_tensor() {
-            let tmp = tempfile::tempdir().unwrap();
-            write_safetensors_fixture(&tmp.path().join("model.safetensors"), "present", &[0.0_f32]);
-
-            let device = Device::Cpu;
-            let vb =
-                load_weights(Source::Local(tmp.path().to_path_buf()), DType::F32, &device).unwrap();
-            let err = vb.get((1,), "absent").unwrap_err();
-            let msg = format!("{err}");
-            assert!(
-                msg.contains("absent") && msg.contains("find"),
-                "expected missing-tensor error mentioning `absent`, got: {msg}"
-            );
-        }
-
-        #[test]
-        fn empty_dir_errors_with_looked_in_context() {
-            let tmp = tempfile::tempdir().unwrap();
-            let err = load_weights(
-                Source::Local(tmp.path().to_path_buf()),
-                DType::F32,
-                &Device::Cpu,
-            )
-            .err()
-            .expect("expected Err from empty dir");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("no safetensors shards"), "got: {msg}");
-        }
-
-        #[test]
-        fn pp_prefix_paths_join_with_dots() {
-            // Locks in candle's dotted-prefix convention so HF tensor names
-            // like `model.layers.0.self_attn.q_proj.weight` work without a
-            // remap table (ADR-0002 contract).
-            let tmp = tempfile::tempdir().unwrap();
-            write_safetensors_fixture(
-                &tmp.path().join("model.safetensors"),
-                "model.layers.0.self_attn.q_proj.weight",
-                &[0.0_f32; 2],
-            );
-
-            let device = Device::Cpu;
-            let vb =
-                load_weights(Source::Local(tmp.path().to_path_buf()), DType::F32, &device).unwrap();
-            let t = vb
-                .pp("model")
-                .pp("layers")
-                .pp(0)
-                .pp("self_attn")
-                .pp("q_proj")
-                .get((2,), "weight")
-                .unwrap();
-            assert_eq!(t.to_vec1::<f32>().unwrap(), vec![0.0; 2]);
         }
     }
 }

@@ -20,6 +20,9 @@ default = []
 # dependency (#18 attention). Off by default so `cargo test` runs on CI
 # without a GPU. Production callers pass `--features cuda`.
 cuda = ["dep:candle-flash-attn", "candle-core/cuda"]
+# Unsupported, default-off release-tooling hook. It adds no public Rust item;
+# ADR-0011 defines the process-scoped capture contract.
+internal-golden = ["dep:rustix"]
 
 [dependencies]
 # Pinned to rev `27f20fea` per the parent spec #12 cross-cutting risk note
@@ -49,6 +52,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+rustix = { version = "1", features = ["fs", "process"], optional = true }
 
 # XXH64 for BlockPool's chained prefix-cache hash (nano-vllm parity).
 # Pure-Rust, no unsafe surfaced; workspace `unsafe_code = "deny"` respected.

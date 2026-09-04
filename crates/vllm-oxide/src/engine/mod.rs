@@ -12,10 +12,10 @@
 
 #![allow(dead_code)]
 
-pub mod block_pool;
-pub mod kv_cache_manager;
-pub mod scheduler;
-pub mod sequence;
+pub(crate) mod block_pool;
+pub(crate) mod kv_cache_manager;
+pub(crate) mod scheduler;
+pub(crate) mod sequence;
 mod step;
 
 use candle_core::{DType, Device, Result, Tensor};
@@ -23,13 +23,11 @@ use candle_core::{DType, Device, Result, Tensor};
 use crate::attention::{AttentionContext, AttentionEpoch};
 use crate::causal_lm::CausalLM;
 use crate::sampler::selected_token_ids_to_host;
-use crate::Sampler;
+use crate::sampler::Sampler;
 use crate::SamplingParams;
 
-pub use block_pool::BlockPoolError;
-pub use kv_cache_manager::KvCacheManager;
-pub use scheduler::{RequestOutput, Scheduler};
-pub use sequence::{Sequence, SequenceStatus};
+pub(crate) use kv_cache_manager::KvCacheManager;
+pub(crate) use scheduler::{RequestOutput, Scheduler};
 
 pub(crate) use step::{
     AdmissionBlockedReason, BlockedAdmission, CacheOperation, SequenceCachePlan, SequencePhase,
@@ -41,7 +39,7 @@ pub(crate) use step::{
 /// Holds the model-execution side of the internal `StepPlan` / `StepResult`
 /// seam and the shared attention state (`AttentionContext`). Scheduling,
 /// lifecycle, and result application remain owned by [`Scheduler`].
-pub struct EngineCore {
+pub(crate) struct EngineCore {
     pub scheduler: Scheduler,
     pub kv_cache_manager: KvCacheManager,
     model: Box<dyn CausalLM>,
@@ -51,7 +49,7 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
-    pub fn new(
+    pub(crate) fn new(
         scheduler: Scheduler,
         kv_cache_manager: KvCacheManager,
         model: Box<dyn CausalLM>,
@@ -70,7 +68,7 @@ impl EngineCore {
     }
 
     /// Add a new inference request and return its stable public request identity.
-    pub fn add_request(&mut self, prompt: Vec<u32>, params: SamplingParams) -> usize {
+    pub(crate) fn add_request(&mut self, prompt: Vec<u32>, params: SamplingParams) -> usize {
         self.scheduler.add_request(prompt, params)
     }
 
@@ -78,18 +76,17 @@ impl EngineCore {
     ///
     /// Returns `RequestOutput`s for any sequences that finished this step.
     /// When no work remains, returns `Ok(Vec::new())`.
-    pub fn step(&mut self) -> Result<Vec<RequestOutput>> {
-        let (outputs, _logits) = self.step_with_logits()?;
+    pub(crate) fn step(&mut self) -> Result<Vec<RequestOutput>> {
+        let (outputs, _capture) = self.step_internal()?;
         Ok(outputs)
     }
 
-    /// Like [`step`], but also returns the pre-sampling logits tensor.
-    ///
-    /// The returned tensor has shape `[batch, vocab_size]` and dtype FP32.
-    /// Used by `LLM::generate_logits` (T12/#23) for L2 golden comparison.
-    ///
-    /// When no work remains, returns `Ok((Vec::new(), Tensor::zeros(...)))`.
-    pub fn step_with_logits(&mut self) -> Result<(Vec<RequestOutput>, Tensor)> {
+    #[cfg(feature = "internal-golden")]
+    pub(crate) fn step_with_capture(&mut self) -> Result<(Vec<RequestOutput>, EngineStepCapture)> {
+        self.step_internal()
+    }
+
+    fn step_internal(&mut self) -> Result<(Vec<RequestOutput>, EngineStepCapture)> {
         let plan = match self.scheduler.plan_step(&mut self.kv_cache_manager) {
             Ok(plan) => plan,
             Err(error) => {
@@ -98,7 +95,14 @@ impl EngineCore {
         };
         let Some(plan) = plan else {
             let empty = Tensor::zeros((0, 0), DType::F32, &self.device)?;
-            return Ok((Vec::new(), empty));
+            return Ok((
+                Vec::new(),
+                EngineStepCapture {
+                    #[cfg(feature = "internal-golden")]
+                    rows: Vec::new(),
+                    logits: empty,
+                },
+            ));
         };
 
         let attention_step = match self.attn_ctx.prepare(
@@ -139,6 +143,21 @@ impl EngineCore {
             Ok(executed) => executed,
             Err(error) => return Err(self.cleanup_failed_step(error)),
         };
+        #[cfg(feature = "internal-golden")]
+        let capture_rows = plan
+            .sequences
+            .iter()
+            .zip(&result.sequences)
+            .filter_map(|(planned, executed)| {
+                executed
+                    .sampled_token
+                    .map(|selected_token| EngineCaptureRow {
+                        request_id: planned.request_id,
+                        selected_token,
+                        completion_step: planned.completion_step,
+                    })
+            })
+            .collect();
         let outputs = match self
             .scheduler
             .apply_step_result(&result, &mut self.kv_cache_manager)
@@ -148,7 +167,14 @@ impl EngineCore {
                 return Err(self.cleanup_failed_step(candle_core::Error::msg(error)));
             }
         };
-        Ok((outputs, logits))
+        Ok((
+            outputs,
+            EngineStepCapture {
+                #[cfg(feature = "internal-golden")]
+                rows: capture_rows,
+                logits,
+            },
+        ))
     }
 
     fn cleanup_failed_step(&mut self, error: candle_core::Error) -> candle_core::Error {
@@ -161,6 +187,13 @@ impl EngineCore {
                 "{error}; cache ownership cleanup after engine failure also failed: {cleanup_error}"
             )),
         }
+    }
+
+    #[cfg(feature = "internal-golden")]
+    pub(crate) fn abort_generation(&mut self) -> Result<()> {
+        self.scheduler
+            .abort_all_requests(&mut self.kv_cache_manager)
+            .map_err(candle_core::Error::msg)
     }
 
     /// Execute exactly the immutable work captured in `plan`.
@@ -262,9 +295,22 @@ impl EngineCore {
     }
 
     /// Whether there are any pending or running sequences.
-    pub fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         self.scheduler.is_running()
     }
+}
+
+pub(crate) struct EngineStepCapture {
+    #[cfg(feature = "internal-golden")]
+    pub(crate) rows: Vec<EngineCaptureRow>,
+    pub(crate) logits: Tensor,
+}
+
+#[cfg(feature = "internal-golden")]
+pub(crate) struct EngineCaptureRow {
+    pub(crate) request_id: usize,
+    pub(crate) selected_token: u32,
+    pub(crate) completion_step: usize,
 }
 
 fn sampling_diagnostics(plan: &StepPlan) -> String {
@@ -304,7 +350,7 @@ mod tests {
     use super::*;
     use crate::attention::PagedKVCache;
     use crate::engine::sequence::BLOCK_SIZE;
-    use crate::Sampler;
+    use crate::sampler::Sampler;
     use candle_core::{DType, TensorId};
 
     /// A mock CausalLM that always returns hidden states where token 7
@@ -369,10 +415,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             100
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     impl CausalLM for AttentionFailingModel {
@@ -389,10 +431,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             100
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     impl CausalLM for PanickingAttentionModel {
@@ -407,10 +445,6 @@ mod tests {
 
         fn vocab_size(&self) -> usize {
             100
-        }
-
-        fn device(&self) -> &Device {
-            &self.device
         }
     }
 
@@ -435,10 +469,6 @@ mod tests {
         fn vocab_size(&self) -> usize {
             100
         }
-
-        fn device(&self) -> &Device {
-            &self.device
-        }
     }
 
     impl CausalLM for InvalidSamplingLogitsModel {
@@ -452,10 +482,6 @@ mod tests {
 
         fn vocab_size(&self) -> usize {
             100
-        }
-
-        fn device(&self) -> &Device {
-            &self.device
         }
     }
 
@@ -490,10 +516,6 @@ mod tests {
 
         fn vocab_size(&self) -> usize {
             self.vocab_size
-        }
-
-        fn device(&self) -> &Device {
-            &self.device
         }
     }
 
@@ -670,10 +692,6 @@ mod tests {
         assert_eq!(seen_ids.len(), 3);
         assert!(seen_ids.windows(2).all(|pair| pair[0] == pair[1]));
         assert!(attn_ctx.is_idle());
-        let logical = attn_ctx.attn_meta.lock().unwrap().clone();
-        assert!(logical.is_prefill);
-        assert_eq!(logical.cu_seqlens_q, [0, 3]);
-        assert_eq!(logical.cu_seqlens_k, [0, 3]);
         let first_step_tensor_id = seen_ids[0];
         drop(seen_ids);
 
@@ -687,10 +705,6 @@ mod tests {
         assert!(seen_ids[3..].windows(2).all(|pair| pair[0] == pair[1]));
         assert_ne!(first_step_tensor_id, seen_ids[3]);
         assert!(attn_ctx.is_idle());
-        let logical = attn_ctx.attn_meta.lock().unwrap().clone();
-        assert!(!logical.is_prefill);
-        assert_eq!(logical.cu_seqlens_q, [0, 1]);
-        assert_eq!(logical.cu_seqlens_k, [0, 4]);
     }
 
     #[test]

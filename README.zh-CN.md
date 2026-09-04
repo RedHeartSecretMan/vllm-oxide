@@ -9,10 +9,10 @@
 [ci-url]: https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
 [license-url]: LICENSE
-[nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 的 Rust 移植版，逐步靠近 vLLM 的 V1 架构。
+[nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 的 Rust 移植版，逐步靠近 vLLM 的 V1 架构，并采用 correctness-first 的 v0.2.0 合同。
 
 - **单 GPU 离线推理**——无服务器，无异步。同步引擎中的持续批处理、前缀缓存、分页 KV 缓存和仅重计算的抢占策略。
-- **架构无关的模型注册表**——目前以 Qwen3 为首要支持；添加新架构只需一个文件加一条 `mod` 声明，零改动。
+- **Qwen3 生成合同**——支持的库边界是在单张 CUDA GPU 上同步调用 `LLM::generate`；模型注册和执行机制均保持内部实现。
 - **双层正确性保证**——CI 属性测试快速捕获回归；GPU 发布门禁通过黄金夹具验证数值输出，以 transformers 为预言机。
 
 [架构概览](#架构概览) | [快速开始](#快速开始) | [测试](#测试) | [贡献指南](#贡献指南)
@@ -42,7 +42,7 @@ vllm-oxide 将 LLM 推理带入 Rust 生态。它构建在 [candle](https://gith
 - 分页 KV 缓存（`block_size = 256`）
 - 仅重计算（recompute-only）抢占策略
 
-v0.1 面向**单 GPU、离线推理**（无服务器、无异步）。引擎以 Qwen3 为首要支持模型，但模型注册表是架构无关的：添加新架构只需新增一个文件加一条 `mod` 声明，无需修改现有代码。
+v0.2.0 支持**单 GPU Qwen3 离线生成**：只提供进程内、同步的 `LLM::generate` 接口，不包含服务器或异步运行时。其他模型家族、服务 API、TP/NCCL、CUDA Graphs、量化、LoRA 和 speculative decoding 均不在本版本边界内。
 
 ### 项目目标
 
@@ -73,8 +73,8 @@ flowchart TD
 
 - **分页注意力（Paged attention）**：K/V 缓存存储在固定大小的块（`block_size = 256`）中。预填充阶段使用非分页的 `flash_attn_varlen`；解码阶段使用分页的 `flash_attn_varlen_paged_windowed`。
 - **前缀缓存（Prefix caching）**：`BlockPool` 中的链式 XXH64 哈希表对跨请求的公共提示前缀进行去重（写时复制语义）。
-- **TP 接缝（TP seam）**：`ParallelStyle` trait 和 `TpConfig` 枚举使未来的张量并行接入成为增量式操作。v0.1 仅使用 `TpConfig::Single`。
-- **CausalLM trait**：引擎面向模型的契约 —— `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits`。基于 inventory 的模型注册表将 HF 架构字符串映射到产生 `Box<dyn CausalLM>` 的工厂函数。
+- **TP 接缝（TP seam）**：内部 `ParallelStyle` trait 和 `TpConfig` 枚举保留未来可行性接缝。v0.2.0 仅支持 `TpConfig::Single`，TP/NCCL 不是运行时能力。
+- **CausalLM trait**：内部的引擎面向模型合同。inventory 注册表、loader、scheduler、cache、attention metadata 和 sampler 都隐藏在 `LLM` 后面。
 
 ## 环境要求
 
@@ -89,7 +89,7 @@ flowchart TD
 ### 工具链
 
 - **Rust**：edition 2021，rust-version 1.75+（见 [workspace.package] 声明）。
-- **系统**：Linux（唯一支持 NVIDIA CUDA 的平台）。v0.1 不支持 Windows 或 macOS GPU。
+- **系统**：Linux（唯一支持的 NVIDIA CUDA 平台）。Windows 和 macOS GPU 推理不在 v0.2.0 范围内。
 
 ## 快速开始
 
@@ -132,14 +132,11 @@ echo "The meaning of life is" | \
 | `--top-p`            | Top-p（核）采样：保留累积概率 >=`p` 的最小 token 集合。                                                                  | `None`（禁用） |
 | `--max-tokens`       | 最大生成 token 数。                                                                                                        | `16`           |
 
-### 运行示例
+### 运行库示例
 
 ```bash
-# 加载并查看 Qwen3 检查点（权重、dtype、分片）
-cargo run --release --example load_qwen3 --features cuda -- hub:Qwen/Qwen3-0.6B
-
-# 在虚拟输入上运行前向传播
-cargo run --release --example forward_qwen3 --features cuda -- hub:Qwen/Qwen3-0.6B
+# 通过受支持的公开接口构建 LLM 并生成
+cargo run --release --example generate_qwen3 --features cuda -- hub:Qwen/Qwen3-0.6B
 ```
 
 示例接受 `hub:<repo>` 和 `hub:<repo>@<revision>` URL，或本地目录路径。
@@ -151,9 +148,10 @@ cargo run --release --example forward_qwen3 --features cuda -- hub:Qwen/Qwen3-0.
 ```toml
 [dependencies]
 vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", features = ["cuda"] }
+anyhow = "1"
 ```
 
-主要 API 是 `LLM::generate`，它接受批处理提示和每条提示独立的采样参数：
+完整的 crate-root 支持面只有 `LLM`、`EngineOptions`、`Prompt`、`SamplingParams`、`RequestOutput` 和 `Source`。`LLM::new` 构建组合根，`LLM::generate` 接受批量 prompt 以及每条 prompt 对应的采样策略：
 
 ```rust
 use vllm_oxide::{LLM, Prompt, SamplingParams, EngineOptions, Source};
@@ -207,8 +205,24 @@ fn main() -> anyhow::Result<()> {
 | `Prompt`         | 输入枚举：`Text(String)` 用于自然语言提示，`TokenIds(Vec<u32>)` 用于预 token 化的夹具数据。同一批次中两者均可接受。                                                                          |
 | `SamplingParams` | 每条提示的配置：`temperature`、`top_k`、`top_p`、`max_tokens`、`ignore_eos`、`presence_penalty`、`frequency_penalty`、`repetition_penalty`。默认为贪心解码（temperature=0）。    |
 | `RequestOutput`  | 每条请求的结果：`{ request_id, token_ids, text, finished }`。结果向量保持输入 prompt 顺序；请求标识不暴露内部序列标识。始终同时提供解码后的文本和原始 token ID。                                                       |
-| `EngineOptions`  | 构建时的配置：`max_num_batched_tokens`（默认 16384）、`max_num_seqs`（512）、`max_model_len`、`gpu_memory_utilization`（0.9）、`enforce_eager`（v0.1 中始终为 true）、`dtype` 覆盖。 |
+| `EngineOptions`  | 构建时配置：`max_num_batched_tokens`（默认 16384）、`max_num_seqs`（512）、`max_model_len`、`gpu_memory_utilization`（0.9）、eager 执行（CUDA Graphs 不在 v0.2.0 范围内）和 `dtype` 覆盖。 |
 | `Source`         | 权重来源：`Source::Local(PathBuf)` 用于本地目录，或 `Source::Hub { repo, revision }` 用于 HuggingFace Hub。                                                                                  |
+
+`LLM::new` 与 `LLM::generate` 返回 `anyhow::Result`；`anyhow::Error` 只是传递的签名类型，不会从 vllm-oxide 根模块重导出。类似地，`EngineOptions::dtype` 使用 `Option<candle_core::DType>`，但根模块不重导出 `DType`。
+
+### 采样参数语义
+
+| 字段 | v0.2.0 支持语义 |
+|------|-----------------|
+| `temperature` | 不能为 NaN 且 `>= 0`；`0` 选择贪心路径，正无穷保留为 filter 前均匀分布的边界情况。 |
+| `top_k` | `None` 或 `Some(k)` 且 `k >= 1`；不小于词表大小时为 no-op。 |
+| `top_p` | `None` 或 `(0, 1]` 内的有限值；`1` 为 no-op。 |
+| `max_tokens` | 至少为 `1`，仅计算 completion token。 |
+| `ignore_eos` | 为 true 时忽略模型解析出的 EOS，但绝不会绕过 `max_tokens`。 |
+| `presence_penalty`、`frequency_penalty` | `[-2, 2]` 内的有限值。 |
+| `repetition_penalty` | 有限且 `>= 0`；`0` 是已接受的 no-op 约定。 |
+
+所有字段只要分别有效即可组合使用。penalty 在选择前应用；`temperature == 0` 或 `top_k == Some(1)` 进入贪心路径，因此后续 top-k/top-p filter 不再生效。
 
 ## 构建特性
 
@@ -221,6 +235,8 @@ cuda = ["dep:candle-flash-attn", "candle-core/cuda"]  # 生产后端。
 ```
 
 来自 `Cargo.toml`：默认仅 CPU 以便 `cargo test` 在 CI 上无需 GPU 即可运行。生产调用方传入 `--features cuda`。
+
+Workspace 发布验证器还会显式启用默认关闭的 `internal-golden`。它不会增加任何公开 Rust item，并且只属于不受支持的诊断工具：仅在显式配置的发布门禁调用中，才会把完整 logits 写入私有、fail-closed 的临时 artifact；仅启用 feature 不会产生诊断 I/O。
 
 ## 测试
 
@@ -252,7 +268,7 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 | ------------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | **L1** | 贪心解码 token 参考匹配 | 接受参考 token，或按 manifest 中显式且版本化的容差策略、使用相同前缀下 expected/actual candidate logits 得出的 near-tie 分类。 |
 | **L2** | 相同前缀 logits 张量比较 | 按版本化绝对容差比较原始采样前 logits，包含首个 divergence 的同因果前缀行；随后停止并排除所有不同因果前缀的行。 |
-| **L3** | 每层激活值（调试用）        | v0.1 中为骨架代码。                                                                                                                            |
+| **L3** | 每层激活值（调试用）        | v0.2.0 中仍为骨架，不属于发布比较。                                                                                                            |
 
 黄金夹具由 `tools/golden-gen/`（Python）生成，运行两个预言机引擎：
 
@@ -281,7 +297,7 @@ schema-v4 manifest 记录 `v0.2.0` / `goldens-v0.2` 兼容关系、确定性夹�
 ## 文档
 
 - **[CONTEXT.md](CONTEXT.md)** —— 领域词汇表和通用语言。代码库中使用的每个术语（`CausalLM`、`BlockPool`、`PagedKVCache`、`EngineCore`、`Prompt`、`SamplingParams` 等）都在这份文档中定义，并附有不应使用的同义词的"避免"说明。
-- **[docs/adr/](docs/adr/)** —— 架构决策记录（5 篇 ADR）：参数化并行层、权重加载接缝、模型注册表 + RoPE、引擎依赖 DAG、黄金生成正确性策略。
+- **[docs/adr/](docs/adr/)** —— 架构决策记录，包括 correctness-first 的 v0.2.0 范围，以及记录 breaking public-interface contraction 的 [ADR-0011](docs/adr/0011-public-generation-contract.md)。
 - **Crate 源代码** —— 每个模块都带有文档注释，说明其角色和 ADR-0004 依赖关系 DAG。`lib.rs` 的文档注释是最佳起点。
 
 ## 贡献指南

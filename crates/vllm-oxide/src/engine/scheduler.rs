@@ -314,6 +314,7 @@ impl Scheduler {
                 sampling_allowed,
                 sampling_params: sequence.sampling_params().clone(),
                 token_history: sequence.token_ids.clone(),
+                completion_step: sequence.num_completion_tokens(),
             });
         }
 

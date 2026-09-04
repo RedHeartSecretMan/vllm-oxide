@@ -10,10 +10,10 @@
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
 [license-url]: LICENSE
 
-A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture.
+A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture, with a correctness-first v0.2.0 contract.
 
 - **Single-GPU, offline inference** — no server, no async. Continuous batching, prefix caching, paged KV cache, and recompute-only preemption in a synchronous engine.
-- **Architecture-agnostic model registry** — Qwen3-first today; adding a new architecture is one file plus one `mod` declaration, zero changes to existing code.
+- **Qwen3 generation contract** — the supported library boundary is synchronous `LLM::generate` on one CUDA GPU; model registration and execution mechanics remain internal.
 - **Two-tier correctness** — CI property tests catch regressions fast; a GPU release gate with golden fixtures validates numerical output against a transformers oracle.
 
 [Architecture](#architecture-overview) | [Quick Start](#quick-start) | [Testing](#testing) | [Contributing](#contributing)
@@ -43,7 +43,7 @@ vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https:/
 - Paged KV cache (`block_size = 256`)
 - Recompute-only preemption
 
-v0.1 targets **single-GPU, offline inference** (no server, no async). The engine is Qwen3-first but the model registry is architecture-agnostic: adding a new architecture means adding one file plus one `mod` declaration, with zero changes to existing code.
+v0.2.0 supports **single-GPU Qwen3 offline generation**: one in-process, synchronous `LLM::generate` interface with no server or async runtime. Other model families, serving APIs, TP/NCCL, CUDA Graphs, quantization, LoRA, and speculative decoding are outside this release boundary.
 
 ### Project goals
 
@@ -74,8 +74,8 @@ Key design decisions (see `CONTEXT.md` for the full vocabulary):
 
 - **Paged attention**: K/V cache stored in fixed-size blocks (`block_size = 256`). Prefill uses unpaged `flash_attn_varlen`; decode uses paged `flash_attn_varlen_paged_windowed`.
 - **Prefix caching**: Chained XXH64 hash table in `BlockPool` deduplicates common prompt prefixes across requests (CoW semantics).
-- **TP seam**: The `ParallelStyle` trait + `TpConfig` enum make future tensor-parallelism wiring additive. v0.1 uses `TpConfig::Single` exclusively.
-- **CausalLM trait**: Engine-facing model contract — `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits`. A model registry (inventory-based) maps HF architecture strings to factory functions producing `Box<dyn CausalLM>`.
+- **TP seam**: The internal `ParallelStyle` trait + `TpConfig` enum preserve a future feasibility seam. v0.2.0 supports `TpConfig::Single` only; TP/NCCL is not a runtime capability.
+- **CausalLM trait**: An internal engine-facing model contract. The inventory registry, loader, scheduler, cache, attention metadata, and sampler are implementation details behind `LLM`.
 
 ## Requirements
 
@@ -90,7 +90,7 @@ Key design decisions (see `CONTEXT.md` for the full vocabulary):
 ### Toolchain
 
 - **Rust**: edition 2021, rust-version 1.75+ (as declared in [workspace.package]).
-- **System**: Linux (the only platform with NVIDIA CUDA support). No Windows or macOS GPU support in v0.1.
+- **System**: Linux (the only supported NVIDIA CUDA platform). Windows and macOS GPU inference are outside v0.2.0.
 
 ## Quick Start
 
@@ -133,14 +133,11 @@ echo "The meaning of life is" | \
 | `--top-p` | Top-p (nucleus) sampling: keep smallest token set with cumulative probability >= `p`. | `None` (disabled) |
 | `--max-tokens` | Maximum tokens to generate. | `16` |
 
-### Running examples
+### Running the library example
 
 ```bash
-# Load and inspect a Qwen3 checkpoint (weights, dtype, shards)
-cargo run --release --example load_qwen3 --features cuda -- hub:Qwen/Qwen3-0.6B
-
-# Run a forward pass on dummy input
-cargo run --release --example forward_qwen3 --features cuda -- hub:Qwen/Qwen3-0.6B
+# Construct LLM and generate through the supported public interface
+cargo run --release --example generate_qwen3 --features cuda -- hub:Qwen/Qwen3-0.6B
 ```
 
 The examples accept `hub:<repo>` and `hub:<repo>@<revision>` URLs, or a local directory path.
@@ -152,9 +149,10 @@ Add `vllm_oxide` as a dependency in your `Cargo.toml`:
 ```toml
 [dependencies]
 vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", features = ["cuda"] }
+anyhow = "1"
 ```
 
-The main API is `LLM::generate`, which accepts batched prompts and per-prompt sampling parameters:
+The complete supported crate-root surface is `LLM`, `EngineOptions`, `Prompt`, `SamplingParams`, `RequestOutput`, and `Source`. `LLM::new` constructs the composition root and `LLM::generate` accepts batched prompts with one sampling policy per prompt:
 
 ```rust
 use vllm_oxide::{LLM, Prompt, SamplingParams, EngineOptions, Source};
@@ -208,8 +206,24 @@ fn main() -> anyhow::Result<()> {
 | `Prompt` | Input enum: `Text(String)` for natural-language prompts, `TokenIds(Vec<u32>)` for pre-tokenized fixtures. Both are accepted in the same batch. |
 | `SamplingParams` | Per-prompt configuration: `temperature`, `top_k`, `top_p`, `max_tokens`, `ignore_eos`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`. Default is greedy (temperature=0). |
 | `RequestOutput` | Per-request result: `{ request_id, token_ids, text, finished }`. The result vector preserves input-prompt order; request identity does not expose the internal sequence identifier. Both decoded text and raw token IDs are always provided. |
-| `EngineOptions` | Construction-time config: `max_num_batched_tokens` (default 16384), `max_num_seqs` (512), `max_model_len`, `gpu_memory_utilization` (0.9), `enforce_eager` (always true in v0.1), `dtype` override. |
+| `EngineOptions` | Construction-time config: `max_num_batched_tokens` (default 16384), `max_num_seqs` (512), `max_model_len`, `gpu_memory_utilization` (0.9), eager execution (CUDA Graphs are out of v0.2.0 scope), and a `dtype` override. |
 | `Source` | Weight source: `Source::Local(PathBuf)` for a local directory, or `Source::Hub { repo, revision }` for HuggingFace Hub. |
+
+`LLM::new` and `LLM::generate` return `anyhow::Result`; `anyhow::Error` is a transitive signature type rather than a vllm-oxide root export. Likewise, `EngineOptions::dtype` uses `Option<candle_core::DType>` without re-exporting `DType`.
+
+### Sampling parameter semantics
+
+| Field | Supported v0.2.0 semantics |
+|-------|----------------------------|
+| `temperature` | Not NaN and `>= 0`; `0` selects greedy, while positive infinity remains the uniform pre-filter corner case. |
+| `top_k` | `None` or `Some(k)` with `k >= 1`; values at least the vocabulary size are a no-op. |
+| `top_p` | `None` or a finite value in `(0, 1]`; `1` is a no-op. |
+| `max_tokens` | At least `1`; counts completion tokens only. |
+| `ignore_eos` | Ignores model-resolved EOS stopping when true, but never bypasses `max_tokens`. |
+| `presence_penalty`, `frequency_penalty` | Finite values in `[-2, 2]`. |
+| `repetition_penalty` | Finite and `>= 0`; `0` is the accepted no-op convention. |
+
+Every combination of individually valid fields is supported. Penalties run before selection; `temperature == 0` or `top_k == Some(1)` selects the greedy path, making later top-k/top-p filtering inert.
 
 ## Build features
 
@@ -222,6 +236,8 @@ cuda = ["dep:candle-flash-attn", "candle-core/cuda"]  # Production backend.
 ```
 
 Default is CPU-only so `cargo test` runs on CI without a GPU. Production callers (the CLI, the engine) pass `--features cuda`.
+
+The workspace release harness additionally enables default-off `internal-golden`. It adds no public Rust item and is unsupported diagnostic tooling: only an explicitly configured release-gate call captures full logits into a private, fail-closed temporary artifact. Enabling the feature alone performs no diagnostic I/O.
 
 ## Testing
 
@@ -253,7 +269,7 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 |-------|------|-----|
 | **L1** | Greedy token-sequence reference match | Accepts the reference token or an explicit near-tie classification from the same-prefix expected/actual candidate logits under the versioned Tolerance policy. |
 | **L2** | Same-prefix logits tensor comparison | Compares raw pre-sampling logits under the versioned absolute tolerance through the first divergent token, then excludes every later row because its causal prefix differs. |
-| **L3** | Per-layer activations (debug) | Skeleton in v0.1. |
+| **L3** | Per-layer activations (debug) | Skeleton in v0.2.0; not a release comparison. |
 
 Golden fixtures are produced by `tools/golden-gen/` (Python), which runs two oracle engines:
 
@@ -282,7 +298,7 @@ and [ADR-0010](docs/adr/0010-golden-release-asset-contract.md).
 ## Documentation
 
 - **[CONTEXT.md](CONTEXT.md)** — Domain vocabulary and ubiquitous language. Every term used in the codebase (`CausalLM`, `BlockPool`, `PagedKVCache`, `EngineCore`, `Prompt`, `SamplingParams`, etc.) is defined here with "Avoid" notes for synonyms that should not be used.
-- **[docs/adr/](docs/adr/)** — Architecture Decision Records (5 ADRs): parametric parallel layers, weight loader seam, model registry + RoPE, engine dependency DAG, and golden generation correctness strategy.
+- **[docs/adr/](docs/adr/)** — Architecture Decision Records, including the correctness-first v0.2.0 scope and [ADR-0011](docs/adr/0011-public-generation-contract.md), which records the breaking public-interface contraction.
 - **Crate source** — Each module carries a doc comment that explains its role and the ADR-0004 dependency DAG. The `lib.rs` doc comment is the best starting point.
 
 ## Contributing

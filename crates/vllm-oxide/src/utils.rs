@@ -1,33 +1,4 @@
-//! Small numeric helpers ported from `nano-vllm/utils.py`.
-//!
-//! Only `round_up` and `kv_cache_layout_shape` ship in the v0.1 scaffold —
-//! everything else in this crate is a stub until downstream tickets land.
-
-/// Round `n` up to the nearest multiple of `m`.
-///
-/// Ported from nano-vllm's `(n + bs - 1) // bs * bs` idiom (inlined at
-/// `engine/sequence.py:57` and `engine/model_runner.py:152,227`). nano-vllm
-/// has no named function — this Rust port extracts the helper. Precondition: `m > 0`.
-///
-/// # Examples
-///
-/// ```
-/// # use vllm_oxide::round_up;
-/// assert_eq!(round_up(0, 256), 0);
-/// assert_eq!(round_up(1, 256), 256);
-/// assert_eq!(round_up(256, 256), 256);
-/// assert_eq!(round_up(257, 256), 512);
-/// ```
-pub const fn round_up(n: usize, m: usize) -> usize {
-    // Refactored from the classic `(n + m - 1) / m * m` form. The classic
-    // form's `n + m - 1` overflows for ~m values of `n` near `usize::MAX`
-    // (e.g. m=256 → 256 overflow-triggering inputs). The division-remainder
-    // form below can only overflow at `n ∈ {usize::MAX-1, usize::MAX}` — a
-    // meaningful safety margin for the block_size=256 call sites nano-vllm
-    // uses. Truly overflow-safe round-up requires returning Option/Result,
-    // which is overkill for token-count math.
-    (n / m) * m + if n % m != 0 { m } else { 0 }
-}
+//! Numeric helpers used by the internal paged-cache implementation.
 
 /// Physical PagedKVCache buffer shape as `[2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]`.
 ///
@@ -63,47 +34,6 @@ pub fn kv_cache_layout_shape(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    mod round_up {
-        use super::*;
-
-        #[test]
-        fn zero_rounds_to_zero() {
-            assert_eq!(round_up(0, 256), 0);
-        }
-
-        #[test]
-        fn exact_multiple_is_identity() {
-            assert_eq!(round_up(256, 256), 256);
-            assert_eq!(round_up(512, 256), 512);
-            assert_eq!(round_up(1024, 256), 1024);
-        }
-
-        #[test]
-        fn non_multiple_rounds_up() {
-            assert_eq!(round_up(1, 256), 256);
-            assert_eq!(round_up(255, 256), 256);
-            assert_eq!(round_up(257, 256), 512);
-        }
-
-        #[test]
-        fn one_block_size() {
-            assert_eq!(round_up(1, 1), 1);
-            assert_eq!(round_up(41, 1), 41);
-        }
-
-        #[test]
-        fn non_power_of_two_multiple() {
-            // nano-vllm only ever calls with power-of-two m (block_size=256),
-            // but the general case must still work — see the implementation
-            // comment.
-            assert_eq!(round_up(0, 3), 0);
-            assert_eq!(round_up(1, 3), 3);
-            assert_eq!(round_up(3, 3), 3);
-            assert_eq!(round_up(4, 3), 6);
-            assert_eq!(round_up(7, 3), 9);
-        }
-    }
 
     mod kv_cache_layout_shape {
         use super::*;

@@ -322,7 +322,6 @@ pub struct Qwen3ForCausalLM {
     model: Qwen3Model,
     lm_head: Linear<Row>,
     vocab_size: usize,
-    device: Device,
     attn_ctx: AttentionContext,
 }
 
@@ -348,7 +347,6 @@ impl Qwen3ForCausalLM {
             model,
             lm_head,
             vocab_size: config.vocab_size,
-            device: dev.clone(),
             attn_ctx,
         })
     }
@@ -389,30 +387,14 @@ impl Qwen3ForCausalLM {
 
 impl CausalLM for Qwen3ForCausalLM {
     fn forward(&mut self, input_ids: &Tensor, positions: &Tensor) -> CandleResult<Tensor> {
-        let direct_consumer = self.attn_ctx.bind_direct_forward_if_idle(&self.device)?;
         let prepared = self.attn_ctx.prepared_for_bound_consumer()?;
-        let forward = self.model.forward(input_ids, positions, &prepared);
-        let cleanup = match direct_consumer {
-            Some(consumer) => consumer.finish(),
-            None => Ok(()),
-        };
-        match (forward, cleanup) {
-            (Ok(hidden), Ok(())) => Ok(hidden),
-            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-            (Err(forward_error), Err(cleanup_error)) => Err(candle_core::Error::Msg(format!(
-                "{forward_error}; releasing direct attention metadata also failed: \
-                 {cleanup_error}"
-            ))),
-        }
+        self.model.forward(input_ids, positions, &prepared)
     }
     fn compute_logits(&self, hidden_states: &Tensor) -> CandleResult<Tensor> {
         self.lm_head.forward(hidden_states)
     }
     fn vocab_size(&self) -> usize {
         self.vocab_size
-    }
-    fn device(&self) -> &Device {
-        &self.device
     }
 }
 
@@ -527,21 +509,6 @@ mod tests {
             .to_string()
             .contains("not allocated"));
         drop(cache);
-        assert!(built.attn_ctx.is_idle());
-    }
-
-    #[test]
-    fn direct_causal_lm_forward_uses_the_public_logical_metadata() {
-        let mut built = build_zero_layer_model();
-        let logical = crate::attention::build_prefill_metadata(&[1], &[1], &[0]);
-        *built.attn_ctx.attn_meta.lock().unwrap() = logical.clone();
-        let input_ids = Tensor::from_vec(vec![1_u32], 1, &Device::Cpu).unwrap();
-        let positions = Tensor::from_vec(vec![0_u32], 1, &Device::Cpu).unwrap();
-
-        let hidden = built.model.forward(&input_ids, &positions).unwrap();
-
-        assert_eq!(hidden.dims(), [1, 2]);
-        assert_eq!(*built.attn_ctx.attn_meta.lock().unwrap(), logical);
         assert!(built.attn_ctx.is_idle());
     }
 }

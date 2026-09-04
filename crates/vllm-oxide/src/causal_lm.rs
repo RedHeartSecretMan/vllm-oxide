@@ -8,11 +8,10 @@
 //! v0.2 adds new task traits (`SequenceClassifier`, `Embedder`) as sibling
 //! traits in this module — not by overloading `CausalLM`.
 
-use candle_core::{Device, Result, Tensor};
+use candle_core::{Result, Tensor};
 
 pub trait CausalLM: Send + Sync {
     fn forward(&mut self, input_ids: &Tensor, positions: &Tensor) -> Result<Tensor>;
     fn compute_logits(&self, hidden_states: &Tensor) -> Result<Tensor>;
     fn vocab_size(&self) -> usize;
-    fn device(&self) -> &Device;
 }
