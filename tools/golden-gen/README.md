@@ -111,7 +111,7 @@ All unit tests run on CPU and do not require a GPU.
 | `generation.canonical_max_tokens` | int | Max generated tokens for canonical prompts (64) |
 | `generation.regression_max_tokens` | int | Max generated tokens for regression prompts (32) |
 | `generation.temperature` | float | Sampling temperature (0.0) |
-| `generation.attn_implementation` | str | Attention backend (`eager`) |
+| `generation.attn_implementation` | str | Reference oracle attention backend (`sdpa`) |
 | `tolerance_policy.version` | str | Supported comparison semantics (`same-prefix-v1`) |
 | `tolerance_policy.dtype` | str | Dtype scope, matched to the manifest model |
 | `tolerance_policy.kernel` | str | Kernel scope, matched to the manifest generation path |
