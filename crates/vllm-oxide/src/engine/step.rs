@@ -17,7 +17,6 @@ pub(crate) struct StepPlan {
     pub(crate) phase: StepPhase,
     pub(crate) sequences: Vec<SequenceStepPlan>,
     pub(crate) token_budget: usize,
-    pub(crate) num_cached_blocks: usize,
     pub(crate) attention: AttnMetadata,
 }
 

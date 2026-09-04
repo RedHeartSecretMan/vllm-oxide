@@ -42,7 +42,6 @@ fn usize_to_u32(value: usize, name: &str) -> Result<u32, StepPlanError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkSelection {
     phase: StepPhase,
-    num_cached_blocks: usize,
 }
 
 /// Token-level scheduler — the algorithmic heart of the engine.
@@ -265,7 +264,6 @@ impl Scheduler {
             phase: output.phase,
             sequences,
             token_budget,
-            num_cached_blocks: output.num_cached_blocks,
             attention,
         };
         self.next_plan_id += 1;
@@ -476,7 +474,6 @@ impl Scheduler {
 
         WorkSelection {
             phase: StepPhase::Decode,
-            num_cached_blocks: 0,
         }
     }
 
@@ -509,7 +506,6 @@ impl Scheduler {
         }
         WorkSelection {
             phase: StepPhase::Prefill,
-            num_cached_blocks: 0,
         }
     }
 
@@ -520,14 +516,12 @@ impl Scheduler {
         if self.waiting.is_empty() {
             return WorkSelection {
                 phase: StepPhase::Prefill,
-                num_cached_blocks: 0,
             };
         }
 
         let max_running = self.max_num_seqs.saturating_sub(self.running.len());
         let mut total_tokens: usize = 0;
         let mut scheduled_count: usize = 0;
-        let mut total_cached_blocks: usize = 0;
 
         let mut to_schedule: Vec<(usize, usize)> = Vec::new(); // (waiting_index, n_tokens)
 
@@ -541,7 +535,7 @@ impl Scheduler {
 
             match kv_mgr.can_allocate(seq) {
                 None => break,
-                Some(num_cached_blocks) => {
+                Some(_) => {
                     let n_tokens = if scheduled_count == 0 {
                         let budget = self.max_num_batched_tokens.saturating_sub(total_tokens);
                         if remaining > budget && total_tokens == 0 {
@@ -558,7 +552,6 @@ impl Scheduler {
                     }
 
                     total_tokens += n_tokens;
-                    total_cached_blocks += num_cached_blocks;
                     scheduled_count += 1;
                     to_schedule.push((i, n_tokens));
                 }
@@ -588,7 +581,6 @@ impl Scheduler {
 
         WorkSelection {
             phase: StepPhase::Prefill,
-            num_cached_blocks: total_cached_blocks,
         }
     }
 }
@@ -736,12 +728,11 @@ mod tests {
         }
 
         #[test]
-        fn empty_waiting_returns_prefill_with_zero_cached() {
+        fn empty_waiting_selects_prefill_without_running_work() {
             let mut s = make_scheduler();
             let mut kv = make_kv_mgr(10);
             let output = s.select_work(&mut kv);
             assert_eq!(output.phase, StepPhase::Prefill);
-            assert_eq!(output.num_cached_blocks, 0);
             assert_eq!(s.num_running(), 0);
         }
 
@@ -778,7 +769,6 @@ mod tests {
 
             assert_eq!(plan.phase, StepPhase::Prefill);
             assert_eq!(plan.token_budget, 3);
-            assert_eq!(plan.num_cached_blocks, 0);
             assert_eq!(plan.sequences.len(), 1);
 
             let sequence = &plan.sequences[0];
