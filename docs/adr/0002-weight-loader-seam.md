@@ -26,8 +26,9 @@ Loading a multi-GB checkpoint is O(1); only touched tensors cost memory.
 
 **`slice_for_rank` seam** (v0.1 identity): The weight-loader TP hook lives on
 the `ParallelStyle` trait (ADR-0001), not the loader. v0.1 returns
-`Cow::Borrowed`; v0.2 overrides per style with rank-slicing math. The seam
-lives on the trait so model code never branches on rank.
+`Cow::Borrowed`; v0.2.0 retains that identity-only feasibility seam because
+runtime TP/NCCL is out of scope. A later release may add per-style rank-slicing
+math without making model code branch on rank (ADR-0006).
 
 **`unsafe` boundary**: This module is the only `vllm_oxide` module calling
 unsafe at T15. The single call site is `ShardedSafeTensors::var_builder`,

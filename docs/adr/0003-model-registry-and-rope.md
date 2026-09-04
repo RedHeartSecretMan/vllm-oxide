@@ -26,8 +26,9 @@ the nano-vllm `rotary_embedding.py` pattern. The cache has shape
 not just prefill's `[0..seq_len)`.
 
 **R5**: No scaling knob exposed. Qwen3 ships `rope_theta = 1_000_000` with no
-`rope_scaling`. Scaling variants (`linear`, `dynamic`, `yarn`) land in v0.2
-if a supported model requires them.
+`rope_scaling`. Scaling variants (`linear`, `dynamic`, `yarn`) remain
+outside v0.2.0 and land only when a later supported model requires them
+(ADR-0006).
 
 **Why not candle-nn**: `candle_nn::rotary_emb::rope` (free function) consumes
 cos/sin shaped against a sequential `[0..seq_len)` convention — incompatible
@@ -37,7 +38,7 @@ pattern is the V1 parity path.
 **Considered Options**:
 - candle-nn free functions (rejected): wrong positional convention for decode.
 - Upstream a struct to candle-nn (deferred): would require coordination with
-  upstream; revisit before v0.2 (see TODO in rope.rs).
+  upstream; revisit after v0.2.0 when supported scope requires it.
 
 **Consequences**:
 - `layers/rope.rs` is self-contained (no candle-nn RoPE dependency).

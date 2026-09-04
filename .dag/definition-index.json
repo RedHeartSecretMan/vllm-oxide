@@ -14,6 +14,14 @@
       "blob_oid": "07720d1a434a9a9c3bc188ebf9c34ae16018ff28"
     },
     {
+      "path": "docs/adr/0002-weight-loader-seam.md",
+      "blob_oid": "4fcc0734897e26ddc7b93929a7bd0e86181b9186"
+    },
+    {
+      "path": "docs/adr/0003-model-registry-and-rope.md",
+      "blob_oid": "6766c1daf09e5a68989fe5f07e86a063e30f76fc"
+    },
+    {
       "path": "docs/adr/0004-engine-architecture-and-dependency-dag.md",
       "blob_oid": "9ba327c6f108e9a1bd5a33832c03ee5bbc623eef"
     },
@@ -23,7 +31,7 @@
     },
     {
       "path": "docs/adr/0006-v0.2-correctness-first-release-scope.md",
-      "blob_oid": "351432df666b2a26ba8124610d414eae2842f18a"
+      "blob_oid": "faab8d445b72227ff362c4c49937cc9628b9fe7e"
     }
   ]
 }
