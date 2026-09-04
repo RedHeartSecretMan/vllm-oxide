@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "55ed88582e816cf4bb1327970daff0e4ce8708d1"
+      "blob_oid": "3215b3b7b8518b6341deacbaa768cd0c2679beeb"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -40,6 +40,10 @@
     {
       "path": "docs/adr/0008-request-identity-and-output-order.md",
       "blob_oid": "b5d5fa0227bb90fcded1e5a226efa35616bfb420"
+    },
+    {
+      "path": "docs/adr/0009-sampling-params-validation-and-diagnostics.md",
+      "blob_oid": "e9e46d6f32d8c35f302276558623ed6a59592f96"
     }
   ]
 }

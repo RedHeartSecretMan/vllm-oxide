@@ -114,7 +114,7 @@ Per-request result: `{ request_id: usize, text: String, token_ids: Vec<u32>, fin
 _Avoid_: generation result, completion output.
 
 **SamplingParams**:
-Per-prompt sampling configuration: `temperature` (0 ≡ greedy), `top_k`, `top_p`, `max_tokens`, `ignore_eos`, `presence_penalty`/`frequency_penalty`/`repetition_penalty`. Lives in `sampler.rs` (M1 placement per ADR-0004).
+The validated per-request token-selection and completion-stopping policy. One complete value remains associated with the stable request identity for the request lifetime rather than being reconstructed from scheduler scalars.
 _Avoid_: generation config, decode params, sampling config.
 
 **EngineOptions**:
