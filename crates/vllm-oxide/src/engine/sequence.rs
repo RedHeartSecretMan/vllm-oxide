@@ -1,7 +1,8 @@
 //! V1 sequence data model — `Sequence`, `SequenceStatus` (ADR-0004 M2).
 //!
-//! Mirrors `nano-vllm/nanovllm/engine/sequence.py` field-for-field, but with
-//! `seq_id` and `request_id` as constructor parameters (no global counters).
+//! Follows `nano-vllm/nanovllm/engine/sequence.py` for lifecycle and token
+//! state, with explicit `seq_id` / `request_id` constructor parameters and one
+//! complete request-owned `SamplingParams` value.
 //! The former 1:1 `SequenceGroup` wrapper has been absorbed into `Sequence`
 //! itself — it added delegation without depth (n>1 sampling, deferred to v0.2,
 //! will reintroduce grouping deliberately).
@@ -9,7 +10,7 @@
 //! # V1 three-layer split (ADR-0004)
 //!
 //! In V1 the data model lives below the scheduler: `Sequence` owns its
-//! `block_table` and sampling scalars; `BlockPool` owns the physical block
+//! `block_table` and `SamplingParams`; `BlockPool` owns the physical block
 //! lifetime; `KVCacheManager` is the only scheduler-facing seam. This file
 //! contains the leaf types that all three layers reference.
 
@@ -32,9 +33,9 @@ pub enum SequenceStatus {
 
 /// Per-sequence state — the V1 data-model leaf (ADR-0004 M2).
 ///
-/// Mirrors `nanovllm.engine.sequence.Sequence` field-for-field, diverging only
-/// in taking `seq_id` as a constructor param (no global counter). Owns its
-/// `block_table` and copies of sampling scalars from `SamplingParams`.
+/// Follows `nanovllm.engine.sequence.Sequence` for lifecycle and token state,
+/// while owning its `block_table` and one complete immutable `SamplingParams`
+/// value. Identifiers are constructor parameters rather than global counters.
 ///
 /// # Block slicing
 ///
@@ -54,10 +55,7 @@ pub struct Sequence {
     pub(crate) num_scheduled_tokens: usize,
     pub(crate) is_prefill: bool,
     pub(crate) block_table: Vec<usize>,
-    // Attached sampling scalars (V1 — Sequence owns copies, not a SamplingParams ref).
-    pub(crate) temperature: f32,
-    pub(crate) max_tokens: usize,
-    pub(crate) ignore_eos: bool,
+    sampling_params: SamplingParams,
 }
 
 impl Sequence {
@@ -65,8 +63,8 @@ impl Sequence {
     ///
     /// `request_id` identifies the logical inference request; `seq_id` is the
     /// unique sequence counter (EngineCore/Scheduler owns both counters).
-    /// Sampling scalars are read from `params` so the engine loop can access
-    /// them without a `SamplingParams` ref.
+    /// Sampling parameters are cloned once so every request keeps the complete
+    /// validated value for its scheduler lifetime.
     pub fn new(
         request_id: usize,
         seq_id: usize,
@@ -87,9 +85,7 @@ impl Sequence {
             num_scheduled_tokens: 0,
             is_prefill: true,
             block_table: Vec::new(),
-            temperature: params.temperature,
-            max_tokens: params.max_tokens,
-            ignore_eos: params.ignore_eos,
+            sampling_params: params.clone(),
         }
     }
 
@@ -145,6 +141,11 @@ impl Sequence {
     /// The logical request id that this sequence belongs to.
     pub fn request_id(&self) -> usize {
         self.request_id
+    }
+
+    /// The complete validated sampling policy owned by this request.
+    pub(crate) fn sampling_params(&self) -> &SamplingParams {
+        &self.sampling_params
     }
 
     /// Number of completion tokens generated so far (total − prompt).

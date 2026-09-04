@@ -224,12 +224,7 @@ impl Scheduler {
                 token_budget,
                 cache,
                 sampling_allowed,
-                sampling_params: SamplingParams {
-                    temperature: sequence.temperature,
-                    max_tokens: sequence.max_tokens,
-                    ignore_eos: sequence.ignore_eos,
-                    ..SamplingParams::default()
-                },
+                sampling_params: sequence.sampling_params().clone(),
                 token_history: sequence.token_ids.clone(),
             });
         }
@@ -385,10 +380,19 @@ impl Scheduler {
 
             if let Some(token_id) = executed.sampled_token {
                 sequence.append_token(token_id);
-                let hit_max_tokens = sequence.num_completion_tokens() >= sequence.max_tokens;
-                let hit_eos = self.eos_token_ids.contains(&token_id) && !sequence.ignore_eos;
+                let hit_max_tokens =
+                    sequence.num_completion_tokens() >= sequence.sampling_params().max_tokens;
+                let hit_eos = self.eos_token_ids.contains(&token_id)
+                    && !sequence.sampling_params().ignore_eos;
                 if hit_max_tokens || hit_eos {
                     sequence.status = SequenceStatus::Finished;
+                    tracing::debug!(
+                        request_id = sequence.request_id,
+                        sampling_params = ?sequence.sampling_params(),
+                        hit_eos,
+                        hit_max_tokens,
+                        "request completed"
+                    );
                     finished_sequence_ids.push(sequence.seq_id);
                     outputs.push(RequestOutput {
                         request_id: sequence.request_id,

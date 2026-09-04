@@ -214,15 +214,20 @@ impl LLM {
         prompts: &[Prompt],
         sampling_params: &[SamplingParams],
     ) -> Result<Vec<RequestOutput>> {
-        if prompts.is_empty() {
-            return Ok(Vec::new());
-        }
         if sampling_params.len() != prompts.len() {
             bail!(
                 "generate: expected {} sampling_params, got {}",
                 prompts.len(),
                 sampling_params.len(),
             );
+        }
+        for (batch_position, params) in sampling_params.iter().enumerate() {
+            params
+                .validate()
+                .map_err(|error| anyhow!("generate: sampling_params[{batch_position}]{error}"))?;
+        }
+        if prompts.is_empty() {
+            return Ok(Vec::new());
         }
 
         let mut prompt_lens: Vec<usize> = Vec::with_capacity(prompts.len());
@@ -241,19 +246,35 @@ impl LLM {
         let mut completed_outputs = Vec::with_capacity(prompts.len());
 
         while self.engine.is_running() {
-            let outputs = self.engine.step()?;
+            let outputs = self.engine.step().with_context(|| {
+                format!(
+                    "generate: runtime failure for {}",
+                    format_request_diagnostics(&request_ids, sampling_params)
+                )
+            })?;
             step_count += 1;
 
             completed_outputs.extend(outputs);
         }
 
         let elapsed = start.elapsed();
-        let mut results = order_request_outputs(&request_ids, completed_outputs)?;
-        for output in &mut results {
+        let mut results =
+            order_request_outputs(&request_ids, completed_outputs).with_context(|| {
+                format!(
+                    "generate: completion failure for {}",
+                    format_request_diagnostics(&request_ids, sampling_params)
+                )
+            })?;
+        for (output, params) in results.iter_mut().zip(sampling_params) {
             output.text = self
                 .tokenizer
                 .decode(&output.token_ids, true)
-                .map_err(|e| anyhow!("detokenization failed: {e}"))?;
+                .map_err(|error| {
+                    anyhow!(
+                        "generate: detokenization failed for request_id={}, sampling_params={params:?}: {error}",
+                        output.request_id
+                    )
+                })?;
         }
         let total_tokens: usize = prompt_lens.iter().sum::<usize>()
             + results.iter().map(|o| o.token_ids.len()).sum::<usize>();
@@ -318,6 +339,15 @@ impl LLM {
         let refs: Vec<&candle_core::Tensor> = logits_list.iter().collect();
         Ok(candle_core::Tensor::cat(&refs, 0)?)
     }
+}
+
+fn format_request_diagnostics(request_ids: &[usize], sampling_params: &[SamplingParams]) -> String {
+    request_ids
+        .iter()
+        .zip(sampling_params)
+        .map(|(request_id, params)| format!("request_id={request_id}, sampling_params={params:?}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn order_request_outputs(
@@ -481,6 +511,10 @@ mod tests {
         fail_forward: bool,
     }
 
+    struct ControlledLogitsModel {
+        device: Device,
+    }
+
     struct CacheAwareModel {
         device: Device,
         attn_ctx: AttentionContext,
@@ -613,6 +647,34 @@ mod tests {
         }
     }
 
+    impl CausalLM for ControlledLogitsModel {
+        fn forward(
+            &mut self,
+            input_ids: &Tensor,
+            _positions: &Tensor,
+        ) -> candle_core::Result<Tensor> {
+            Tensor::zeros((input_ids.dim(0)?, 1), DType::F32, &self.device)
+        }
+
+        fn compute_logits(&self, hidden_states: &Tensor) -> candle_core::Result<Tensor> {
+            let rows = hidden_states.dim(0)?;
+            let mut logits = vec![-100.0_f32; rows * 100];
+            for row in 0..rows {
+                logits[row * 100 + 2] = 2.0;
+                logits[row * 100 + 3] = 3.0;
+            }
+            Tensor::from_vec(logits, (rows, 100), &self.device)
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+    }
+
     fn finish_test_llm(
         engine: EngineCore,
         paged_kv: Arc<Mutex<PagedKVCache>>,
@@ -681,6 +743,31 @@ mod tests {
 
     fn test_llm() -> LLM {
         test_llm_with_forward_failure(false)
+    }
+
+    fn controlled_logits_test_llm(eos_token_ids: Vec<u32>) -> LLM {
+        let device = Device::Cpu;
+        let paged_kv = Arc::new(Mutex::new(
+            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
+        ));
+        let attn_ctx = AttentionContext {
+            paged_kv: paged_kv.clone(),
+            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+        };
+        let scheduler = Scheduler::new_with_eos_token_ids(16, 16, 0.9, eos_token_ids);
+        let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        let model: Box<dyn CausalLM> = Box::new(ControlledLogitsModel {
+            device: device.clone(),
+        });
+        let engine = EngineCore::new(
+            scheduler,
+            kv_cache_manager,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device.clone(),
+        );
+        finish_test_llm(engine, paged_kv, device)
     }
 
     fn cache_aware_test_llm(run_warmup: bool) -> LLM {
@@ -1069,13 +1156,52 @@ mod tests {
         }
     }
 
-    mod generate_errors {
+    mod generate_sampling_params {
         use super::*;
 
         #[test]
-        fn model_execution_failure_is_returned_as_an_error() {
-            let mut llm = test_llm_with_forward_failure(true);
+        fn presence_penalty_reaches_sampling_through_generate() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![3])],
+                    &[SamplingParams {
+                        presence_penalty: 2.0,
+                        max_tokens: 1,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+
+            assert_eq!(output[0].token_ids, vec![2]);
+        }
+
+        #[test]
+        fn invalid_batch_is_rejected_before_any_request_is_admitted() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
             let error = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1]), Prompt::TokenIds(vec![2])],
+                    &[
+                        SamplingParams {
+                            max_tokens: 1,
+                            ..SamplingParams::default()
+                        },
+                        SamplingParams {
+                            temperature: -0.5,
+                            max_tokens: 1,
+                            ..SamplingParams::default()
+                        },
+                    ],
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "generate: sampling_params[1].temperature=-0.5 is invalid: must be greater than or equal to 0"
+            );
+
+            let output = llm
                 .generate(
                     &[Prompt::TokenIds(vec![1])],
                     &[SamplingParams {
@@ -1083,11 +1209,384 @@ mod tests {
                         ..SamplingParams::default()
                     }],
                 )
+                .unwrap();
+            assert_eq!(output[0].request_id, 0);
+        }
+
+        #[test]
+        fn temperature_reaches_sampling_through_generate() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let prompts = vec![Prompt::TokenIds(vec![1]); 16];
+            let params = vec![
+                SamplingParams {
+                    temperature: f32::INFINITY,
+                    max_tokens: 1,
+                    ..SamplingParams::default()
+                };
+                prompts.len()
+            ];
+            let output = llm.generate(&prompts, &params).unwrap();
+
+            assert!(
+                output.iter().any(|request| request.token_ids != vec![3]),
+                "positive infinity must preserve the uniform pre-filter path"
+            );
+        }
+
+        #[test]
+        fn top_k_reaches_sampling_through_generate() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[SamplingParams {
+                        temperature: f32::INFINITY,
+                        top_k: Some(1),
+                        max_tokens: 1,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+
+            assert_eq!(output[0].token_ids, vec![3]);
+        }
+
+        #[test]
+        fn top_p_reaches_sampling_through_generate() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[SamplingParams {
+                        temperature: 1.0,
+                        top_p: Some(0.5),
+                        max_tokens: 1,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+
+            assert_eq!(output[0].token_ids, vec![3]);
+        }
+
+        #[test]
+        fn frequency_penalty_reaches_sampling_through_generate() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![3, 3])],
+                    &[SamplingParams {
+                        frequency_penalty: 0.75,
+                        max_tokens: 1,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+
+            assert_eq!(output[0].token_ids, vec![2]);
+        }
+
+        #[test]
+        fn repetition_penalty_reaches_sampling_through_generate() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![3])],
+                    &[SamplingParams {
+                        repetition_penalty: 2.0,
+                        max_tokens: 1,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+
+            assert_eq!(output[0].token_ids, vec![2]);
+        }
+
+        #[test]
+        fn max_tokens_counts_only_completion_tokens() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1, 1, 1, 1])],
+                    &[SamplingParams {
+                        max_tokens: 3,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+
+            assert_eq!(output[0].token_ids, vec![3, 3, 3]);
+        }
+
+        #[test]
+        fn ignore_eos_only_bypasses_resolved_eos() {
+            let mut stops_on_eos = controlled_logits_test_llm(vec![3]);
+            let stopped = stops_on_eos
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[SamplingParams {
+                        max_tokens: 2,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+            assert_eq!(stopped[0].token_ids, vec![3]);
+
+            let mut ignores_eos = controlled_logits_test_llm(vec![3]);
+            let ignored = ignores_eos
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[SamplingParams {
+                        max_tokens: 2,
+                        ignore_eos: true,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+            assert_eq!(ignored[0].token_ids, vec![3, 3]);
+        }
+
+        #[test]
+        fn valid_fields_compose_without_cross_request_contamination() {
+            let mut llm = controlled_logits_test_llm(vec![3]);
+            let output = llm
+                .generate(
+                    &[
+                        Prompt::TokenIds(vec![1]),
+                        Prompt::TokenIds(vec![3]),
+                        Prompt::TokenIds(vec![1]),
+                    ],
+                    &[
+                        SamplingParams {
+                            max_tokens: 1,
+                            ..SamplingParams::default()
+                        },
+                        SamplingParams {
+                            presence_penalty: 2.0,
+                            max_tokens: 2,
+                            ignore_eos: true,
+                            ..SamplingParams::default()
+                        },
+                        SamplingParams {
+                            temperature: 0.0,
+                            top_k: Some(1),
+                            top_p: Some(0.01),
+                            max_tokens: 3,
+                            ignore_eos: true,
+                            ..SamplingParams::default()
+                        },
+                    ],
+                )
+                .unwrap();
+
+            assert_eq!(output[0].token_ids, vec![3]);
+            assert_eq!(output[1].token_ids, vec![2, 3]);
+            assert_eq!(output[2].token_ids, vec![3, 3, 3]);
+        }
+
+        #[test]
+        fn greedy_is_deterministic_for_repeated_calls_on_one_resolved_model() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let prompt = [Prompt::TokenIds(vec![3])];
+            let params = [SamplingParams {
+                temperature: 0.0,
+                top_k: Some(100),
+                top_p: Some(0.01),
+                max_tokens: 3,
+                ignore_eos: true,
+                presence_penalty: 0.25,
+                frequency_penalty: 0.5,
+                repetition_penalty: 1.25,
+            }];
+
+            let first = llm.generate(&prompt, &params).unwrap();
+            let second = llm.generate(&prompt, &params).unwrap();
+
+            assert_eq!(first[0].token_ids, second[0].token_ids);
+            assert_eq!(first[0].text, second[0].text);
+        }
+
+        #[test]
+        fn every_invalid_field_reports_position_value_and_reason() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let invalid_cases = [
+                (
+                    SamplingParams {
+                        temperature: f32::NAN,
+                        ..SamplingParams::default()
+                    },
+                    "temperature=NaN",
+                    "must not be NaN",
+                ),
+                (
+                    SamplingParams {
+                        top_k: Some(0),
+                        ..SamplingParams::default()
+                    },
+                    "top_k=0",
+                    "must be at least 1 when set",
+                ),
+                (
+                    SamplingParams {
+                        top_p: Some(f32::INFINITY),
+                        ..SamplingParams::default()
+                    },
+                    "top_p=inf",
+                    "must be finite",
+                ),
+                (
+                    SamplingParams {
+                        top_p: Some(0.0),
+                        ..SamplingParams::default()
+                    },
+                    "top_p=0.0",
+                    "must be in (0, 1]",
+                ),
+                (
+                    SamplingParams {
+                        top_p: Some(1.1),
+                        ..SamplingParams::default()
+                    },
+                    "top_p=1.1",
+                    "must be in (0, 1]",
+                ),
+                (
+                    SamplingParams {
+                        presence_penalty: 2.1,
+                        ..SamplingParams::default()
+                    },
+                    "presence_penalty=2.1",
+                    "must be in [-2, 2]",
+                ),
+                (
+                    SamplingParams {
+                        presence_penalty: f32::NAN,
+                        ..SamplingParams::default()
+                    },
+                    "presence_penalty=NaN",
+                    "must be finite",
+                ),
+                (
+                    SamplingParams {
+                        frequency_penalty: f32::NEG_INFINITY,
+                        ..SamplingParams::default()
+                    },
+                    "frequency_penalty=-inf",
+                    "must be finite",
+                ),
+                (
+                    SamplingParams {
+                        frequency_penalty: -2.1,
+                        ..SamplingParams::default()
+                    },
+                    "frequency_penalty=-2.1",
+                    "must be in [-2, 2]",
+                ),
+                (
+                    SamplingParams {
+                        repetition_penalty: -0.1,
+                        ..SamplingParams::default()
+                    },
+                    "repetition_penalty=-0.1",
+                    "must be greater than or equal to 0",
+                ),
+                (
+                    SamplingParams {
+                        repetition_penalty: f32::INFINITY,
+                        ..SamplingParams::default()
+                    },
+                    "repetition_penalty=inf",
+                    "must be finite",
+                ),
+                (
+                    SamplingParams {
+                        max_tokens: 0,
+                        ..SamplingParams::default()
+                    },
+                    "max_tokens=0",
+                    "must be at least 1",
+                ),
+            ];
+
+            for (params, field_and_value, reason) in invalid_cases {
+                let error = llm
+                    .generate(&[Prompt::TokenIds(vec![1])], &[params])
+                    .unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains("sampling_params[0]"), "{message}");
+                assert!(message.contains(field_and_value), "{message}");
+                assert!(message.contains(reason), "{message}");
+            }
+
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[SamplingParams {
+                        max_tokens: 1,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+            assert_eq!(output[0].request_id, 0);
+        }
+
+        #[test]
+        fn accepted_boundary_values_are_not_rejected() {
+            let mut llm = controlled_logits_test_llm(Vec::new());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![2])],
+                    &[SamplingParams {
+                        temperature: f32::INFINITY,
+                        top_k: Some(1_000),
+                        top_p: Some(1.0),
+                        max_tokens: 1,
+                        ignore_eos: true,
+                        presence_penalty: -2.0,
+                        frequency_penalty: 2.0,
+                        repetition_penalty: 0.0,
+                    }],
+                )
+                .unwrap();
+
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].token_ids.len(), 1);
+        }
+    }
+
+    mod generate_errors {
+        use super::*;
+
+        #[test]
+        fn model_execution_failure_is_returned_as_an_error() {
+            let mut llm = test_llm_with_forward_failure(true);
+            let params = SamplingParams {
+                temperature: 0.75,
+                top_k: Some(8),
+                top_p: Some(0.9),
+                max_tokens: 3,
+                ignore_eos: true,
+                presence_penalty: 0.25,
+                frequency_penalty: -0.5,
+                repetition_penalty: 1.25,
+            };
+            let error = llm
+                .generate(&[Prompt::TokenIds(vec![1])], &[params])
                 .unwrap_err();
 
-            assert!(error
-                .to_string()
-                .contains("injected model execution failure"));
+            let message = format!("{error:#}");
+            assert!(message.contains("injected model execution failure"));
+            assert!(message.contains("request_id=0"));
+            assert!(message.contains("temperature: 0.75"));
+            assert!(message.contains("top_k: Some(8)"));
+            assert!(message.contains("top_p: Some(0.9)"));
+            assert!(message.contains("max_tokens: 3"));
+            assert!(message.contains("ignore_eos: true"));
+            assert!(message.contains("presence_penalty: 0.25"));
+            assert!(message.contains("frequency_penalty: -0.5"));
+            assert!(message.contains("repetition_penalty: 1.25"));
+            assert!(!message.contains("sequence_id"));
         }
     }
 }

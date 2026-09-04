@@ -17,6 +17,8 @@
 //! on T8 property tests — goldens validate the model forward pass
 //! (pre-sampling logits), NOT sampling.
 
+use std::fmt;
+
 use candle_core::{DType, Error as CandleError, Result, Tensor};
 use rand::SeedableRng;
 use rand_distr::{Distribution, Gumbel};
@@ -33,44 +35,45 @@ use rand_distr::{Distribution, Gumbel};
 /// accepts them user-facing (ADR-0004 M1).
 #[derive(Debug, Clone)]
 pub struct SamplingParams {
-    /// Softmax temperature. `0.0` short-circuits to greedy argmax. Range
-    /// `[0, +∞)`. nano-vllm asserts `> 1e-10`; v0.1 supports 0.
+    /// Softmax temperature. `0.0` short-circuits to greedy argmax. NaN and
+    /// negative values are rejected; positive infinity is the uniform
+    /// pre-filter corner case. nano-vllm asserts `> 1e-10`; v0.1 supports 0.
     pub temperature: f32,
 
     /// Top-k truncation: keep only the `k` highest-logit tokens, mask the
     /// rest to probability 0. `Some(1)` is equivalent to greedy (forces
-    /// argmax). `None` disables truncation.
+    /// argmax). Values must be at least one; values at least as large as the
+    /// vocabulary are a no-op. `None` disables truncation.
     pub top_k: Option<usize>,
 
     /// Top-p (nucleus) truncation: keep the smallest token set whose
     /// cumulative probability ≥ `p`. `None` disables. Typical: `0.9`.
-    /// Must be in `(0.0, 1.0]` when `Some`; `Some(1.0)` is a no-op.
+    /// Must be finite and in `(0.0, 1.0]` when `Some`; `Some(1.0)` is a no-op.
     pub top_p: Option<f32>,
 
-    /// Maximum tokens to generate. Enforced by the engine loop (#21), not
-    /// by [`Sampler`]. Lives here because it travels with the per-prompt
-    /// sampling config.
+    /// Maximum completion tokens to generate. Must be at least one. Enforced
+    /// by the engine loop (#21), not by [`Sampler`].
     pub max_tokens: usize,
 
-    /// If `true`, do not stop generation when the sampler returns an EOS
-    /// token. Enforced by the engine loop (#21).
+    /// If `true`, do not stop generation when the sampler returns a resolved
+    /// EOS token. The `max_tokens` limit still applies. Enforced by the engine
+    /// loop (#21).
     pub ignore_eos: bool,
 
     /// Additive presence penalty: subtract this from the logit of any token
     /// that has appeared at least once in the sequence. `0.0` = no-op
-    /// (default). Positive discourages repetition.
+    /// (default). Must be finite in `[-2, 2]`; positive discourages repetition.
     pub presence_penalty: f32,
 
     /// Additive frequency penalty: subtract `frequency_penalty * count` from
     /// the logit of a token that has appeared `count` times. `0.0` = no-op
-    /// (default). Positive discourages repetition.
+    /// (default). Must be finite in `[-2, 2]`; positive discourages repetition.
     pub frequency_penalty: f32,
 
     /// Multiplicative repetition penalty: divide the logit of any previously
     /// seen token by this value. `0.0` = no-op (default, treated as skip);
-    /// `> 1.0` discourages repetition, `< 1.0` encourages it. This matches
-    /// the issue #17 "defaults 0" convention; the standard HF convention of
-    /// `1.0 = no-op` is recovered by passing `1.0` explicitly.
+    /// positive values retain the accepted sampler meaning. Must be finite and
+    /// non-negative. This matches Issue #17's `0 = no-op` convention.
     pub repetition_penalty: f32,
 }
 
@@ -90,6 +93,73 @@ impl Default for SamplingParams {
 }
 
 impl SamplingParams {
+    /// Validate the complete public sampling contract before request admission.
+    pub(crate) fn validate(&self) -> std::result::Result<(), SamplingParamsValidationError> {
+        if self.temperature.is_nan() {
+            return Err(SamplingParamsValidationError::new(
+                "temperature",
+                self.temperature,
+                "must not be NaN",
+            ));
+        }
+        if self.temperature < 0.0 {
+            return Err(SamplingParamsValidationError::new(
+                "temperature",
+                self.temperature,
+                "must be greater than or equal to 0",
+            ));
+        }
+        if let Some(top_k) = self.top_k {
+            if top_k == 0 {
+                return Err(SamplingParamsValidationError::new(
+                    "top_k",
+                    top_k,
+                    "must be at least 1 when set",
+                ));
+            }
+        }
+        if let Some(top_p) = self.top_p {
+            if !top_p.is_finite() {
+                return Err(SamplingParamsValidationError::new(
+                    "top_p",
+                    top_p,
+                    "must be finite",
+                ));
+            }
+            if !(0.0..=1.0).contains(&top_p) || top_p == 0.0 {
+                return Err(SamplingParamsValidationError::new(
+                    "top_p",
+                    top_p,
+                    "must be in (0, 1]",
+                ));
+            }
+        }
+        validate_additive_penalty("presence_penalty", self.presence_penalty)?;
+        validate_additive_penalty("frequency_penalty", self.frequency_penalty)?;
+        if !self.repetition_penalty.is_finite() {
+            return Err(SamplingParamsValidationError::new(
+                "repetition_penalty",
+                self.repetition_penalty,
+                "must be finite",
+            ));
+        }
+        if self.repetition_penalty < 0.0 {
+            return Err(SamplingParamsValidationError::new(
+                "repetition_penalty",
+                self.repetition_penalty,
+                "must be greater than or equal to 0",
+            ));
+        }
+        if self.max_tokens == 0 {
+            return Err(SamplingParamsValidationError::new(
+                "max_tokens",
+                self.max_tokens,
+                "must be at least 1",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether this params config triggers the greedy argmax short-circuit:
     /// `temperature == 0` OR `top_k == Some(1)`. Both are equivalent paths to
     /// deterministic argmax — listed separately in the issue #17 acceptance
@@ -107,6 +177,56 @@ impl SamplingParams {
             || self.repetition_penalty != 0.0
     }
 }
+
+fn validate_additive_penalty(
+    field: &'static str,
+    value: f32,
+) -> std::result::Result<(), SamplingParamsValidationError> {
+    if !value.is_finite() {
+        return Err(SamplingParamsValidationError::new(
+            field,
+            value,
+            "must be finite",
+        ));
+    }
+    if !(-2.0..=2.0).contains(&value) {
+        return Err(SamplingParamsValidationError::new(
+            field,
+            value,
+            "must be in [-2, 2]",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SamplingParamsValidationError {
+    field: &'static str,
+    value: String,
+    reason: &'static str,
+}
+
+impl SamplingParamsValidationError {
+    fn new(field: &'static str, value: impl fmt::Debug, reason: &'static str) -> Self {
+        Self {
+            field,
+            value: format!("{value:?}"),
+            reason,
+        }
+    }
+}
+
+impl fmt::Display for SamplingParamsValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            ".{}={} is invalid: {}",
+            self.field, self.value, self.reason
+        )
+    }
+}
+
+impl std::error::Error for SamplingParamsValidationError {}
 
 /// Single-step categorical sampler. Stateless across steps; holds only an RNG
 /// for the Gumbel-max noise source.
