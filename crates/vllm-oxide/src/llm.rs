@@ -521,6 +521,145 @@ mod tests {
         physical_tokens: Arc<Mutex<HashMap<usize, u32>>>,
     }
 
+    struct CausalFingerprintModel {
+        device: Device,
+        attn_ctx: AttentionContext,
+        physical_tokens: HashMap<usize, u32>,
+    }
+
+    impl CausalFingerprintModel {
+        fn push_fingerprint(fingerprint: u8, token_id: u32) -> u8 {
+            let fingerprint = u32::from(fingerprint)
+                .wrapping_mul(31)
+                .wrapping_add(token_id.wrapping_add(1))
+                % 97;
+            u8::try_from(fingerprint).unwrap()
+        }
+
+        fn paged_token(
+            &self,
+            block_table: &[i32],
+            block_size: usize,
+            logical_position: usize,
+        ) -> candle_core::Result<u32> {
+            let block_id = *block_table
+                .get(logical_position / block_size)
+                .ok_or_else(|| {
+                    candle_core::Error::Msg("causal model block table is too short".into())
+                })?;
+            let block_id = usize::try_from(block_id)
+                .map_err(|_| candle_core::Error::Msg("causal model block id is negative".into()))?;
+            let physical_slot = block_id
+                .checked_mul(block_size)
+                .and_then(|base| base.checked_add(logical_position % block_size))
+                .ok_or_else(|| {
+                    candle_core::Error::Msg("causal model physical slot overflow".into())
+                })?;
+            self.physical_tokens
+                .get(&physical_slot)
+                .copied()
+                .ok_or_else(|| {
+                    candle_core::Error::Msg("causal model read an unwritten cache slot".into())
+                })
+        }
+    }
+
+    impl CausalLM for CausalFingerprintModel {
+        fn forward(
+            &mut self,
+            input_ids: &Tensor,
+            positions: &Tensor,
+        ) -> candle_core::Result<Tensor> {
+            let input_ids = input_ids.to_vec1::<u32>()?;
+            let positions = positions.to_vec1::<u32>()?;
+            let metadata = self.attn_ctx.attn_meta.lock().unwrap().clone();
+            if input_ids.len() != positions.len() || input_ids.len() != metadata.slot_mapping.len()
+            {
+                candle_core::bail!("causal model received inconsistent step metadata");
+            }
+
+            for (&token_id, &slot) in input_ids.iter().zip(&metadata.slot_mapping) {
+                let slot = usize::try_from(slot).map_err(|_| {
+                    candle_core::Error::Msg("causal model received a negative slot".into())
+                })?;
+                self.physical_tokens.insert(slot, token_id);
+            }
+
+            let batch_size = metadata.cu_seqlens_q.len().saturating_sub(1);
+            if metadata.cu_seqlens_k.len() != batch_size + 1 {
+                candle_core::bail!("causal model received inconsistent sequence lengths");
+            }
+            let mut hidden = Vec::with_capacity(input_ids.len());
+            if !metadata.uses_paged_kv() {
+                if metadata.cu_seqlens_q != metadata.cu_seqlens_k {
+                    candle_core::bail!(
+                        "initial prefill cannot consume an existing paged prefix in #37"
+                    );
+                }
+                for sequence_index in 0..batch_size {
+                    let query_start = metadata.cu_seqlens_q[sequence_index] as usize;
+                    let query_end = metadata.cu_seqlens_q[sequence_index + 1] as usize;
+                    let mut fingerprint = 0;
+                    for &token_id in &input_ids[query_start..query_end] {
+                        fingerprint = Self::push_fingerprint(fingerprint, token_id);
+                        hidden.push(f32::from(fingerprint));
+                    }
+                }
+            } else {
+                if metadata.block_table.len() != batch_size {
+                    candle_core::bail!("causal model received inconsistent block tables");
+                }
+                let block_size = self.attn_ctx.paged_kv.lock().unwrap().block_size();
+                for sequence_index in 0..batch_size {
+                    let query_start = metadata.cu_seqlens_q[sequence_index] as usize;
+                    let query_end = metadata.cu_seqlens_q[sequence_index + 1] as usize;
+                    let query_len = query_end - query_start;
+                    let key_start = metadata.cu_seqlens_k[sequence_index] as usize;
+                    let key_end = metadata.cu_seqlens_k[sequence_index + 1] as usize;
+                    let key_len = key_end - key_start;
+                    if query_len > key_len {
+                        candle_core::bail!("causal model query is longer than its KV context");
+                    }
+                    for query_offset in 0..query_len {
+                        let context_len = key_len - query_len + query_offset + 1;
+                        let mut fingerprint = 0;
+                        for logical_position in 0..context_len {
+                            let token_id = self.paged_token(
+                                &metadata.block_table[sequence_index],
+                                block_size,
+                                logical_position,
+                            )?;
+                            fingerprint = Self::push_fingerprint(fingerprint, token_id);
+                        }
+                        hidden.push(f32::from(fingerprint));
+                    }
+                }
+            }
+
+            Tensor::from_vec(hidden, (input_ids.len(), 1), &self.device)
+        }
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        fn compute_logits(&self, hidden_states: &Tensor) -> candle_core::Result<Tensor> {
+            let rows = hidden_states.dim(0)?;
+            let hidden = hidden_states.flatten_all()?.to_vec1::<f32>()?;
+            let mut logits = vec![-100.0_f32; rows * 100];
+            for (row, value) in hidden.into_iter().enumerate() {
+                let target = value.round() as usize % 100;
+                logits[row * 100 + target] = 100.0;
+            }
+            Tensor::from_vec(logits, (rows, 100), &self.device)
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+    }
+
     impl CausalLM for CacheAwareModel {
         #[allow(clippy::cast_precision_loss)]
         fn forward(
@@ -834,6 +973,33 @@ mod tests {
         finish_test_llm(engine, paged_kv, device)
     }
 
+    fn causal_fingerprint_test_llm(max_num_batched_tokens: usize) -> LLM {
+        let device = Device::Cpu;
+        let paged_kv = Arc::new(Mutex::new(
+            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
+        ));
+        let attn_ctx = AttentionContext {
+            paged_kv: paged_kv.clone(),
+            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
+        };
+        let scheduler = Scheduler::new(max_num_batched_tokens, 16, 0.9);
+        let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, paged_kv.clone());
+        let model: Box<dyn CausalLM> = Box::new(CausalFingerprintModel {
+            device: device.clone(),
+            attn_ctx: attn_ctx.clone(),
+            physical_tokens: HashMap::new(),
+        });
+        let engine = EngineCore::new(
+            scheduler,
+            kv_cache_manager,
+            model,
+            Sampler::new_with_seed(0),
+            attn_ctx,
+            device.clone(),
+        );
+        finish_test_llm(engine, paged_kv, device)
+    }
+
     mod engine_options {
         use super::*;
 
@@ -891,6 +1057,79 @@ mod tests {
             assert_eq!(warmed_output[0].token_ids, reference_output[0].token_ids);
             assert_eq!(warmed_output[0].text, reference_output[0].text);
             assert_eq!(warmed_output[0].finished, reference_output[0].finished);
+        }
+    }
+
+    mod chunked_prefill {
+        use super::*;
+
+        fn deterministic_params(max_tokens: usize) -> SamplingParams {
+            SamplingParams {
+                temperature: 0.0,
+                top_k: Some(5),
+                top_p: Some(0.9),
+                max_tokens,
+                ignore_eos: true,
+                presence_penalty: 0.0,
+                frequency_penalty: 0.0,
+                repetition_penalty: 1.0,
+            }
+        }
+
+        #[test]
+        fn chunked_generate_matches_equivalent_unchunked_generation() {
+            let prompt = [Prompt::TokenIds(vec![7, 11, 13, 17, 19])];
+            let params = [deterministic_params(3)];
+            let mut chunked = causal_fingerprint_test_llm(2);
+            let mut unchunked = causal_fingerprint_test_llm(32);
+
+            let chunked_output = chunked.generate(&prompt, &params).unwrap();
+            let unchunked_output = unchunked.generate(&prompt, &params).unwrap();
+
+            assert_eq!(chunked_output.len(), 1);
+            assert_eq!(chunked_output[0].request_id, 0);
+            assert!(chunked_output[0].finished);
+            assert_eq!(chunked_output[0].token_ids.len(), 3);
+            assert_eq!(chunked_output[0].token_ids, unchunked_output[0].token_ids);
+            assert_eq!(chunked_output[0].text, unchunked_output[0].text);
+        }
+
+        #[test]
+        fn mixed_chunked_generate_preserves_identity_order_and_per_request_output() {
+            let prompts = [
+                Prompt::TokenIds(vec![2]),
+                Prompt::TokenIds(vec![7, 11, 13, 17, 19]),
+                Prompt::TokenIds(vec![23, 29, 31]),
+            ];
+            let params = [
+                deterministic_params(1),
+                deterministic_params(2),
+                deterministic_params(3),
+            ];
+            let mut mixed = causal_fingerprint_test_llm(3);
+
+            let mixed_outputs = mixed.generate(&prompts, &params).unwrap();
+
+            assert_eq!(
+                mixed_outputs
+                    .iter()
+                    .map(|output| output.request_id)
+                    .collect::<Vec<_>>(),
+                vec![0, 1, 2]
+            );
+            for (input_position, (prompt, params)) in prompts.iter().zip(params.iter()).enumerate()
+            {
+                let mut isolated = causal_fingerprint_test_llm(32);
+                let isolated_output = isolated
+                    .generate(std::slice::from_ref(prompt), std::slice::from_ref(params))
+                    .unwrap();
+                assert!(mixed_outputs[input_position].finished);
+                assert_eq!(
+                    mixed_outputs[input_position].token_ids,
+                    isolated_output[0].token_ids
+                );
+                assert_eq!(mixed_outputs[input_position].text, isolated_output[0].text);
+            }
         }
     }
 

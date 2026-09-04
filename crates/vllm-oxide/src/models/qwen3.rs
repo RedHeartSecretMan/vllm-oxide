@@ -204,10 +204,10 @@ impl Qwen3Attention {
         let bs = pkv.block_size();
         drop(pkv);
         let scale = 1.0_f32 / (self.head_dim as f32).sqrt();
-        let out = if meta.is_prefill {
+        let out = if meta.is_prefill && !meta.uses_paged_kv() {
             crate::attention::flash_attn::prefill_attn(q, k, v, &meta, scale)?
         } else {
-            crate::attention::flash_attn::decode_attn(q, &kc, &vc, &meta, scale, bs)?
+            crate::attention::flash_attn::paged_attn(q, &kc, &vc, &meta, scale, bs)?
         };
         let n = out.dim(0)?;
         self.o_proj

@@ -14,7 +14,15 @@ pub struct AttnMetadata {
     pub max_seqlen_q: usize,
     pub max_seqlen_k: usize,
     pub slot_mapping: Vec<i64>,
+    /// Logical-to-physical KV blocks. Populated for decode and continued
+    /// prefill; initial prefill remains unpaged (prefix-hit reuse is #39).
     pub block_table: Vec<Vec<i32>>,
+}
+
+impl AttnMetadata {
+    pub(crate) fn uses_paged_kv(&self) -> bool {
+        !self.block_table.is_empty()
+    }
 }
 
 pub fn build_decode_metadata(
@@ -77,6 +85,17 @@ pub fn build_prefill_metadata(
         slot_mapping: slot_mapping.to_vec(),
         block_table: Vec::new(),
     }
+}
+
+pub(crate) fn build_continued_prefill_metadata(
+    scheduled_tokens: &[u32],
+    kv_lengths: &[u32],
+    block_table: &[Vec<i32>],
+    slot_mapping: &[i64],
+) -> AttnMetadata {
+    let mut metadata = build_prefill_metadata(scheduled_tokens, kv_lengths, slot_mapping);
+    metadata.block_table = block_table.to_vec();
+    metadata
 }
 
 #[cfg(test)]

@@ -15,7 +15,9 @@
 
 use std::collections::VecDeque;
 
-use crate::attention::{build_decode_metadata, build_prefill_metadata};
+use crate::attention::{
+    build_continued_prefill_metadata, build_decode_metadata, build_prefill_metadata,
+};
 use crate::engine::kv_cache_manager::{KvCacheError, KvCacheManager};
 use crate::engine::sequence::{Sequence, SequenceStatus};
 use crate::engine::{
@@ -40,9 +42,27 @@ fn usize_to_u32(value: usize, name: &str) -> Result<u32, StepPlanError> {
     u32::try_from(value).map_err(|_| StepPlanError::invalid(format!("{name} does not fit u32")))
 }
 
+fn block_tables_for_plan(sequences: &[SequenceStepPlan]) -> Result<Vec<Vec<i32>>, StepPlanError> {
+    sequences
+        .iter()
+        .map(|sequence| {
+            sequence
+                .cache
+                .block_table
+                .iter()
+                .map(|&block| {
+                    i32::try_from(block)
+                        .map_err(|_| StepPlanError::invalid("cache block id does not fit i32"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkSelection {
     phase: StepPhase,
+    is_prefill_continuation: bool,
 }
 
 /// Token-level scheduler — the algorithmic heart of the engine.
@@ -256,28 +276,24 @@ impl Scheduler {
                     .iter()
                     .map(|sequence| usize_to_u32(sequence.cache.kv_length, "KV length"))
                     .collect::<Result<Vec<_>, _>>()?;
-                build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping)
+                if output.is_prefill_continuation {
+                    let block_tables = block_tables_for_plan(&sequences)?;
+                    build_continued_prefill_metadata(
+                        &scheduled_tokens,
+                        &kv_lengths,
+                        &block_tables,
+                        &slot_mapping,
+                    )
+                } else {
+                    build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping)
+                }
             }
             StepPhase::Decode => {
                 let context_lengths = sequences
                     .iter()
                     .map(|sequence| usize_to_u32(sequence.cache.kv_length, "context length"))
                     .collect::<Result<Vec<_>, _>>()?;
-                let block_tables = sequences
-                    .iter()
-                    .map(|sequence| {
-                        sequence
-                            .cache
-                            .block_table
-                            .iter()
-                            .map(|&block| {
-                                i32::try_from(block).map_err(|_| {
-                                    StepPlanError::invalid("cache block id does not fit i32")
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let block_tables = block_tables_for_plan(&sequences)?;
                 build_decode_metadata(&context_lengths, &block_tables, &slot_mapping)
             }
         };
@@ -527,6 +543,7 @@ impl Scheduler {
 
         Ok(WorkSelection {
             phase: StepPhase::Decode,
+            is_prefill_continuation: false,
         })
     }
 
@@ -559,6 +576,7 @@ impl Scheduler {
         }
         WorkSelection {
             phase: StepPhase::Prefill,
+            is_prefill_continuation: true,
         }
     }
 
@@ -571,6 +589,7 @@ impl Scheduler {
         if self.waiting.is_empty() {
             return Ok(WorkSelection {
                 phase: StepPhase::Prefill,
+                is_prefill_continuation: false,
             });
         }
 
@@ -657,6 +676,7 @@ impl Scheduler {
 
         Ok(WorkSelection {
             phase: StepPhase::Prefill,
+            is_prefill_continuation: false,
         })
     }
 }
@@ -887,6 +907,140 @@ mod tests {
             assert_eq!(plan.attention.cu_seqlens_q, vec![0, 3]);
             assert_eq!(plan.attention.cu_seqlens_k, vec![0, 3]);
             assert_eq!(plan.attention.slot_mapping, sequence.cache.slot_mapping);
+        }
+
+        #[test]
+        fn continued_prefill_plan_carries_paged_causal_context() {
+            let mut scheduler = Scheduler::new(2, 512, 0.9);
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![11, 12, 13, 14, 15], make_params(2));
+
+            let first = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            scheduler
+                .apply_step_result(&result_for_plan(&first, 42), &mut kv)
+                .unwrap();
+            let continuation = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(continuation.phase, StepPhase::Prefill);
+            assert_eq!(continuation.token_budget, 2);
+            assert_eq!(continuation.sequences.len(), 1);
+            let sequence = &continuation.sequences[0];
+            assert_eq!(sequence.token_range, 2..4);
+            assert_eq!(sequence.logical_positions, 2..4);
+            assert_eq!(sequence.input_token_ids, vec![13, 14]);
+            assert_eq!(sequence.cache.num_cached_tokens, 2);
+            assert_eq!(sequence.cache.kv_length, 4);
+            assert!(!sequence.sampling_allowed);
+            assert_eq!(continuation.attention.cu_seqlens_q, vec![0, 2]);
+            assert_eq!(continuation.attention.cu_seqlens_k, vec![0, 4]);
+            assert_eq!(continuation.attention.max_seqlen_q, 2);
+            assert_eq!(continuation.attention.max_seqlen_k, 4);
+            assert_eq!(
+                continuation.attention.block_table,
+                vec![sequence
+                    .cache
+                    .block_table
+                    .iter()
+                    .map(|&block| i32::try_from(block).unwrap())
+                    .collect::<Vec<_>>()]
+            );
+        }
+
+        #[test]
+        fn one_token_prompt_is_one_final_prefill_chunk() {
+            let mut scheduler = Scheduler::new(1, 512, 0.9);
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![11], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Prefill);
+            assert_eq!(plan.token_budget, 1);
+            assert_eq!(plan.sequences[0].token_range, 0..1);
+            assert_eq!(plan.sequences[0].logical_positions, 0..1);
+            assert!(plan.sequences[0].sampling_allowed);
+        }
+
+        #[test]
+        fn exact_budget_prompt_is_one_final_prefill_chunk() {
+            let mut scheduler = Scheduler::new(3, 512, 0.9);
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![11, 12, 13], make_params(1));
+
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+
+            assert_eq!(plan.phase, StepPhase::Prefill);
+            assert_eq!(plan.token_budget, 3);
+            assert_eq!(plan.sequences[0].token_range, 0..3);
+            assert_eq!(plan.sequences[0].logical_positions, 0..3);
+            assert!(plan.sequences[0].sampling_allowed);
+        }
+
+        #[test]
+        fn multi_chunk_prompt_advances_exact_ranges_and_samples_only_on_the_final_chunk() {
+            let mut scheduler = Scheduler::new(2, 512, 0.9);
+            let mut kv = make_kv_mgr(100);
+            let prompt = vec![11, 12, 13, 14, 15];
+            scheduler.add_request(prompt.clone(), make_params(1));
+            let mut ranges = Vec::new();
+            let mut positions = Vec::new();
+            let mut inputs = Vec::new();
+            let mut sampling_permissions = Vec::new();
+            let mut completed = Vec::new();
+
+            while scheduler.is_running() {
+                let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+                assert_eq!(plan.phase, StepPhase::Prefill);
+                assert!(plan.token_budget <= 2);
+                let sequence = &plan.sequences[0];
+                ranges.push(sequence.token_range.clone());
+                positions.push(sequence.logical_positions.clone());
+                inputs.extend_from_slice(&sequence.input_token_ids);
+                sampling_permissions.push(sequence.sampling_allowed);
+                completed.extend(
+                    scheduler
+                        .apply_step_result(&result_for_plan(&plan, 42), &mut kv)
+                        .unwrap(),
+                );
+            }
+
+            assert_eq!(ranges, vec![0..2, 2..4, 4..5]);
+            assert_eq!(positions, ranges);
+            assert_eq!(inputs, prompt);
+            assert_eq!(sampling_permissions, vec![false, false, true]);
+            assert_eq!(completed.len(), 1);
+            assert_eq!(completed[0].request_id, 0);
+            assert_eq!(completed[0].token_ids, vec![42]);
+        }
+
+        #[test]
+        fn sampled_token_for_incomplete_prefill_is_rejected_without_advancing_state() {
+            let mut scheduler = Scheduler::new(2, 512, 0.9);
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![11, 12, 13], make_params(1));
+            let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert!(!plan.sequences[0].sampling_allowed);
+            let invalid = StepResult {
+                plan_id: plan.id,
+                sequences: vec![crate::engine::SequenceStepResult {
+                    request_id: 0,
+                    sequence_id: 0,
+                    sampled_token: Some(42),
+                }],
+            };
+
+            let error = scheduler.apply_step_result(&invalid, &mut kv).unwrap_err();
+
+            assert_eq!(
+                error,
+                StepPlanError::ResultMismatch {
+                    plan_id: plan.id,
+                    reason: "sequence 0 sampling result does not match permission".to_string(),
+                }
+            );
+            assert_eq!(scheduler.running[0].num_cached_tokens, 0);
+            assert!(scheduler.running[0].completion_token_ids().is_empty());
+            assert_eq!(scheduler.in_flight.as_ref().unwrap().id, plan.id);
         }
 
         #[test]
@@ -1347,6 +1501,55 @@ mod tests {
                 vec![(1, 44), (2, 56)]
             );
             assert_eq!(plan.sequences[0].cache.num_cached_tokens, 256);
+            assert!(
+                plan.attention.block_table.is_empty(),
+                "initial prefix hits remain owned by #39, not chunk continuation"
+            );
+        }
+
+        #[test]
+        fn mixed_prefill_steps_preserve_ids_and_one_global_budget() {
+            let mut scheduler = Scheduler::new(3, 512, 0.9);
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![10, 11, 12, 13, 14], make_params(1));
+            scheduler.add_request(vec![20], make_params(1));
+            scheduler.add_request(vec![30, 31, 32, 33], make_params(1));
+            let mut completed_request_ids = Vec::new();
+            let prompt_lengths = [5, 1, 4];
+            let mut next_prompt_offsets = [0, 0, 0];
+
+            while scheduler.is_running() {
+                let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
+                assert!((1..=3).contains(&plan.token_budget));
+                assert_eq!(
+                    plan.token_budget,
+                    plan.sequences
+                        .iter()
+                        .map(|sequence| sequence.token_budget)
+                        .sum::<usize>()
+                );
+                for sequence in &plan.sequences {
+                    assert!(sequence.request_id < prompt_lengths.len());
+                    assert_eq!(
+                        sequence.token_range.start,
+                        next_prompt_offsets[sequence.request_id]
+                    );
+                    assert!(sequence.token_range.end <= prompt_lengths[sequence.request_id]);
+                    assert_eq!(sequence.logical_positions, sequence.token_range);
+                    next_prompt_offsets[sequence.request_id] = sequence.token_range.end;
+                }
+                completed_request_ids.extend(
+                    scheduler
+                        .apply_step_result(&result_for_plan(&plan, 42), &mut kv)
+                        .unwrap()
+                        .into_iter()
+                        .map(|output| output.request_id),
+                );
+            }
+
+            assert_eq!(completed_request_ids, vec![0, 1, 2]);
+            assert_eq!(next_prompt_offsets, prompt_lengths);
+            assert_eq!(kv.num_free_blocks(), 100);
         }
 
         #[test]

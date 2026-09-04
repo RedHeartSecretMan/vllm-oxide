@@ -1,7 +1,8 @@
 //! Thin wrappers around `candle-flash-attn`'s two entry points.
 //!
 //! Prefill calls `flash_attn_varlen` (unpaged — reads projection K/V).
-//! Decode calls `flash_attn_varlen_paged_windowed` (paged — reads the KV cache).
+//! Continued prefill and decode call `flash_attn_varlen_paged_windowed`
+//! (paged — reads the KV cache).
 //! Model code calls these directly — no trait (T4 YAGNI decision).
 
 #![cfg(feature = "cuda")]
@@ -36,7 +37,7 @@ pub fn prefill_attn(
     )
 }
 
-pub fn decode_attn(
+pub fn paged_attn(
     q: &Tensor,
     k_cache: &Tensor,
     v_cache: &Tensor,
