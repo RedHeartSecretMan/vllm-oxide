@@ -59,14 +59,20 @@ impl SpecialTokenIds {
 
 #[derive(Debug, Clone)]
 struct HubRevision {
-    commit: String,
+    pinned: PinnedHub,
     files: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinnedHub {
+    repo: String,
+    commit: String,
 }
 
 trait HubAccess {
     fn resolve_revision(&mut self, repo: &str, revision: &str) -> Result<HubRevision>;
 
-    fn get(&mut self, repo: &str, commit: &str, filename: &str) -> Result<PathBuf>;
+    fn get(&mut self, pinned: &PinnedHub, filename: &str) -> Result<PathBuf>;
 }
 
 struct OnlineHubAccess {
@@ -98,7 +104,10 @@ impl HubAccess for OnlineHubAccess {
             bail!("Hub returned an empty commit for `{repo}` at `{revision}`");
         }
         Ok(HubRevision {
-            commit: info.sha,
+            pinned: PinnedHub {
+                repo: repo.to_string(),
+                commit: info.sha,
+            },
             files: info
                 .siblings
                 .into_iter()
@@ -107,15 +116,20 @@ impl HubAccess for OnlineHubAccess {
         })
     }
 
-    fn get(&mut self, repo: &str, commit: &str, filename: &str) -> Result<PathBuf> {
+    fn get(&mut self, pinned: &PinnedHub, filename: &str) -> Result<PathBuf> {
         self.api
             .repo(hf_hub::Repo::with_revision(
-                repo.to_string(),
+                pinned.repo.clone(),
                 hf_hub::RepoType::Model,
-                commit.to_string(),
+                pinned.commit.clone(),
             ))
             .get(filename)
-            .with_context(|| format!("downloading `{filename}` from `{repo}` at commit `{commit}`"))
+            .with_context(|| {
+                format!(
+                    "downloading `{filename}` from `{}` at commit `{}`",
+                    pinned.repo, pinned.commit
+                )
+            })
     }
 }
 
@@ -160,22 +174,30 @@ impl HubAccess for OfflineHubAccess {
             })?
             .to_string();
         let files = collect_snapshot_files(snapshot_root)?;
-        Ok(HubRevision { commit, files })
+        Ok(HubRevision {
+            pinned: PinnedHub {
+                repo: repo.to_string(),
+                commit,
+            },
+            files,
+        })
     }
 
-    fn get(&mut self, repo: &str, commit: &str, filename: &str) -> Result<PathBuf> {
+    fn get(&mut self, pinned: &PinnedHub, filename: &str) -> Result<PathBuf> {
         let path = self
             .cache
             .repo(hf_hub::Repo::with_revision(
-                repo.to_string(),
+                pinned.repo.clone(),
                 hf_hub::RepoType::Model,
-                commit.to_string(),
+                pinned.commit.clone(),
             ))
-            .pointer_path(commit)
+            .pointer_path(&pinned.commit)
             .join(filename);
         if !path.is_file() {
             bail!(
-                "cached Hub model `{repo}` at commit `{commit}` has no `{filename}` at {}",
+                "cached Hub model `{}` at commit `{}` has no `{filename}` at {}",
+                pinned.repo,
+                pinned.commit,
                 path.display()
             );
         }
@@ -256,35 +278,33 @@ impl ResolvedModel {
             if !resolved.files.contains(required) {
                 bail!(
                     "resolved Hub model `{repo}` at commit `{}` has no `{required}`",
-                    resolved.commit
+                    resolved.pinned.commit
                 );
             }
         }
 
-        let config_path = hub
-            .get(&repo, &resolved.commit, "config.json")
-            .with_context(|| {
-                format!(
-                    "fetching config.json for Hub model `{repo}` at commit `{}`",
-                    resolved.commit
-                )
-            })?;
+        let config_path = hub.get(&resolved.pinned, "config.json").with_context(|| {
+            format!(
+                "fetching config.json for Hub model `{repo}` at commit `{}`",
+                resolved.pinned.commit
+            )
+        })?;
         let tokenizer_path = hub
-            .get(&repo, &resolved.commit, "tokenizer.json")
+            .get(&resolved.pinned, "tokenizer.json")
             .with_context(|| {
                 format!(
                     "fetching tokenizer.json for Hub model `{repo}` at commit `{}`",
-                    resolved.commit
+                    resolved.pinned.commit
                 )
             })?;
         let generation_config_json =
             if resolved.files.contains("generation_config.json") {
                 let path = hub
-                    .get(&repo, &resolved.commit, "generation_config.json")
+                    .get(&resolved.pinned, "generation_config.json")
                     .with_context(|| {
                         format!(
                             "fetching generation_config.json for Hub model `{repo}` at commit `{}`",
-                            resolved.commit
+                            resolved.pinned.commit
                         )
                     })?;
                 Some(std::fs::read(&path).with_context(|| {
@@ -295,11 +315,11 @@ impl ResolvedModel {
             };
         let weight_paths = if resolved.files.contains("model.safetensors.index.json") {
             let index_path = hub
-                .get(&repo, &resolved.commit, "model.safetensors.index.json")
+                .get(&resolved.pinned, "model.safetensors.index.json")
                 .with_context(|| {
                     format!(
                         "fetching safetensors index for Hub model `{repo}` at commit `{}`",
-                        resolved.commit
+                        resolved.pinned.commit
                     )
                 })?;
             let shard_names = super::parse_index_shard_names(&index_path)?;
@@ -308,50 +328,50 @@ impl ResolvedModel {
                 if !resolved.files.contains(&shard) {
                     bail!(
                         "safetensors index for Hub model `{repo}` at commit `{}` references missing shard `{shard}`",
-                        resolved.commit
+                        resolved.pinned.commit
                     );
                 }
-                paths.push(hub.get(&repo, &resolved.commit, &shard).with_context(|| {
+                paths.push(hub.get(&resolved.pinned, &shard).with_context(|| {
                     format!(
                         "fetching shard `{shard}` for Hub model `{repo}` at commit `{}`",
-                        resolved.commit
+                        resolved.pinned.commit
                     )
                 })?);
             }
             paths
         } else if resolved.files.contains("model.safetensors") {
             vec![hub
-                .get(&repo, &resolved.commit, "model.safetensors")
+                .get(&resolved.pinned, "model.safetensors")
                 .with_context(|| {
                     format!(
                         "fetching model.safetensors for Hub model `{repo}` at commit `{}`",
-                        resolved.commit
+                        resolved.pinned.commit
                     )
                 })?]
         } else {
             bail!(
                 "resolved Hub model `{repo}` at commit `{}` has neither `model.safetensors.index.json` nor `model.safetensors`",
-                resolved.commit
+                resolved.pinned.commit
             );
         };
         let config_json = std::fs::read(&config_path).with_context(|| {
             format!(
                 "reading config.json for Hub model `{repo}` at commit `{}` from {}",
-                resolved.commit,
+                resolved.pinned.commit,
                 config_path.display()
             )
         })?;
         let dtype = select_dtype(&config_json, requested_dtype).with_context(|| {
             format!(
                 "resolving dtype for Hub model `{repo}` at commit `{}`",
-                resolved.commit
+                resolved.pinned.commit
             )
         })?;
 
         Ok(Self {
             identity: ModelIdentity::Hub {
-                repo,
-                commit: resolved.commit,
+                repo: resolved.pinned.repo,
+                commit: resolved.pinned.commit,
             },
             config_path,
             config_json,
@@ -614,16 +634,20 @@ mod tests {
         tokenizer.save(path, false).unwrap();
     }
 
+    fn write_minimal_artifacts(root: &Path, config_json: &[u8]) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("config.json"), config_json).unwrap();
+        std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(root.join("model.safetensors"), b"").unwrap();
+    }
+
     #[test]
     fn local_source_resolves_one_identity_for_every_artifact() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("config.json"),
+        write_minimal_artifacts(
+            tmp.path(),
             br#"{"torch_dtype":"bfloat16","eos_token_id":7}"#,
-        )
-        .unwrap();
-        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
-        std::fs::write(tmp.path().join("model.safetensors"), b"").unwrap();
+        );
 
         let resolved =
             ResolvedModel::resolve(Source::Local(tmp.path().to_path_buf()), Some(DType::F16))
@@ -654,14 +678,20 @@ mod tests {
             self.resolve_calls
                 .push((repo.to_string(), revision.to_string()));
             Ok(HubRevision {
-                commit: self.commit.clone(),
+                pinned: PinnedHub {
+                    repo: repo.to_string(),
+                    commit: self.commit.clone(),
+                },
                 files: self.files.clone(),
             })
         }
 
-        fn get(&mut self, repo: &str, commit: &str, filename: &str) -> Result<PathBuf> {
-            self.get_calls
-                .push((repo.to_string(), commit.to_string(), filename.to_string()));
+        fn get(&mut self, pinned: &PinnedHub, filename: &str) -> Result<PathBuf> {
+            self.get_calls.push((
+                pinned.repo.clone(),
+                pinned.commit.clone(),
+                filename.to_string(),
+            ));
             Ok(self.snapshot_root.join(filename))
         }
     }
@@ -671,14 +701,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let commit = "0123456789abcdef0123456789abcdef01234567";
         let snapshot_root = tmp.path().join("snapshots").join(commit);
-        std::fs::create_dir_all(&snapshot_root).unwrap();
-        std::fs::write(
-            snapshot_root.join("config.json"),
+        write_minimal_artifacts(
+            &snapshot_root,
             br#"{"torch_dtype":"bfloat16","eos_token_id":7}"#,
-        )
-        .unwrap();
-        std::fs::write(snapshot_root.join("tokenizer.json"), b"{}").unwrap();
-        std::fs::write(snapshot_root.join("model.safetensors"), b"").unwrap();
+        );
         let mut hub = FakeHub {
             snapshot_root: snapshot_root.clone(),
             commit: commit.to_string(),
@@ -819,14 +845,10 @@ mod tests {
         ));
         cache_repo.create_ref(commit).unwrap();
         let snapshot_root = cache_repo.pointer_path(commit);
-        std::fs::create_dir_all(&snapshot_root).unwrap();
-        std::fs::write(
-            snapshot_root.join("config.json"),
+        write_minimal_artifacts(
+            &snapshot_root,
             br#"{"torch_dtype":"float16","eos_token_id":7}"#,
-        )
-        .unwrap();
-        std::fs::write(snapshot_root.join("tokenizer.json"), b"{}").unwrap();
-        std::fs::write(snapshot_root.join("model.safetensors"), b"").unwrap();
+        );
 
         let resolved = ResolvedModel::resolve_cached_hub(
             "org/offline".to_string(),
@@ -854,13 +876,10 @@ mod tests {
     #[test]
     fn unsupported_requested_dtype_fails_instead_of_falling_back() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("config.json"),
+        write_minimal_artifacts(
+            tmp.path(),
             br#"{"torch_dtype":"bfloat16","eos_token_id":7}"#,
-        )
-        .unwrap();
-        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
-        std::fs::write(tmp.path().join("model.safetensors"), b"").unwrap();
+        );
 
         let error =
             ResolvedModel::resolve(Source::Local(tmp.path().to_path_buf()), Some(DType::F64))
@@ -874,13 +893,7 @@ mod tests {
     #[test]
     fn unsupported_model_config_dtype_fails_with_context() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("config.json"),
-            br#"{"torch_dtype":"float32","eos_token_id":7}"#,
-        )
-        .unwrap();
-        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
-        std::fs::write(tmp.path().join("model.safetensors"), b"").unwrap();
+        write_minimal_artifacts(tmp.path(), br#"{"torch_dtype":"float32","eos_token_id":7}"#);
 
         let error =
             ResolvedModel::resolve(Source::Local(tmp.path().to_path_buf()), None).unwrap_err();

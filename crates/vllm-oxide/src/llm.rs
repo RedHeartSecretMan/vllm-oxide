@@ -19,7 +19,7 @@ use crate::engine::{
     },
     EngineCore, KvCacheManager, RequestOutput, Scheduler,
 };
-use crate::loader::ResolvedModel;
+use crate::loader::model_identity::ResolvedModel;
 use crate::models::registry::{resolved_factory, BuiltModel};
 use crate::sampler::{Sampler, SamplingParams};
 

@@ -3,7 +3,7 @@ use candle_core::Device;
 use serde::Deserialize;
 
 use crate::attention::AttentionContext;
-use crate::loader::ResolvedModel;
+use crate::loader::model_identity::ResolvedModel;
 
 use crate::causal_lm::CausalLM;
 

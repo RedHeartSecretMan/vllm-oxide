@@ -54,8 +54,8 @@ use serde::Deserialize;
 
 use crate::config::{is_hf_hub_offline, Source};
 
-mod model_identity;
-pub use model_identity::{ModelIdentity, ResolvedModel};
+pub(crate) mod model_identity;
+use model_identity::ResolvedModel;
 
 /// Mmap one or more `*.safetensors` files and return a candle
 /// [`ShardedVarBuilder`] over them.

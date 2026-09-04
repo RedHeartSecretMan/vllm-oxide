@@ -13,7 +13,8 @@ use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
 use crate::layers::rmsnorm::RMSNorm;
 use crate::layers::rope::RotaryEmbedding;
-use crate::loader::{load_resolved_weights_vb, ResolvedModel};
+use crate::loader::load_resolved_weights_vb;
+use crate::loader::model_identity::ResolvedModel;
 
 use super::registry::{BuiltModel, ModelEntry};
 use crate::causal_lm::CausalLM;
