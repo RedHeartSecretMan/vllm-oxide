@@ -507,6 +507,10 @@ finish:
         if (status == cudaSuccess && synchronize_status != cudaSuccess) {
             status = synchronize_status;
             *failed_stage = kSynchronize;
+            // A stream-wide asynchronous failure cannot be attributed to the
+            // most recently launched row. Preserve correct diagnostics by
+            // reporting the row as unknown instead of inventing causality.
+            *failed_row = -1;
         }
     }
 #undef TRY_STAGE

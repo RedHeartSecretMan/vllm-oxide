@@ -183,7 +183,16 @@ impl EngineCore {
             (Vec::new(), Tensor::zeros((0, 0), DType::F32, &self.device)?)
         } else {
             let refs = sample_hiddens.iter().collect::<Vec<_>>();
-            let logits = self.model.compute_logits(&Tensor::stack(&refs, 0)?)?;
+            let logits = self
+                .model
+                .compute_logits(&Tensor::stack(&refs, 0)?)?
+                .to_dtype(DType::F32)
+                .map_err(|error| {
+                    candle_core::Error::msg(format!(
+                        "sampling FP32 upcast failed for {}: {error}",
+                        sampling_diagnostics(plan)
+                    ))
+                })?;
             let sampled_device = self
                 .sampler
                 .forward(&logits, &sampling_params, &token_histories)
@@ -199,7 +208,7 @@ impl EngineCore {
                     sampling_diagnostics(plan)
                 ))
             })?;
-            (sampled, logits.to_dtype(DType::F32)?)
+            (sampled, logits)
         };
 
         let mut sampled_tokens = sampled_tokens.into_iter();
@@ -235,10 +244,11 @@ fn sampling_diagnostics(plan: &StepPlan) -> String {
     plan.sequences
         .iter()
         .filter(|sequence| sequence.sampling_allowed)
-        .map(|sequence| {
+        .enumerate()
+        .map(|(sampling_row, sequence)| {
             format!(
-                "request_id={}, sampling_params={:?}",
-                sequence.request_id, sequence.sampling_params
+                "sampling_row={sampling_row}, request_id={}, sampling_params={:?}",
+                sequence.request_id, sequence.sampling_params,
             )
         })
         .collect::<Vec<_>>()
@@ -527,6 +537,14 @@ mod tests {
                 ..SamplingParams::default()
             },
         );
+        scheduler.add_request(
+            vec![22],
+            SamplingParams {
+                temperature: 1.0,
+                top_k: Some(2),
+                ..SamplingParams::default()
+            },
+        );
         let mut engine = EngineCore::new(
             scheduler,
             kv_mgr,
@@ -541,7 +559,8 @@ mod tests {
         let error = engine.step().unwrap_err().to_string();
 
         assert!(error.contains("sampling failed"));
-        assert!(error.contains("request_id=0"));
+        assert!(error.contains("sampling_row=0, request_id=0"));
+        assert!(error.contains("sampling_row=1, request_id=1"));
         assert!(error.contains("temperature: 0.75"));
         assert!(error.contains("top_k: Some(8)"));
         assert!(error.contains("top_p: Some(0.9)"));

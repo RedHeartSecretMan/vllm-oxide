@@ -3,23 +3,22 @@
 //! # Unsafe boundary
 //!
 //! Candle exposes CUDA allocations through guarded raw device pointers, while
-//! the project kernels are linked through C FFI. The functions below retain
-//! every storage and `SyncOnDrop` guard across the FFI call, require contiguous
-//! tensors, and keep all mutable destinations private to the reusable
-//! `Workspace`. The CUDA wrapper synchronizes its stream before returning, so
-//! host metadata used by H2D history copies remains alive and asynchronous
-//! kernel failures are reported at this seam.
+//! the project kernels are linked through C FFI. The launch scope below keeps
+//! every owning tensor, storage guard, CUDA slice view, and `SyncOnDrop` guard
+//! alive without extending lifetimes, requires contiguous tensors, and keeps
+//! all mutable destinations private to the reusable `Workspace`. The CUDA
+//! wrapper synchronizes its stream before returning, so host metadata used by
+//! H2D history copies remains alive and asynchronous kernel failures are
+//! reported at this seam.
 
 #![allow(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
-use std::sync::RwLockReadGuard;
 
-use candle_core::backend::BackendStorage;
 use candle_core::cuda::cudarc::driver::sys::CUstream;
-use candle_core::cuda::cudarc::driver::{DevicePtr, DeviceSlice, SyncOnDrop};
+use candle_core::cuda::cudarc::driver::{DevicePtr, DeviceSlice};
 use candle_core::{DType, Device, Error, Result, Storage, Tensor};
 
 use super::SamplingParams;
@@ -67,60 +66,27 @@ mod ffi {
     }
 }
 
-struct TensorGuard {
-    _guard: SyncOnDrop<'static>,
-    #[allow(dead_code)]
-    _storage: RwLockReadGuard<'static, Storage>,
-}
-
-macro_rules! extract_ptr {
-    ($storage:expr, $layout:expr, $ty:ty) => {{
-        let slice = $storage.as_cuda_slice::<$ty>()?;
-        let offsets = $layout
-            .contiguous_offsets()
-            .ok_or_else(|| Error::msg("sampler CUDA adapter requires contiguous tensor storage"))?;
-        let slice = slice.slice(offsets.0..offsets.1);
-        let stream = slice.stream();
-        let (ptr, guard) = slice.device_ptr(stream);
-        let guard: SyncOnDrop<'static> = unsafe { std::mem::transmute(guard) };
-        (ptr, guard)
-    }};
-}
-
-fn slice_ptr(tensor: &Tensor) -> Result<(u64, TensorGuard)> {
-    let (storage, layout) = tensor.storage_and_layout();
-    let cuda_storage = match &*storage {
-        Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("sampler CUDA adapter expected CUDA storage"),
+macro_rules! cuda_ptr {
+    ($tensor:expr, $ty:ty, $label:literal, $storage:ident, $view:ident, $ptr:ident, $guard:ident) => {
+        let ($storage, layout) = $tensor.storage_and_layout();
+        let cuda_storage = match &*$storage {
+            Storage::Cuda(storage) => storage,
+            _ => candle_core::bail!(concat!(
+                "sampler CUDA adapter expected CUDA storage for ",
+                $label
+            )),
+        };
+        let offsets = layout.contiguous_offsets().ok_or_else(|| {
+            Error::msg(concat!(
+                "sampler CUDA adapter requires contiguous storage for ",
+                $label
+            ))
+        })?;
+        let $view = cuda_storage
+            .as_cuda_slice::<$ty>()?
+            .slice(offsets.0..offsets.1);
+        let ($ptr, $guard) = $view.device_ptr($view.stream());
     };
-
-    let (ptr, guard): (u64, SyncOnDrop<'static>) = match tensor.dtype() {
-        DType::U8 => extract_ptr!(cuda_storage, layout, u8),
-        DType::U32 => extract_ptr!(cuda_storage, layout, u32),
-        DType::F32 => extract_ptr!(cuda_storage, layout, f32),
-        DType::F64 => extract_ptr!(cuda_storage, layout, f64),
-        dtype => candle_core::bail!("sampler CUDA adapter does not support {dtype:?} storage"),
-    };
-
-    // SAFETY: the guard borrows from the CUDA slice owned by `storage`. Both
-    // are retained together in `TensorGuard` until the FFI call completes.
-    let storage: RwLockReadGuard<'static, Storage> = unsafe { std::mem::transmute(storage) };
-    Ok((
-        ptr,
-        TensorGuard {
-            _guard: guard,
-            _storage: storage,
-        },
-    ))
-}
-
-fn get_stream(tensor: &Tensor) -> Result<CUstream> {
-    let (storage, _) = tensor.storage_and_layout();
-    let cuda_storage = match &*storage {
-        Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("sampler CUDA adapter expected CUDA storage"),
-    };
-    Ok(cuda_storage.device().cuda_stream().cu_stream())
 }
 
 /// Reused device memory for one row at a time. Its footprint is O(vocab) plus
@@ -372,49 +338,134 @@ pub(super) fn sample(
             ))
         })?;
 
-    let (logits_ptr, _g_logits) = slice_ptr(&logits)?;
-    let (selected_ptr, _g_selected) = slice_ptr(&selected_tokens)?;
-    let (history_tokens_ptr, _g_history_tokens) = slice_ptr(&workspace.history_tokens)?;
-    let (history_counts_ptr, _g_history_counts) = slice_ptr(&workspace.history_counts)?;
-    let (keys_in_ptr, _g_keys_in) = slice_ptr(&workspace.keys_in)?;
-    let (keys_out_ptr, _g_keys_out) = slice_ptr(&workspace.keys_out)?;
-    let (ids_in_ptr, _g_ids_in) = slice_ptr(&workspace.ids_in)?;
-    let (ids_out_ptr, _g_ids_out) = slice_ptr(&workspace.ids_out)?;
-    let (limits_ptr, _g_limits) = slice_ptr(&workspace.limits)?;
-    let (temp_storage_ptr, _g_temp_storage) = slice_ptr(&workspace.temp_storage)?;
-    let stream = get_stream(&logits)?;
-
     let mut failed_stage = 0;
     let mut failed_row = -1;
-    let status = unsafe {
-        ffi::vllm_oxide_sample_f32(
-            logits_ptr as *const f32,
-            selected_ptr as *mut u32,
-            prepared.temperatures.as_ptr(),
-            prepared.top_ks.as_ptr(),
-            prepared.top_ps.as_ptr(),
-            prepared.presence_penalties.as_ptr(),
-            prepared.frequency_penalties.as_ptr(),
-            prepared.repetition_penalties.as_ptr(),
-            row_seeds.as_ptr(),
-            prepared.history_tokens.as_ptr(),
-            prepared.history_counts.as_ptr(),
-            prepared.history_offsets.as_ptr(),
-            history_tokens_ptr as *mut u32,
-            history_counts_ptr as *mut u32,
-            keys_in_ptr as *mut f32,
-            keys_out_ptr as *mut f32,
-            ids_in_ptr as *mut u32,
-            ids_out_ptr as *mut u32,
-            limits_ptr as *mut u32,
-            temp_storage_ptr as *mut c_void,
-            workspace.temp_storage.elem_count(),
-            batch_u32,
-            vocab_u32,
-            &mut failed_stage,
-            &mut failed_row,
-            stream,
-        )
+    let status = {
+        cuda_ptr!(
+            logits,
+            f32,
+            "logits",
+            logits_storage,
+            logits_view,
+            logits_ptr,
+            _g_logits
+        );
+        cuda_ptr!(
+            selected_tokens,
+            u32,
+            "selected tokens",
+            selected_storage,
+            selected_view,
+            selected_ptr,
+            _g_selected
+        );
+        cuda_ptr!(
+            workspace.history_tokens,
+            u32,
+            "history tokens",
+            history_tokens_storage,
+            history_tokens_view,
+            history_tokens_ptr,
+            _g_history_tokens
+        );
+        cuda_ptr!(
+            workspace.history_counts,
+            u32,
+            "history counts",
+            history_counts_storage,
+            history_counts_view,
+            history_counts_ptr,
+            _g_history_counts
+        );
+        cuda_ptr!(
+            workspace.keys_in,
+            f32,
+            "input keys",
+            keys_in_storage,
+            keys_in_view,
+            keys_in_ptr,
+            _g_keys_in
+        );
+        cuda_ptr!(
+            workspace.keys_out,
+            f32,
+            "output keys",
+            keys_out_storage,
+            keys_out_view,
+            keys_out_ptr,
+            _g_keys_out
+        );
+        cuda_ptr!(
+            workspace.ids_in,
+            u32,
+            "input token indices",
+            ids_in_storage,
+            ids_in_view,
+            ids_in_ptr,
+            _g_ids_in
+        );
+        cuda_ptr!(
+            workspace.ids_out,
+            u32,
+            "output token indices",
+            ids_out_storage,
+            ids_out_view,
+            ids_out_ptr,
+            _g_ids_out
+        );
+        cuda_ptr!(
+            workspace.limits,
+            u32,
+            "filter limits",
+            limits_storage,
+            limits_view,
+            limits_ptr,
+            _g_limits
+        );
+        cuda_ptr!(
+            workspace.temp_storage,
+            u8,
+            "CUB temp storage",
+            temp_storage_storage,
+            temp_storage_view,
+            temp_storage_ptr,
+            _g_temp_storage
+        );
+        let stream = match logits.device() {
+            Device::Cuda(device) => device.cuda_stream().cu_stream(),
+            _ => candle_core::bail!("sampler CUDA adapter expected a CUDA device"),
+        };
+
+        unsafe {
+            ffi::vllm_oxide_sample_f32(
+                logits_ptr as *const f32,
+                selected_ptr as *mut u32,
+                prepared.temperatures.as_ptr(),
+                prepared.top_ks.as_ptr(),
+                prepared.top_ps.as_ptr(),
+                prepared.presence_penalties.as_ptr(),
+                prepared.frequency_penalties.as_ptr(),
+                prepared.repetition_penalties.as_ptr(),
+                row_seeds.as_ptr(),
+                prepared.history_tokens.as_ptr(),
+                prepared.history_counts.as_ptr(),
+                prepared.history_offsets.as_ptr(),
+                history_tokens_ptr as *mut u32,
+                history_counts_ptr as *mut u32,
+                keys_in_ptr as *mut f32,
+                keys_out_ptr as *mut f32,
+                ids_in_ptr as *mut u32,
+                ids_out_ptr as *mut u32,
+                limits_ptr as *mut u32,
+                temp_storage_ptr as *mut c_void,
+                workspace.temp_storage.elem_count(),
+                batch_u32,
+                vocab_u32,
+                &mut failed_stage,
+                &mut failed_row,
+                stream,
+            )
+        }
     };
     check_status(
         status,

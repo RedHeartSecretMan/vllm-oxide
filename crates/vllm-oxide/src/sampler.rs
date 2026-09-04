@@ -387,15 +387,22 @@ impl Sampler {
     ) -> Result<Tensor> {
         // Consume exactly one scalar seed per row, including greedy rows. A
         // batch-mate changing sampling mode therefore cannot shift another
-        // row's random stream within this call.
-        let row_seeds = (0..batch).map(|_| self.rng.next_u64()).collect::<Vec<_>>();
-        cuda::sample(
+        // row's random stream within this call. Sampling is transactional with
+        // respect to RNG state: a failed preparation, allocation, or kernel
+        // leaves the next retry on the same seeds.
+        let mut pending_rng = self.rng.clone();
+        let row_seeds = (0..batch)
+            .map(|_| pending_rng.next_u64())
+            .collect::<Vec<_>>();
+        let selected = cuda::sample(
             logits,
             params,
             token_history,
             &row_seeds,
             &mut self.cuda_workspace,
-        )
+        )?;
+        self.rng = pending_rng;
+        Ok(selected)
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -898,6 +905,37 @@ mod tests {
             assert!(
                 HOST_TRANSFERS.with(|transfers| transfers.borrow().is_empty()),
                 "failed CUDA sampling must not fall back or transfer data"
+            );
+
+            let retry_logits = logits.get(0).unwrap().unsqueeze(0).unwrap();
+            let valid = SamplingParams {
+                temperature: 1.0,
+                ..SamplingParams::default()
+            };
+            let mut retry_sampler = Sampler::new_with_seed(2_718);
+            retry_sampler
+                .forward(
+                    &retry_logits,
+                    &[SamplingParams {
+                        temperature: 1.0,
+                        top_p: Some(0.0),
+                        ..SamplingParams::default()
+                    }],
+                    &[vec![]],
+                )
+                .unwrap_err();
+            let retried = retry_sampler
+                .forward(&retry_logits, std::slice::from_ref(&valid), &[vec![]])
+                .unwrap();
+            let retried = selected_token_ids_to_host(&retried).unwrap();
+            let mut clean_sampler = Sampler::new_with_seed(2_718);
+            let clean = clean_sampler
+                .forward(&retry_logits, std::slice::from_ref(&valid), &[vec![]])
+                .unwrap();
+            let clean = selected_token_ids_to_host(&clean).unwrap();
+            assert_eq!(
+                retried, clean,
+                "a failed CUDA attempt must not consume the retry's row seed"
             );
         }
 
