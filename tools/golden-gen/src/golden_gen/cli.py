@@ -97,6 +97,13 @@ def _run_generate(args: argparse.Namespace) -> int:
     expected_fixtures = build_expected_fixtures(discover_fixtures(all_prompts))
 
     only_category: PromptCategory | None = args.only_category
+    selected_expected_fixtures = [
+        fixture
+        for fixture in expected_fixtures
+        if only_category is None
+        or (only_category == "canonical" and fixture.family in ("canonical", "batch"))
+        or (only_category == "regression" and fixture.family == "regression")
+    ]
     if only_category:
         all_prompts = [p for p in all_prompts if p.category == only_category]
 
@@ -136,6 +143,7 @@ def _run_generate(args: argparse.Namespace) -> int:
             existing_tolerance = existing.tolerance
 
     failed_oracles: list[str] = []
+    generated_this_run: set[str] = set()
     for name, oracle_cls in oracle_specs:
         oracle = oracle_cls()
         if args.dry_run:
@@ -148,6 +156,9 @@ def _run_generate(args: argparse.Namespace) -> int:
                 only_category=only_category,
             )
             new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
+            generated_this_run.update(
+                f"{fixture.prompt_id}.{fixture.oracle}" for fixture in fixtures
+            )
             all_fixtures = [f for f in all_fixtures if (f.oracle, f.prompt_id) not in new_keys]
             all_fixtures.extend(fixtures)
         except Exception as e:
@@ -157,12 +168,14 @@ def _run_generate(args: argparse.Namespace) -> int:
             oracle.close()
 
     if failed_oracles:
-        failed = sum(1 for fixture in expected_fixtures if fixture.oracle in failed_oracles)
-        skipped = max(len(expected_fixtures) - len(all_fixtures) - failed, 0)
+        failed = sum(
+            1 for fixture in selected_expected_fixtures if fixture.oracle in failed_oracles
+        )
+        skipped = len(expected_fixtures) - len(selected_expected_fixtures)
         print(
             "Lifecycle totals: "
             f"expected={len(expected_fixtures)} discovered={len(expected_fixtures)} "
-            f"generated={len(all_fixtures)} compared=0 skipped={skipped} failed={failed}",
+            f"generated={len(generated_this_run)} compared=0 skipped={skipped} failed={failed}",
             file=sys.stderr,
         )
         print(
@@ -218,12 +231,13 @@ def _run_generate(args: argparse.Namespace) -> int:
     staged_manifest_path.replace(manifest_path)
     staging.cleanup()
     print(f"Manifest written to {manifest_path}")
-    generated = len(all_fixtures)
+    generated = len(generated_this_run)
     expected = len(expected_fixtures)
+    skipped = expected - len(selected_expected_fixtures)
     print(
         "Lifecycle totals: "
         f"expected={expected} discovered={expected} generated={generated} "
-        f"compared=0 skipped={expected - generated} failed=0"
+        f"compared=0 skipped={skipped} failed=0"
     )
     if existing_tolerance is None:
         print(

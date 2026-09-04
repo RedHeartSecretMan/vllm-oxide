@@ -342,3 +342,41 @@ class TestCLI:
         assert exit_code != 0
         assert not (output_dir / "manifest.json").exists()
         assert list(output_dir.glob("*.safetensors")) == []
+
+    def test_only_category_failure_totals_separate_skipped_from_failed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        prompts_dir = write_minimal_prompt_corpora(tmp_path)
+        output_dir = tmp_path / "output"
+
+        def fail_reference_only(self, prompt):
+            if self.name == "transformers":
+                raise RuntimeError("synthetic reference failure")
+            count = len(prompt.sub_prompts) if prompt.is_batch else 1
+            result = OracleResult.for_canonical(
+                token_ids=np.array([1], dtype=np.int64),
+                logits_per_step=np.zeros((1, VOCAB_SIZE), dtype=np.float32),
+                n_prompt_tokens=1,
+            )
+            return [result for _ in range(count)]
+
+        monkeypatch.setattr(cli, "_resolve_prompts_dir", lambda: prompts_dir)
+        monkeypatch.setattr(cli.FakeOracle, "generate", fail_reference_only)
+
+        exit_code = cli.main(
+            [
+                "generate",
+                "--dry-run",
+                "--only-category",
+                "canonical",
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+
+        assert exit_code != 0
+        captured = capsys.readouterr()
+        assert (
+            "Lifecycle totals: expected=8 discovered=8 generated=3 "
+            "compared=0 skipped=2 failed=3"
+        ) in captured.err

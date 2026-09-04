@@ -144,7 +144,8 @@ fn compare_reference_case(
     let logits = llm.generate_logits(&prompt, max_tokens)?;
     let logits_f32 = logits.to_dtype(DType::F32)?;
     let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
-    let (n_steps, vocab_size) = generated_logits_geometry(logits.dims(), logits_vals.len())?;
+    let (n_steps, vocab_size) =
+        generated_logits_geometry(logits.dims(), logits_vals.len(), manifest.model.vocab_size)?;
     let generated_tokens = extract_greedy_tokens(&logits_vals, n_steps, vocab_size);
 
     let (l1, l2) = match case.metadata.category {
@@ -180,12 +181,23 @@ fn compare_reference_case(
     Ok(CaseComparison { l1, l2, l3 })
 }
 
-fn generated_logits_geometry(dims: &[usize], value_count: usize) -> Result<(usize, usize)> {
+fn generated_logits_geometry(
+    dims: &[usize],
+    value_count: usize,
+    expected_vocab_size: usize,
+) -> Result<(usize, usize)> {
     let [n_steps, vocab_size] = dims else {
         anyhow::bail!("generated logits must have shape [steps, vocab], got {dims:?}");
     };
     if *n_steps == 0 || *vocab_size == 0 {
         anyhow::bail!("generated logits must have non-zero steps and vocabulary width");
+    }
+    if *vocab_size != expected_vocab_size {
+        anyhow::bail!(
+            "generated logits vocabulary width {} does not match manifest vocabulary width {}",
+            vocab_size,
+            expected_vocab_size
+        );
     }
     if n_steps.checked_mul(*vocab_size) != Some(value_count) {
         anyhow::bail!(
@@ -242,10 +254,17 @@ mod tests {
 
     #[test]
     fn runtime_shape_supplies_vocab_width_for_regression_fixture() {
-        let (n_steps, vocab_size) = generated_logits_geometry(&[2, 3], 6).unwrap();
+        let (n_steps, vocab_size) = generated_logits_geometry(&[2, 3], 6, 3).unwrap();
 
         assert_eq!(n_steps, 2);
         assert_eq!(vocab_size, 3);
+    }
+
+    #[test]
+    fn runtime_vocab_width_must_match_manifest() {
+        let error = generated_logits_geometry(&[2, 4], 8, 3).unwrap_err();
+
+        assert!(error.to_string().contains("manifest vocabulary width"));
     }
 
     #[test]

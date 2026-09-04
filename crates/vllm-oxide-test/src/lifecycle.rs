@@ -144,6 +144,11 @@ pub fn preflight(
                 continue;
             }
         };
+        if let Err(error) = validate_fixture_values(&fixture, manifest.model.vocab_size) {
+            tracker.record_failed(fixture_id);
+            errors.push(format!("fixture {fixture_id}: {error}"));
+            continue;
+        }
         let category_matches = match expected.family {
             FixtureFamily::Canonical | FixtureFamily::Batch => {
                 metadata.category == PromptCategory::Canonical
@@ -208,6 +213,31 @@ pub fn preflight(
         reference_cases,
         errors,
     }
+}
+
+fn validate_fixture_values(fixture: &FixtureData, vocab_size: usize) -> Result<(), &'static str> {
+    if fixture.n_prompt_tokens <= 0 {
+        return Err("n_prompt_tokens must be positive");
+    }
+    if fixture
+        .token_ids
+        .iter()
+        .any(|token_id| !token_is_in_vocab(*token_id, vocab_size))
+    {
+        return Err("token id outside model vocabulary");
+    }
+    if fixture.top5_indices.as_ref().is_some_and(|indices| {
+        indices
+            .iter()
+            .any(|token_id| !token_is_in_vocab(*token_id, vocab_size))
+    }) {
+        return Err("top-5 token id outside model vocabulary");
+    }
+    Ok(())
+}
+
+fn token_is_in_vocab(token_id: i64, vocab_size: usize) -> bool {
+    usize::try_from(token_id).is_ok_and(|token_id| token_id < vocab_size)
 }
 
 /// Tracks each expected fixture through discovery, generation, and comparison.
@@ -402,7 +432,11 @@ mod tests {
     }
 
     fn write_canonical_fixture(path: &std::path::Path) -> String {
-        let token_bytes = 1_i64.to_ne_bytes();
+        write_canonical_fixture_with_token(path, 1)
+    }
+
+    fn write_canonical_fixture_with_token(path: &std::path::Path, token_id: i64) -> String {
+        let token_bytes = token_id.to_ne_bytes();
         let prompt_bytes = 1_i64.to_ne_bytes();
         let logits_bytes: Vec<u8> = [0.0_f32, 1.0, 0.5]
             .into_iter()
@@ -716,6 +750,42 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("checksum mismatch")));
+    }
+
+    #[test]
+    fn preflight_rejects_fixture_values_outside_model_contract() {
+        let fixtures = tempfile::tempdir().unwrap();
+        let reference_filename = "canonical_01.transformers.safetensors";
+        let baseline_filename = "canonical_01.vllm.safetensors";
+        let reference_sha =
+            write_canonical_fixture_with_token(&fixtures.path().join(reference_filename), -1);
+        let baseline_sha = write_canonical_fixture(&fixtures.path().join(baseline_filename));
+        let mut manifest = test_manifest();
+        manifest.fixtures = vec![
+            canonical_metadata(
+                "canonical_01",
+                OracleName::Transformers,
+                reference_filename,
+                reference_sha,
+            ),
+            canonical_metadata(
+                "canonical_01",
+                OracleName::Vllm,
+                baseline_filename,
+                baseline_sha,
+            ),
+        ];
+        manifest.calibrated_fixtures = vec!["canonical_01.vllm".to_string()];
+
+        let result = preflight(&manifest, fixtures.path(), &test_prompts());
+        let totals = result.tracker.totals();
+
+        assert_eq!(totals.generated, 2);
+        assert_eq!(totals.failed, 1);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("token id outside model vocabulary")));
     }
 
     #[cfg(unix)]
