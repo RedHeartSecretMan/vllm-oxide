@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 
 use crate::attention::{build_decode_metadata, build_prefill_metadata};
-use crate::engine::kv_cache_manager::KvCacheManager;
+use crate::engine::kv_cache_manager::{KvCacheError, KvCacheManager};
 use crate::engine::sequence::{Sequence, SequenceStatus};
 use crate::engine::{
     CacheOperation, SequenceCachePlan, SequenceStepPlan, StepPhase, StepPlan, StepPlanError,
@@ -410,6 +410,7 @@ impl Scheduler {
                 .unwrap();
             kv_mgr
                 .deallocate(&mut self.running[index])
+                .map_err(KvCacheError::from)
                 .map_err(|source| {
                     StepPlanError::cache(CacheOperation::Deallocation, sequence_id, source)
                 })?;
@@ -463,14 +464,14 @@ impl Scheduler {
                 .iter()
                 .take(self.max_num_batched_tokens)
                 .collect::<Vec<_>>();
-            if kv_mgr.can_append(&decode_batch) {
+            if kv_mgr.can_append_batch(&decode_batch) {
                 return Ok(());
             }
             let Some(mut victim) = self.running.pop_back() else {
                 return Ok(());
             };
             let sequence_id = victim.seq_id;
-            if let Err(source) = kv_mgr.deallocate(&mut victim) {
+            if let Err(source) = kv_mgr.deallocate(&mut victim).map_err(KvCacheError::from) {
                 self.running.push_back(victim);
                 return Err(StepPlanError::cache(
                     CacheOperation::Deallocation,
@@ -502,7 +503,7 @@ impl Scheduler {
             selected.push(self.running.pop_front().unwrap());
         }
         let selected_sequence_id = selected.first().map_or(0, |sequence| sequence.seq_id);
-        if let Err(source) = kv_mgr.may_append(&mut selected) {
+        if let Err(source) = kv_mgr.may_append_batch(&mut selected) {
             for sequence in selected.into_iter().rev() {
                 self.running.push_front(sequence);
             }
@@ -588,10 +589,14 @@ impl Scheduler {
             match kv_mgr.can_allocate(&self.waiting[i]) {
                 None => break,
                 Some(num_cached) => {
-                    if let Err(source) = kv_mgr.allocate(&mut self.waiting[i], num_cached) {
+                    if let Err(source) = kv_mgr
+                        .allocate(&mut self.waiting[i], num_cached)
+                        .map_err(KvCacheError::from)
+                    {
                         for &(allocated_index, _) in to_schedule.iter().rev() {
                             kv_mgr
                                 .deallocate(&mut self.waiting[allocated_index])
+                                .map_err(KvCacheError::from)
                                 .map_err(|rollback| {
                                     StepPlanError::cache(
                                         CacheOperation::AllocationRollback,
@@ -612,13 +617,16 @@ impl Scheduler {
                         .saturating_sub(self.waiting[i].num_cached_tokens);
                     let n_tokens = remaining.min(budget);
                     if n_tokens == 0 {
-                        kv_mgr.deallocate(&mut self.waiting[i]).map_err(|source| {
-                            StepPlanError::cache(
-                                CacheOperation::EmptyAllocationRollback,
-                                self.waiting[i].seq_id,
-                                source,
-                            )
-                        })?;
+                        kv_mgr
+                            .deallocate(&mut self.waiting[i])
+                            .map_err(KvCacheError::from)
+                            .map_err(|source| {
+                                StepPlanError::cache(
+                                    CacheOperation::EmptyAllocationRollback,
+                                    self.waiting[i].seq_id,
+                                    source,
+                                )
+                            })?;
                         continue;
                     }
                     total_tokens += n_tokens;

@@ -389,8 +389,13 @@ impl BlockPool {
         Ok(())
     }
 
+    /// Check whether the pool has enough room for one sequence's next append.
+    pub fn can_append(&self, sequence: &Sequence) -> bool {
+        self.can_append_batch(&[sequence])
+    }
+
     /// Check whether the pool can reserve every missing block for a decode batch.
-    pub fn can_append(&self, sequences: &[&Sequence]) -> bool {
+    pub(crate) fn can_append_batch(&self, sequences: &[&Sequence]) -> bool {
         let mut required_blocks = 0usize;
         for sequence in sequences {
             let Some(missing_blocks) = sequence
@@ -410,11 +415,19 @@ impl BlockPool {
         self.free_block_ids.len() >= required_blocks
     }
 
+    /// Allocate a block for one sequence's next append when needed.
+    pub fn may_append(&mut self, sequence: &mut Sequence) -> Result<(), BlockPoolError> {
+        self.may_append_batch(std::slice::from_mut(sequence))
+    }
+
     /// Allocate any blocks needed by a decode batch as one transaction.
     ///
     /// Every required free block is validated before ownership changes. An
     /// error therefore leaves both the pool and every sequence unchanged.
-    pub fn may_append(&mut self, sequences: &mut [Sequence]) -> Result<(), BlockPoolError> {
+    pub(crate) fn may_append_batch(
+        &mut self,
+        sequences: &mut [Sequence],
+    ) -> Result<(), BlockPoolError> {
         let mut append_indices = Vec::new();
         for (index, sequence) in sequences.iter().enumerate() {
             let missing_blocks = sequence
@@ -867,11 +880,11 @@ mod tests {
             let mut seq = make_seq((0..256).collect());
             pool.allocate(&mut seq, 0).unwrap();
             // The prompt's one required block is already reserved.
-            assert!(pool.can_append(&[&seq]));
+            assert!(pool.can_append(&seq));
             // Appending token 257 requires the one remaining free block.
             seq.append_token(42);
             assert_eq!(seq.num_tokens, 257);
-            assert!(pool.can_append(&[&seq]));
+            assert!(pool.can_append(&seq));
         }
 
         #[test]
@@ -884,7 +897,7 @@ mod tests {
             seq.append_token(42);
             assert_eq!(pool.num_free_blocks(), 0);
             // Token 257 needs a second block, but none is free.
-            assert!(!pool.can_append(&[&seq]));
+            assert!(!pool.can_append(&seq));
         }
     }
 
@@ -905,7 +918,7 @@ mod tests {
             pool.free_block_ids = VecDeque::from([2, usize::MAX]);
             let mut sequences = [first, second];
 
-            let error = pool.may_append(&mut sequences).unwrap_err();
+            let error = pool.may_append_batch(&mut sequences).unwrap_err();
 
             assert_eq!(
                 error,
@@ -927,7 +940,7 @@ mod tests {
             let initial_free = pool.num_free_blocks();
 
             // Both blocks are already reserved, so the batch transaction is a no-op.
-            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
+            pool.may_append(&mut seq).unwrap();
             assert_eq!(seq.block_table.len(), 2);
             assert_eq!(pool.num_free_blocks(), initial_free);
         }
@@ -940,7 +953,7 @@ mod tests {
             assert_eq!(seq.block_table.len(), 1);
             // 256 % 256 == 0 → no append.
             let free_before = pool.num_free_blocks();
-            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
+            pool.may_append(&mut seq).unwrap();
             assert_eq!(seq.block_table.len(), 1);
             assert_eq!(pool.num_free_blocks(), free_before);
         }
@@ -956,14 +969,14 @@ mod tests {
             seq.append_token(42);
             assert_eq!(seq.num_tokens, 257);
             let free_before = pool.num_free_blocks();
-            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
+            pool.may_append(&mut seq).unwrap();
             assert_eq!(seq.block_table.len(), 2);
             assert_eq!(pool.num_free_blocks(), free_before - 1);
 
             // Now num_tokens=258. 258%256=2 → no append.
             seq.append_token(43);
             let free_before2 = pool.num_free_blocks();
-            pool.may_append(std::slice::from_mut(&mut seq)).unwrap();
+            pool.may_append(&mut seq).unwrap();
             assert_eq!(seq.block_table.len(), 2);
             assert_eq!(pool.num_free_blocks(), free_before2);
         }

@@ -8,11 +8,12 @@
 //! # Design: deliberate structural adapter
 //!
 //! This module is **not** deep (see ADR-0004 M3). The value is
-//! information-hiding, not behavioural abstraction: its 6 cache-ownership
+//! information-hiding, not behavioural abstraction: its 6 public cache-ownership
 //! methods (`can_allocate`, `allocate`, `deallocate`, `can_append`,
-//! `may_append`, `hash_blocks`) delegate to `BlockPool` while translating
-//! failures into opaque [`KvCacheError`] values; `num_free_blocks` and
-//! `block_size` are trivial accessors. `compute_slot_mapping` is the sole
+//! `may_append`, `hash_blocks`) remain compatibility-preserving delegations to
+//! `BlockPool`; the crate-private batch reservation translates failures into
+//! opaque [`KvCacheError`] values. `num_free_blocks` and `block_size` are
+//! trivial accessors. `compute_slot_mapping` is the sole
 //! logic-carrying method
 //! (~20 LOC: logical block-table index → physical slot via
 //! `block_id * block_size + intra_offset`, `-1` sentinel for
@@ -40,7 +41,7 @@ use crate::engine::sequence::Sequence;
 
 /// Opaque cache-ownership error returned across the Scheduler seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KvCacheError {
+pub(crate) struct KvCacheError {
     message: String,
 }
 
@@ -67,8 +68,9 @@ impl std::error::Error for KvCacheError {}
 ///
 /// **Adapter, not computational module.** The value of this module is
 /// what the Scheduler cannot see — `BlockPool`, `BlockPoolError`,
-/// physical `PagedKVCache` internals — not behavioural depth. Six of
-/// its methods are thin delegations plus opaque error translation by design;
+/// physical `PagedKVCache` internals — not behavioural depth. Its six public
+/// ownership methods remain thin delegations by design; bounded batch
+/// reservation is crate-private and returns only an opaque cache error.
 /// `compute_slot_mapping` is the sole behavioural bridge (logical
 /// block table → physical slot indices). Thinness is the design, not
 /// debt.
@@ -100,26 +102,36 @@ impl KvCacheManager {
         &mut self,
         seq: &mut Sequence,
         num_cached_blocks: usize,
-    ) -> Result<(), KvCacheError> {
-        self.block_pool
-            .allocate(seq, num_cached_blocks)
-            .map_err(KvCacheError::from)
+    ) -> Result<(), BlockPoolError> {
+        self.block_pool.allocate(seq, num_cached_blocks)
     }
 
     /// Forwarded: deallocate all blocks owned by a sequence.
-    pub fn deallocate(&mut self, seq: &mut Sequence) -> Result<(), KvCacheError> {
-        self.block_pool.deallocate(seq).map_err(KvCacheError::from)
+    pub fn deallocate(&mut self, seq: &mut Sequence) -> Result<(), BlockPoolError> {
+        self.block_pool.deallocate(seq)
     }
 
-    /// Forwarded: check whether the pool has room for a decode batch.
-    pub fn can_append(&self, sequences: &[&Sequence]) -> bool {
-        self.block_pool.can_append(sequences)
+    /// Forwarded: check whether the pool has room for one decode append.
+    pub fn can_append(&self, sequence: &Sequence) -> bool {
+        self.block_pool.can_append(sequence)
     }
 
-    /// Forwarded: allocate decode-append blocks as one transaction.
-    pub fn may_append(&mut self, sequences: &mut [Sequence]) -> Result<(), KvCacheError> {
+    /// Forwarded: allocate a block for one sequence's next append.
+    pub fn may_append(&mut self, sequence: &mut Sequence) -> Result<(), BlockPoolError> {
+        self.block_pool.may_append(sequence)
+    }
+
+    pub(crate) fn can_append_batch(&self, sequences: &[&Sequence]) -> bool {
+        self.block_pool.can_append_batch(sequences)
+    }
+
+    /// Reserve a Scheduler-selected decode batch as one transaction.
+    pub(crate) fn may_append_batch(
+        &mut self,
+        sequences: &mut [Sequence],
+    ) -> Result<(), KvCacheError> {
         self.block_pool
-            .may_append(sequences)
+            .may_append_batch(sequences)
             .map_err(KvCacheError::from)
     }
 
@@ -248,14 +260,14 @@ mod tests {
             let mut seq = make_seq((0..256).collect());
             mgr.allocate(&mut seq, 0).unwrap();
             // 256 tokens → num_tokens % 256 == 0 → no new block needed.
-            assert!(mgr.can_append(&[&seq]));
+            assert!(mgr.can_append(&seq));
             let blocks_before = seq.block_table.len();
-            mgr.may_append(std::slice::from_mut(&mut seq)).unwrap();
+            mgr.may_append(&mut seq).unwrap();
             assert_eq!(seq.block_table.len(), blocks_before);
             // After append_token: num_tokens=257 → 257%256=1 → needs new block.
             seq.append_token(42);
-            assert!(mgr.can_append(&[&seq]));
-            mgr.may_append(std::slice::from_mut(&mut seq)).unwrap();
+            assert!(mgr.can_append(&seq));
+            mgr.may_append(&mut seq).unwrap();
             assert_eq!(seq.block_table.len(), blocks_before + 1);
         }
 
@@ -274,7 +286,7 @@ mod tests {
             mgr.block_pool.free_block_ids = VecDeque::from([2, usize::MAX]);
             let mut sequences = [first, second];
 
-            let error = mgr.may_append(&mut sequences).unwrap_err();
+            let error = mgr.may_append_batch(&mut sequences).unwrap_err();
 
             assert_eq!(
                 error.to_string(),
