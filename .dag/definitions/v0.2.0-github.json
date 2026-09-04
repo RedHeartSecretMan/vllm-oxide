@@ -1,0 +1,974 @@
+{
+  "schema_version": 1,
+  "source": {
+    "system": "GitHub Issues",
+    "repository": "RedHeartSecretMan/vllm-oxide",
+    "dependency_carrier": "GitHub native issue dependencies: blocked_by",
+    "captured_at": "2026-09-04T08:26:07+08:00",
+    "governing_spec_issue": 28,
+    "ticket_numbers": {
+      "first": 29,
+      "last": 47,
+      "count": 19
+    },
+    "source_update_identities": [
+      {
+        "number": 28,
+        "updated_at": "2026-08-30T04:51:30Z",
+        "node_id": "I_kwDOTi3M688AAAABO1VH7g"
+      },
+      {
+        "number": 29,
+        "updated_at": "2026-08-30T13:45:31Z",
+        "node_id": "I_kwDOTi3M688AAAABO3NvAw"
+      },
+      {
+        "number": 30,
+        "updated_at": "2026-08-30T13:45:34Z",
+        "node_id": "I_kwDOTi3M688AAAABO3Nv3A"
+      },
+      {
+        "number": 31,
+        "updated_at": "2026-08-30T13:45:38Z",
+        "node_id": "I_kwDOTi3M688AAAABO3Nw4A"
+      },
+      {
+        "number": 32,
+        "updated_at": "2026-08-30T13:45:41Z",
+        "node_id": "I_kwDOTi3M688AAAABO3Nx0A"
+      },
+      {
+        "number": 33,
+        "updated_at": "2026-08-30T13:45:45Z",
+        "node_id": "I_kwDOTi3M688AAAABO3Ny4g"
+      },
+      {
+        "number": 34,
+        "updated_at": "2026-08-30T13:45:48Z",
+        "node_id": "I_kwDOTi3M688AAAABO3NzzA"
+      },
+      {
+        "number": 35,
+        "updated_at": "2026-08-30T13:45:52Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N0yw"
+      },
+      {
+        "number": 36,
+        "updated_at": "2026-08-30T13:45:55Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N1tA"
+      },
+      {
+        "number": 37,
+        "updated_at": "2026-08-30T13:45:58Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N2sQ"
+      },
+      {
+        "number": 38,
+        "updated_at": "2026-08-30T13:46:01Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N3pw"
+      },
+      {
+        "number": 39,
+        "updated_at": "2026-08-30T13:46:05Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N4jw"
+      },
+      {
+        "number": 40,
+        "updated_at": "2026-08-30T13:46:08Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N5bQ"
+      },
+      {
+        "number": 41,
+        "updated_at": "2026-08-30T13:46:12Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N6WA"
+      },
+      {
+        "number": 42,
+        "updated_at": "2026-08-30T13:46:15Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N7Wg"
+      },
+      {
+        "number": 43,
+        "updated_at": "2026-08-30T13:46:19Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N8JA"
+      },
+      {
+        "number": 44,
+        "updated_at": "2026-08-30T13:46:22Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N9Ag"
+      },
+      {
+        "number": 45,
+        "updated_at": "2026-08-30T13:46:25Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N90Q"
+      },
+      {
+        "number": 46,
+        "updated_at": "2026-08-30T13:46:28Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N-yA"
+      },
+      {
+        "number": 47,
+        "updated_at": "2026-08-30T13:46:32Z",
+        "node_id": "I_kwDOTi3M688AAAABO3N_rg"
+      }
+    ]
+  },
+  "governing_spec": {
+    "number": 28,
+    "database_id": 5290412014,
+    "node_id": "I_kwDOTi3M688AAAABO1VH7g",
+    "title": "vllm-oxide v0.2.0 — trustworthy single-GPU inference and release closure",
+    "state": "open",
+    "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/28",
+    "created_at": "2026-08-30T04:51:30Z",
+    "updated_at": "2026-08-30T04:51:30Z",
+    "closed_at": null,
+    "labels": [
+      "ready-for-agent"
+    ],
+    "assignees": [],
+    "comments": [],
+    "issue_dependencies_summary": {
+      "blocked_by": 0,
+      "blocking": 0,
+      "total_blocked_by": 0,
+      "total_blocking": 0
+    },
+    "blocked_by": [],
+    "acceptance_obligations": [],
+    "body": "## Problem Statement\n\nv0.1 proves that the Rust/CUDA stack can load Qwen3 weights, execute paged attention, schedule requests, sample tokens, and compare selected outputs against Python-generated golden fixtures. The current implementation, however, does not yet provide a trustworthy release baseline for real offline generation.\n\nSeveral correctness invariants are distributed across `LLM`, `EngineCore`, `Scheduler`, `Sequence`, `KVCacheManager`, attention metadata construction, and the sampler rather than being expressed through one schedulable unit of work. As a result, repeated use of one `LLM` instance can lose outputs, chunked prefill can sample before the prompt is complete, prefix-cached prefill can use inconsistent token and KV lengths, recompute-only preemption can omit generated history, and a batch can exceed the configured token budget. Some cache and no-progress failures are also ignored, which creates a risk of silent hangs or placeholder outputs.\n\nThe request contract is similarly incomplete: `SamplingParams` fields accepted by the public API are not all preserved through scheduling and execution, invalid combinations are not consistently rejected, and EOS handling is tied to a fixed token rather than resolved model/tokenizer metadata. On the GPU hot path, sampling copies full vocabulary rows to the CPU, while attention metadata is repeatedly materialized instead of being prepared once per engine step. Model initialization can resolve the same artifacts more than once, disregard the requested dtype, temporarily allocate duplicate KV caches, and call synchronization a warmup without exercising a real forward path.\n\nThe existing validation and release workflow can report success without validating the complete product contract. Fixture discovery can omit batch and regression cases, oracle failures can still exit successfully, empty comparison sets can pass vacuously, L1 near-tie handling is ineffective for actual mismatches, and L2 comparison does not consistently stop at the first divergent token. The published golden release layout also differs from the downloader contract, the documented CUDA CLI command does not match the crate feature surface, and there is no formal v0.1.0 GitHub release to establish a repeatable precedent.\n\nv0.2.0 therefore needs to be a hardening release: a trustworthy, repeatable, and releasable single-GPU Qwen3 offline inference engine whose behavior is demonstrated at the public API seam and whose GPU correctness gate fails closed.\n\n## Solution\n\nMake v0.2.0 a correctness-first release centered on one public behavioral seam and one internal scheduling seam.\n\nThe public behavioral seam remains `LLM::generate`. Every supported user-visible requirement—request identity, batching, repeated calls, sampling, EOS, prefix reuse, chunked prefill, preemption, errors, and output order—must be observable and testable through that interface.\n\nInternally, deepen the engine module around a single immutable `StepPlan` produced by the scheduler and a corresponding `StepResult` returned after execution. A plan identifies exactly which sequences participate in a step, the token ranges and positions to execute, the prefill/decode phase, whether each sequence may sample, and the cache/attention metadata needed for that work. `EngineCore` executes only the plan; it does not rediscover work by traversing mutable scheduler state. The scheduler remains the sole owner of sequence lifecycle, token-budget accounting, cache allocation, prefix-cache accounting, preemption, progress detection, and application of step results.\n\nComplete the accepted single-GPU product contract before expanding scope: preserve and validate all supported sampling parameters, resolve model artifacts and metadata once, create one correctly sized KV cache, perform a real warmup, keep sampling and step metadata device-resident where practical, and expose only the small public API needed for offline generation.\n\nReplace permissive validation with a fail-closed golden and release pipeline. The reference oracle is authoritative for correctness, the vLLM oracle is calibration evidence, every declared fixture must be discovered and classified, comparison must use sound same-prefix semantics, and any generation, discovery, comparison, or coverage failure must make the release gate fail. The documented Quick Start, CUDA build, quality checks, golden asset contract, changelog, tag, and GitHub release must all describe the same versioned product.\n\n## User Stories\n\n1. As a library user, I can construct an `LLM` for a supported Qwen3 causal language model and generate text on one CUDA device using the documented API.\n2. As a library user, I can call `LLM::generate` at least 100 times on the same instance without outputs being dropped, replaced by placeholders, or associated with stale sequence identifiers.\n3. As a library user, I receive exactly one `RequestOutput` for every accepted prompt, in the same order as the input prompts, even when internal scheduling order differs.\n4. As a library user, I can distinguish requests by stable request identity without depending on an internal sequence identifier being a dense batch index.\n5. As a library user, I can submit mixed prompt lengths in one call and receive complete outputs for short and long prompts without one request corrupting another request's state.\n6. As a library user, I can supply per-prompt sampling settings, and each request retains its own settings throughout its lifetime.\n7. As a library user, supported temperature, top-k, top-p, presence penalty, frequency penalty, repetition penalty, maximum-token, and EOS behavior are actually applied rather than silently replaced by defaults.\n8. As a library user, invalid sampling settings and unsupported combinations are rejected before execution with an actionable error.\n9. As a library user, greedy generation is deterministic for the same resolved model revision, prompt, options, and golden environment.\n10. As a library user, generation stops on the EOS token resolved from the model/tokenizer contract unless `ignore_eos` is set, and never relies on a model-specific hard-coded constant.\n11. As a library user, reaching `max_tokens` has a clear and consistent meaning independent of prompt length, prefix-cache hits, and preemption.\n12. As a library user, an internal allocation, scheduling, model, attention, or sampling failure is returned as a contextual error instead of becoming an empty output or an indefinite loop.\n13. As a library user, the supported public surface is small and stable: model source and engine options in, prompts and sampling parameters in, request outputs or errors out.\n14. As an operator, I can request a supported dtype and know that the loaded model, kernels, and cache use the validated dtype or fail explicitly.\n15. As an operator, a remote model resolves to one immutable revision for configuration, tokenizer, and weights during an `LLM` lifetime.\n16. As an operator, initialization fetches or resolves each model artifact once rather than independently resolving the same moving branch multiple times.\n17. As an operator, initialization creates one KV-cache allocation derived from the configured memory budget and does not temporarily retain a second model-owned cache of a different size.\n18. As an operator, warmup executes a representative model path and surfaces CUDA, shape, dtype, and kernel incompatibilities before the first user request.\n19. As an operator, configured memory limits fail early with a useful capacity error when the requested cache cannot be allocated safely.\n20. As a scheduler maintainer, every engine step is represented by one immutable `StepPlan` containing only the sequences and tokens that are scheduled for that step.\n21. As a scheduler maintainer, a `StepPlan` explicitly distinguishes prefill from decode and explicitly states whether sampling is allowed for each scheduled sequence.\n22. As a scheduler maintainer, the configured maximum number of batched tokens is enforced across the whole step, not only for the first sequence considered.\n23. As a scheduler maintainer, waiting requests can be admitted while other requests are decoding when token and cache budgets permit, providing actual continuous batching rather than admission only when the running set becomes empty.\n24. As a scheduler maintainer, fairness and progress rules prevent a runnable request from starving indefinitely behind a long-running request.\n25. As a scheduler maintainer, a sequence with zero scheduled tokens is never sent through model execution and cannot trigger index underflow or stale-state reads.\n26. As a scheduler maintainer, every successful step consumes tokens, changes lifecycle state, or completes work; otherwise the engine returns an explicit no-progress error.\n27. As a scheduler maintainer, cache allocation and release failures are propagated and leave sequence/cache ownership in a consistent state.\n28. As a chunked-prefill user, a long prompt can be processed over multiple steps without sampling or appending completion tokens until its final prompt chunk has completed.\n29. As a prefix-caching user, cached prompt tokens are excluded from new model input while their KV entries remain correctly visible to attention with consistent positions and lengths.\n30. As a prefix-caching user, a batch can mix full cache hits, partial cache hits, and cache misses without cross-request corruption.\n31. As a preemption user, recompute-only preemption reconstructs the complete causal history required to resume a request, including generated completion tokens, not only the original prompt.\n32. As an engine maintainer, execution applies a `StepResult` back to scheduler-owned state exactly once, so token advancement, sampling, completion, and cache changes cannot be duplicated.\n33. As an engine maintainer, attention metadata is prepared once per step in the form needed by the CUDA path rather than rebuilt independently by each layer or sequence.\n34. As a performance user, normal decode does not copy a full vocabulary-sized logits row from GPU to CPU for every request and token.\n35. As a performance user, only the minimal data needed for API output crosses from GPU to CPU after device-side sampling.\n36. As a correctness maintainer, every declared canonical, batch, and regression golden fixture is discovered, loaded, and compared, with unmatched or skipped fixtures reported as failures.\n37. As a correctness maintainer, a reference-oracle generation failure exits non-zero and cannot leave a partial fixture set that is later presented as complete.\n38. As a correctness maintainer, an empty comparison set, missing manifest entry, missing asset, or unsupported fixture shape fails closed instead of passing vacuously.\n39. As a correctness maintainer, the Transformers SDPA reference oracle defines expected correctness, while the vLLM baseline oracle is used for calibration and investigation rather than as a second independent pass/fail truth.\n40. As a correctness maintainer, L1 near-tie handling is based on a sound comparison of candidate logits and can classify a genuine numerically ambiguous mismatch without circular top-1 assumptions.\n41. As a correctness maintainer, L2 compares only the same generated prefix and stops at the first divergent token, so later logits are never compared under different causal histories.\n42. As a correctness maintainer, numerical tolerances are derived, documented, versioned, and justified by dtype/kernel evidence rather than increased until tests pass.\n43. As a release engineer, the golden publisher and downloader share one documented asset layout, checksum policy, manifest schema, and version naming convention.\n44. As a release engineer, the production CUDA feature path builds and runs through the same supported CLI command shown in the Quick Start.\n45. As a release engineer, Rust formatting, linting, tests, dependency policy, and MSRV checks pass, and Python tests, Ruff, and mypy checks pass for the golden tooling.\n46. As a release engineer, the GPU release gate executes the complete generation and golden comparison workflow and cannot succeed after a skipped phase or swallowed exception.\n47. As a release engineer, v0.2.0 has aligned crate versions, documentation, changelog entries, a `v0.2.0` tag, a formal GitHub release, and a compatible `goldens-v0.2` asset release.\n48. As a new user, I can copy the documented Quick Start command on a supported CUDA host and complete one deterministic generation without discovering undocumented features or setup steps.\n\n## Implementation Decisions\n\n- **Product boundary:** v0.2.0 supports offline causal text generation for the existing Qwen3 model family on one CUDA device. Correctness and release closure take priority over new model families or serving features.\n- **Highest test seam:** `LLM::generate` is the authoritative behavioral seam. Lower-level tests support diagnosis, but no collection of component tests substitutes for end-to-end behavior at this interface.\n- **Internal engine seam:** scheduling produces an immutable `StepPlan`; execution returns a `StepResult`. This is the only coordination seam between scheduler-owned mutable state and model execution.\n- **Plan contents:** each plan identifies scheduled request/sequence identity, phase, exact token range, logical positions, cache block mapping, attention lengths, token budget contribution, and whether sampling is permitted. It cannot implicitly include every currently running sequence.\n- **Scheduler ownership:** `Scheduler` owns request lifecycle, admission, fairness, global token-budget accounting, prefix-cache accounting, recompute-only preemption, completion, and progress detection. `EngineCore` must not infer these decisions by traversing scheduler collections.\n- **Cache ownership:** `KVCacheManager` and `BlockPool` remain internal structural adapters behind the scheduler. Allocation and deallocation are transactional from the scheduler's perspective, and all failures are returned.\n- **Prefill contract:** uncached prompt ranges and cached KV ranges are represented separately. Sampling is legal only after all prompt tokens for a request are represented in the causal state.\n- **Preemption contract:** recompute-only preemption discards physical cache residency but preserves the logical request history necessary to rebuild prompt and generated-token KV state.\n- **Request identity:** public request ordering and identity are independent of monotonic internal sequence identifiers. Reusing an `LLM` instance never assumes that sequence identifiers start at zero for a call.\n- **Sampling contract:** one validated `SamplingParams` value follows each request throughout scheduling and execution. Supported fields cannot be silently discarded. Model/tokenizer metadata supplies EOS behavior.\n- **Device hot path:** filtering, penalties, probability selection, and token choice remain on the device where supported. Full vocabulary rows are not copied to the host during normal decode.\n- **Attention preparation:** an internal attention context converts plan metadata into device-ready metadata once per step and reuses it across the model layers participating in that step. The existing CUDA paged-attention implementation is the only runtime backend required for v0.2.0; no premature backend trait is introduced.\n- **Model artifacts:** a resolved-model object binds source, immutable revision, configuration, tokenizer, weights, dtype, and special-token metadata once. All model construction consumes this resolved identity.\n- **Initialization:** cache sizing occurs once after model configuration and available memory are known. Warmup performs real representative work without mutating user-visible request state.\n- **Public API depth:** only the composition-root API and its input/output types are public. Scheduler, sequence, cache, attention, model-loader, and sampler mechanics remain private unless an independently useful public contract is demonstrated.\n- **Oracle roles:** the reference oracle is the source of expected values. The baseline oracle supplies calibration evidence. The two roles are not combined into an ambiguous double pass/fail gate.\n- **Golden contract:** fixture families, manifest coverage, comparison level, dtype, model revision, kernel/runtime versions, tolerances, asset checksums, and generator version are explicit release metadata.\n- **Fail-closed release behavior:** discovery, generation, download, validation, comparison, and coverage checks return non-zero on any error. Skips are allowed only when explicitly declared as non-release exploratory behavior and can never satisfy the release gate.\n- **Versioning:** the code release and golden release use compatible but distinct names: `v0.2.0` for the product and `goldens-v0.2` for its fixture assets.\n- **Tensor parallelism seam:** v0.2.0 may document a feasibility decision for the existing TP-oriented abstractions, but runtime TP/NCCL implementation is not part of this release and dead hooks must not be presented as supported behavior.\n\n## Testing Decisions\n\n- Add black-box tests at `LLM::generate` for a single prompt, mixed-length batches, per-prompt sampling, input/output ordering, EOS, invalid parameters, contextual failures, and at least 100 sequential calls on one `LLM` instance.\n- Add deterministic scheduler contract tests around `StepPlan` and `StepResult`: global token-budget enforcement, exact sequence membership, no zero-token work, admission during decode, fairness, progress, chunk boundaries, cache allocation failure, completion, and result application exactly once.\n- Add scenario tests for no cache hit, full prefix hit, partial prefix hit, mixed hits in one batch, multi-step chunked prefill, decode under KV pressure, recompute-only preemption after generated tokens exist, and recovery to the same deterministic output as an unpreempted run.\n- Add assertions that an incomplete prefill plan cannot sample and that every sampled sequence has completed prompt ingestion.\n- Add model-initialization tests for immutable revision reuse, requested dtype propagation, special-token resolution, a single cache allocation, capacity errors, and a real warmup failure path.\n- Add structural/performance checks showing that normal decode performs no full-vocabulary device-to-host transfer and that attention metadata is materialized once per step. Record prefill throughput, decode throughput, time to first token, per-token latency, and peak memory on the release GPU as versioned evidence; use structural regressions as hard failures and hardware-specific timing deltas as reviewed release evidence.\n- Generate and compare every fixture named by the release manifest across canonical, batch, and regression families. The gate must report exact totals for expected, discovered, generated, compared, skipped, and failed fixtures; release acceptance requires zero missing, zero unexpected, zero skipped, and zero failed fixtures.\n- L1 acceptance requires the expected next token or an explicitly justified near-tie classification computed from the same-prefix candidate logits. Near-tie policy and thresholds must be recorded in the manifest.\n- L2 acceptance compares reference and Rust logits only while token prefixes match, reports the first divergence, and stops that case immediately. It must not compare later steps from different prefixes.\n- The legacy broad tolerance is not an acceptance baseline. v0.2.0 must root-cause the observed error distribution and establish per-dtype/per-kernel tolerances from calibration evidence before the release gate is considered trustworthy.\n- Oracle generation, fixture publication, asset download, manifest validation, Rust execution, and report generation each have explicit non-zero failure behavior. Tests cover partial output, malformed metadata, missing archives/assets, checksum mismatch, and empty inputs.\n- CPU CI remains responsible for `cargo fmt --check`, Clippy with warnings denied, Rust unit/integration/doc tests that do not require CUDA, Python tests, Ruff, mypy, dependency-policy checks, and the declared MSRV.\n- A GPU release job is responsible for the production CUDA build, actual model warmup, public API scenarios, complete golden comparison, and the documented CLI smoke test. A CPU-only green build cannot substitute for this job.\n- Release acceptance requires the Quick Start command to work unchanged on the documented environment, the CLI feature contract to match that command, all version strings to agree, all release assets to be downloadable by the shipped tooling, and both `v0.2.0` and `goldens-v0.2` releases to exist.\n\n## Out of Scope\n\n- Tensor parallel execution, NCCL collectives, multi-GPU scheduling, or claiming the existing TP seam as production-ready.\n- CUDA Graph capture, speculative decoding, quantization, LoRA, and other throughput features that add new correctness dimensions.\n- Async APIs, an HTTP server, OpenAI-compatible endpoints, streaming responses, distributed serving, or production autoscaling.\n- Additional model families, embedding/classification tasks, multimodal inputs, or tokenizer families beyond what the supported Qwen3 contract requires.\n- L3 internal-activation golden fixtures; v0.2.0 closes the L1 token and L2 logits contracts first.\n- Broad public exposure of internal scheduler, cache, attention, loader, model, or sampler implementation types.\n- Hard cross-hardware latency promises. v0.2.0 records a reproducible baseline and removes known structural hot-path regressions without claiming universal performance parity with vLLM.\n\n## Further Notes\n\n- This is the parent implementation specification for v0.2.0. Delivery should be decomposed into dependency-ordered tickets without reopening the product boundary or the two accepted seams.\n- Recommended delivery order:\n  1. Establish red behavioral tests, fixture coverage accounting, and reproducible performance evidence for the current failure modes.\n  2. Introduce the `StepPlan` / `StepResult` engine seam and correct repeated calls, token budgeting, continuous admission, chunked prefill, prefix caching, progress handling, and recompute-only preemption.\n  3. Complete sampling semantics, request validation/identity, resolved model artifacts, dtype propagation, special-token resolution, single cache allocation, and real warmup.\n  4. Make GPU sampling and attention-step metadata device-oriented, then close full fail-closed golden validation and tolerance calibration.\n  5. Minimize the public API, repair the CLI and quality gates, declare MSRV, update documentation/changelog, and publish the product and golden releases.\n- The current repository is a strong v0.1 architectural prototype with a passing Rust test suite; the objective here is not a rewrite. The deep engine seam concentrates existing responsibilities so their invariants can be tested and trusted.\n- A short TP feasibility spike may end in an ADR that either preserves, revises, or removes currently unused TP-oriented hooks. Any runtime TP implementation should be planned for a later release after the single-GPU contract is stable.\n"
+  },
+  "tickets": [
+    {
+      "number": 29,
+      "database_id": 5292388099,
+      "node_id": "I_kwDOTi3M688AAAABO3NvAw",
+      "title": "Prefactor engine execution behind StepPlan / StepResult",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/29",
+      "created_at": "2026-08-30T13:45:31Z",
+      "updated_at": "2026-08-30T13:45:31Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 0,
+        "blocking": 3,
+        "total_blocked_by": 0,
+        "total_blocking": 3
+      },
+      "blocked_by": [],
+      "acceptance_obligations": [
+        "A StepPlan explicitly identifies scheduled request and sequence identity, phase, exact token ranges, logical positions, token-budget contribution, cache and attention metadata, and whether sampling is permitted.",
+        "EngineCore executes only sequences present in the StepPlan and no longer discovers work by traversing the Scheduler running set.",
+        "Applying a StepResult advances token, lifecycle, completion, and cache state exactly once; stale or duplicate application is rejected.",
+        "Plans cannot silently contain zero-token work or unscheduled running sequences.",
+        "Existing supported prefill, decode, and batched greedy-generation tests remain green through the new seam.",
+        "Focused contract tests make StepPlan and StepResult behavior deterministic without requiring CUDA."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nIntroduce the accepted internal engine seam without expanding the public API. Scheduler-owned mutable state produces an immutable StepPlan, EngineCore executes only that plan, and a StepResult is applied back to scheduler state exactly once. Preserve the currently supported single-request and batched greedy-generation behavior while making later correctness work local to this seam.\n\n## Acceptance criteria\n\n- [ ] A StepPlan explicitly identifies scheduled request and sequence identity, phase, exact token ranges, logical positions, token-budget contribution, cache and attention metadata, and whether sampling is permitted.\n- [ ] EngineCore executes only sequences present in the StepPlan and no longer discovers work by traversing the Scheduler running set.\n- [ ] Applying a StepResult advances token, lifecycle, completion, and cache state exactly once; stale or duplicate application is rejected.\n- [ ] Plans cannot silently contain zero-token work or unscheduled running sequences.\n- [ ] Existing supported prefill, decode, and batched greedy-generation tests remain green through the new seam.\n- [ ] Focused contract tests make StepPlan and StepResult behavior deterministic without requiring CUDA.\n\n## Blocked by\n\n- None (can start immediately).\n\n"
+    },
+    {
+      "number": 30,
+      "database_id": 5292388316,
+      "node_id": "I_kwDOTi3M688AAAABO3Nv3A",
+      "title": "Resolve one immutable model identity",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/30",
+      "created_at": "2026-08-30T13:45:34Z",
+      "updated_at": "2026-08-30T13:45:34Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 0,
+        "blocking": 2,
+        "total_blocked_by": 0,
+        "total_blocking": 2
+      },
+      "blocked_by": [],
+      "acceptance_obligations": [
+        "A remote source resolves to one immutable revision before configuration, tokenizer, and weights are loaded.",
+        "Every artifact used by one LLM instance is demonstrably associated with the same resolved revision.",
+        "A requested supported dtype reaches model construction and cache planning; an unsupported dtype fails with a contextual error.",
+        "EOS and other required special-token metadata come from the resolved model and tokenizer contract rather than a fixed token constant.",
+        "Repeated resolution or download of the same artifact during one construction path is eliminated or covered by an explicit cache.",
+        "Local-source and remote-source contract tests cover identity consistency and failure reporting."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nResolve a model source once into one immutable identity consumed by configuration, tokenizer, weights, dtype handling, and special-token handling. Construction must not independently follow a moving remote branch for different artifacts, silently replace the requested dtype, or rely on a hard-coded Qwen3 EOS token.\n\n## Acceptance criteria\n\n- [ ] A remote source resolves to one immutable revision before configuration, tokenizer, and weights are loaded.\n- [ ] Every artifact used by one LLM instance is demonstrably associated with the same resolved revision.\n- [ ] A requested supported dtype reaches model construction and cache planning; an unsupported dtype fails with a contextual error.\n- [ ] EOS and other required special-token metadata come from the resolved model and tokenizer contract rather than a fixed token constant.\n- [ ] Repeated resolution or download of the same artifact during one construction path is eliminated or covered by an explicit cache.\n- [ ] Local-source and remote-source contract tests cover identity consistency and failure reporting.\n\n## Blocked by\n\n- None (can start immediately).\n\n"
+    },
+    {
+      "number": 31,
+      "database_id": 5292388576,
+      "node_id": "I_kwDOTi3M688AAAABO3Nw4A",
+      "title": "Make the golden fixture lifecycle fail closed",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/31",
+      "created_at": "2026-08-30T13:45:38Z",
+      "updated_at": "2026-08-30T13:45:38Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 0,
+        "blocking": 2,
+        "total_blocked_by": 0,
+        "total_blocking": 2
+      },
+      "blocked_by": [],
+      "acceptance_obligations": [
+        "The manifest declares every expected fixture, its family, model revision, dtype, oracle role, and required comparison level.",
+        "Generation discovers canonical, batch, and regression cases rather than loading only the canonical corpus.",
+        "Any reference-oracle or baseline-oracle exception produces a non-zero result and cannot present partial output as complete.",
+        "Validation reports exact expected, discovered, generated, compared, skipped, and failed totals.",
+        "Release-mode acceptance requires zero missing, zero unexpected, zero skipped, and zero failed fixtures.",
+        "Empty comparison sets, malformed manifests, unsupported fixture shapes, and unmatched identifiers fail closed.",
+        "Python and Rust tests cover the successful lifecycle and each fail-closed condition."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nMake golden generation, discovery, and coverage accounting manifest-driven across canonical, batch, and regression fixture families. A release validation run must be able to prove that every declared case was generated and compared, and must fail on partial, empty, skipped, malformed, or unsupported inputs.\n\n## Acceptance criteria\n\n- [ ] The manifest declares every expected fixture, its family, model revision, dtype, oracle role, and required comparison level.\n- [ ] Generation discovers canonical, batch, and regression cases rather than loading only the canonical corpus.\n- [ ] Any reference-oracle or baseline-oracle exception produces a non-zero result and cannot present partial output as complete.\n- [ ] Validation reports exact expected, discovered, generated, compared, skipped, and failed totals.\n- [ ] Release-mode acceptance requires zero missing, zero unexpected, zero skipped, and zero failed fixtures.\n- [ ] Empty comparison sets, malformed manifests, unsupported fixture shapes, and unmatched identifiers fail closed.\n- [ ] Python and Rust tests cover the successful lifecycle and each fail-closed condition.\n\n## Blocked by\n\n- None (can start immediately).\n\n"
+    },
+    {
+      "number": 32,
+      "database_id": 5292388816,
+      "node_id": "I_kwDOTi3M688AAAABO3Nx0A",
+      "title": "Compare L1/L2 only on the same prefix",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/32",
+      "created_at": "2026-08-30T13:45:41Z",
+      "updated_at": "2026-08-30T13:45:41Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 0,
+        "blocking": 1,
+        "total_blocked_by": 0,
+        "total_blocking": 1
+      },
+      "blocked_by": [],
+      "acceptance_obligations": [
+        "L1 accepts the expected token or a documented near-tie classification derived from the relevant candidate logits.",
+        "A genuine top-1 mismatch can be classified as a near tie when the configured mathematical policy is satisfied; the policy does not require the expected token to already be actual top-1.",
+        "L2 compares logits only while generated prefixes match and stops the case at the first divergent token.",
+        "No logits from different causal prefixes are compared or included in aggregate pass metrics.",
+        "Reports distinguish reference-oracle pass or failure from baseline-oracle calibration observations.",
+        "Tolerance and near-tie policy are explicit versioned inputs rather than hidden defaults.",
+        "Synthetic regression tests cover exact matches, justified near ties, hard mismatches, first-token divergence, and later-token divergence."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nCorrect the golden comparison semantics so token and logits evidence is interpreted only under the same causal history. The Transformers SDPA reference oracle defines expected correctness, while the vLLM baseline oracle remains clearly separated calibration evidence.\n\n## Acceptance criteria\n\n- [ ] L1 accepts the expected token or a documented near-tie classification derived from the relevant candidate logits.\n- [ ] A genuine top-1 mismatch can be classified as a near tie when the configured mathematical policy is satisfied; the policy does not require the expected token to already be actual top-1.\n- [ ] L2 compares logits only while generated prefixes match and stops the case at the first divergent token.\n- [ ] No logits from different causal prefixes are compared or included in aggregate pass metrics.\n- [ ] Reports distinguish reference-oracle pass or failure from baseline-oracle calibration observations.\n- [ ] Tolerance and near-tie policy are explicit versioned inputs rather than hidden defaults.\n- [ ] Synthetic regression tests cover exact matches, justified near ties, hard mismatches, first-token divergence, and later-token divergence.\n\n## Blocked by\n\n- None (can start immediately).\n\n"
+    },
+    {
+      "number": 33,
+      "database_id": 5292389090,
+      "node_id": "I_kwDOTi3M688AAAABO3Ny4g",
+      "title": "Reuse one LLM without losing request outputs",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/33",
+      "created_at": "2026-08-30T13:45:45Z",
+      "updated_at": "2026-08-30T13:45:45Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 1,
+        "blocking": 1,
+        "total_blocked_by": 1,
+        "total_blocking": 1
+      },
+      "blocked_by": [
+        29
+      ],
+      "acceptance_obligations": [
+        "Public request identity and batch position are represented independently from the internal sequence identifier.",
+        "At least 100 sequential LLM::generate calls on one instance return complete outputs without stale indexing, dropped results, or placeholder results.",
+        "Mixed-size batches return exactly one RequestOutput per accepted prompt in input order.",
+        "Internal scheduling and completion order may differ without changing public output association.",
+        "An execution failure is returned as an error and never converted into an empty successful output.",
+        "Regression tests reproduce the prior second-call failure and demonstrate the corrected behavior."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nMake request identity and output assembly independent of monotonic internal sequence identifiers. Reusing one LLM instance must return one real RequestOutput per accepted prompt in input order, regardless of prior calls or internal scheduling order.\n\n## Acceptance criteria\n\n- [ ] Public request identity and batch position are represented independently from the internal sequence identifier.\n- [ ] At least 100 sequential LLM::generate calls on one instance return complete outputs without stale indexing, dropped results, or placeholder results.\n- [ ] Mixed-size batches return exactly one RequestOutput per accepted prompt in input order.\n- [ ] Internal scheduling and completion order may differ without changing public output association.\n- [ ] An execution failure is returned as an error and never converted into an empty successful output.\n- [ ] Regression tests reproduce the prior second-call failure and demonstrate the corrected behavior.\n\n## Blocked by\n\n- #29 — Prefactor engine execution behind StepPlan / StepResult\n\n"
+    },
+    {
+      "number": 34,
+      "database_id": 5292389324,
+      "node_id": "I_kwDOTi3M688AAAABO3NzzA",
+      "title": "Bound every Scheduler step and surface stalls",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/34",
+      "created_at": "2026-08-30T13:45:48Z",
+      "updated_at": "2026-08-30T13:45:48Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 1,
+        "blocking": 2,
+        "total_blocked_by": 1,
+        "total_blocking": 2
+      },
+      "blocked_by": [
+        29
+      ],
+      "acceptance_obligations": [
+        "The sum of scheduled prefill and decode tokens never exceeds the configured maximum batched-token budget.",
+        "Only sequences with positive scheduled work appear in a StepPlan or reach model execution.",
+        "Token budgeting is correct for every sequence in a batch rather than only the first sequence considered.",
+        "KVCacheManager and BlockPool allocation failures are propagated without leaking blocks or partially advancing Sequence state.",
+        "Every successful engine step consumes work, changes lifecycle state, or completes a request; otherwise a contextual no-progress error is returned.",
+        "Tight-budget mixed-length scenarios complete without index underflow, silent loops, or budget violations.",
+        "Deterministic Scheduler tests cover exact plan membership, boundary budgets, allocation failure, and stall detection."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nMake every Scheduler decision a bounded, exact, and observable unit of work. Mixed requests must respect the global batched-token budget, cache failures must remain transactional, and an engine loop that cannot make progress must return a useful error instead of spinning.\n\n## Acceptance criteria\n\n- [ ] The sum of scheduled prefill and decode tokens never exceeds the configured maximum batched-token budget.\n- [ ] Only sequences with positive scheduled work appear in a StepPlan or reach model execution.\n- [ ] Token budgeting is correct for every sequence in a batch rather than only the first sequence considered.\n- [ ] KVCacheManager and BlockPool allocation failures are propagated without leaking blocks or partially advancing Sequence state.\n- [ ] Every successful engine step consumes work, changes lifecycle state, or completes a request; otherwise a contextual no-progress error is returned.\n- [ ] Tight-budget mixed-length scenarios complete without index underflow, silent loops, or budget violations.\n- [ ] Deterministic Scheduler tests cover exact plan membership, boundary budgets, allocation failure, and stall detection.\n\n## Blocked by\n\n- #29 — Prefactor engine execution behind StepPlan / StepResult\n\n"
+    },
+    {
+      "number": 35,
+      "database_id": 5292389579,
+      "node_id": "I_kwDOTi3M688AAAABO3N0yw",
+      "title": "Allocate one warmed KV cache within budget",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/35",
+      "created_at": "2026-08-30T13:45:52Z",
+      "updated_at": "2026-08-30T13:45:52Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 1,
+        "blocking": 2,
+        "total_blocked_by": 1,
+        "total_blocking": 2
+      },
+      "blocked_by": [
+        30
+      ],
+      "acceptance_obligations": [
+        "LLM construction retains exactly one production KV-cache allocation and does not temporarily keep a differently sized model-owned cache.",
+        "Cache capacity calculation accounts for model geometry, cache dtype, block size, and the configured memory budget.",
+        "An impossible or unsafe capacity request fails before a user request is admitted and reports the limiting resource.",
+        "Warmup executes a representative model path that exercises the relevant CUDA, dtype, shape, and attention contracts rather than only synchronizing the device.",
+        "Warmup leaves no user-visible Sequence, prefix-cache, or output state behind.",
+        "A first real generation after warmup produces the same deterministic result as the equivalent non-mutating reference scenario.",
+        "Initialization tests or instrumentation demonstrate single allocation, capacity failure, and warmup error propagation."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nConstruct one PagedKVCache sized from the resolved model and configured device-memory budget, then perform a representative warmup before accepting requests. Initialization must fail early when capacity, shape, dtype, or CUDA kernel requirements cannot be satisfied.\n\n## Acceptance criteria\n\n- [ ] LLM construction retains exactly one production KV-cache allocation and does not temporarily keep a differently sized model-owned cache.\n- [ ] Cache capacity calculation accounts for model geometry, cache dtype, block size, and the configured memory budget.\n- [ ] An impossible or unsafe capacity request fails before a user request is admitted and reports the limiting resource.\n- [ ] Warmup executes a representative model path that exercises the relevant CUDA, dtype, shape, and attention contracts rather than only synchronizing the device.\n- [ ] Warmup leaves no user-visible Sequence, prefix-cache, or output state behind.\n- [ ] A first real generation after warmup produces the same deterministic result as the equivalent non-mutating reference scenario.\n- [ ] Initialization tests or instrumentation demonstrate single allocation, capacity failure, and warmup error propagation.\n\n## Blocked by\n\n- #30 — Resolve one immutable model identity\n\n"
+    },
+    {
+      "number": 36,
+      "database_id": 5292389812,
+      "node_id": "I_kwDOTi3M688AAAABO3N1tA",
+      "title": "Honor validated per-request SamplingParams",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/36",
+      "created_at": "2026-08-30T13:45:55Z",
+      "updated_at": "2026-08-30T13:45:55Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 2,
+        "blocking": 1,
+        "total_blocked_by": 2,
+        "total_blocking": 1
+      },
+      "blocked_by": [
+        30,
+        33
+      ],
+      "acceptance_obligations": [
+        "Temperature, top-k, top-p, presence penalty, frequency penalty, repetition penalty, max_tokens, and ignore_eos are preserved per request rather than reconstructed from a subset.",
+        "Two prompts in the same batch can use different SamplingParams without cross-request contamination.",
+        "Greedy generation remains deterministic for the same resolved model, prompt, and options.",
+        "EOS uses resolved model metadata, ignore_eos is honored, and max_tokens has consistent completion-token semantics.",
+        "Invalid ranges and unsupported parameter combinations return actionable validation errors before request admission.",
+        "Request completion and error paths retain the originating parameters for diagnostics without exposing internal Sequence mechanics.",
+        "Black-box tests exercise every supported field individually and representative combinations."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nCarry one validated SamplingParams value with each request from LLM::generate through scheduling, sampling, and completion. Every supported field must have observable semantics, and invalid settings must fail before scheduler or cache state is allocated.\n\n## Acceptance criteria\n\n- [ ] Temperature, top-k, top-p, presence penalty, frequency penalty, repetition penalty, max_tokens, and ignore_eos are preserved per request rather than reconstructed from a subset.\n- [ ] Two prompts in the same batch can use different SamplingParams without cross-request contamination.\n- [ ] Greedy generation remains deterministic for the same resolved model, prompt, and options.\n- [ ] EOS uses resolved model metadata, ignore_eos is honored, and max_tokens has consistent completion-token semantics.\n- [ ] Invalid ranges and unsupported parameter combinations return actionable validation errors before request admission.\n- [ ] Request completion and error paths retain the originating parameters for diagnostics without exposing internal Sequence mechanics.\n- [ ] Black-box tests exercise every supported field individually and representative combinations.\n\n## Blocked by\n\n- #30 — Resolve one immutable model identity\n- #33 — Reuse one LLM without losing request outputs\n\n"
+    },
+    {
+      "number": 37,
+      "database_id": 5292390065,
+      "node_id": "I_kwDOTi3M688AAAABO3N2sQ",
+      "title": "Finish chunked prefill before sampling",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/37",
+      "created_at": "2026-08-30T13:45:58Z",
+      "updated_at": "2026-08-30T13:45:58Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 1,
+        "blocking": 3,
+        "total_blocked_by": 1,
+        "total_blocking": 3
+      },
+      "blocked_by": [
+        34
+      ],
+      "acceptance_obligations": [
+        "Each prefill StepPlan contains the exact next uncached prompt range derived from Sequence progress.",
+        "A prompt larger than the batched-token budget completes over multiple engine steps without duplicating or skipping tokens.",
+        "Every non-final prompt chunk explicitly disables sampling and cannot append a completion token.",
+        "The final prompt chunk enables one sampling decision only after all prompt tokens are represented in causal state.",
+        "Deterministic output matches an equivalent unchunked execution when both are run with the same model and SamplingParams.",
+        "Mixed long and short prompts preserve request identity, output order, and global token-budget invariants.",
+        "Tests cover one-token boundaries, exact-budget boundaries, multi-chunk prompts, and incomplete-prefill error handling."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nProcess a long prompt over multiple bounded StepPlans while preserving exact token offsets and causal positions. Incomplete prefill work must never sample or append a completion token; sampling becomes legal exactly once after the full logical prompt is represented.\n\n## Acceptance criteria\n\n- [ ] Each prefill StepPlan contains the exact next uncached prompt range derived from Sequence progress.\n- [ ] A prompt larger than the batched-token budget completes over multiple engine steps without duplicating or skipping tokens.\n- [ ] Every non-final prompt chunk explicitly disables sampling and cannot append a completion token.\n- [ ] The final prompt chunk enables one sampling decision only after all prompt tokens are represented in causal state.\n- [ ] Deterministic output matches an equivalent unchunked execution when both are run with the same model and SamplingParams.\n- [ ] Mixed long and short prompts preserve request identity, output order, and global token-budget invariants.\n- [ ] Tests cover one-token boundaries, exact-budget boundaries, multi-chunk prompts, and incomplete-prefill error handling.\n\n## Blocked by\n\n- #34 — Bound every Scheduler step and surface stalls\n\n"
+    },
+    {
+      "number": 38,
+      "database_id": 5292390311,
+      "node_id": "I_kwDOTi3M688AAAABO3N3pw",
+      "title": "Admit waiting requests during decode fairly",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/38",
+      "created_at": "2026-08-30T13:46:01Z",
+      "updated_at": "2026-08-30T13:46:01Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 2,
+        "blocking": 1,
+        "total_blocked_by": 2,
+        "total_blocking": 1
+      },
+      "blocked_by": [
+        34,
+        37
+      ],
+      "acceptance_obligations": [
+        "Waiting requests can enter a StepPlan while the running set contains decoding requests.",
+        "Mixed prefill and decode work in one scheduling horizon still respects the global token and cache budgets.",
+        "A runnable waiting request is selected within a deterministic bounded number of scheduling decisions under fixed available capacity.",
+        "Admission does not cause an incomplete prefill request to sample or a decoding request to lose causal state.",
+        "All accepted requests eventually return one correctly associated output in stress scenarios with staggered arrival and mixed prompt lengths.",
+        "A genuinely capacity-blocked request remains waiting with an observable reason rather than being treated as runnable progress.",
+        "Scheduler and LLM::generate scenarios cover interleaving, fairness, ordering, and completion."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nProvide actual continuous batching by admitting waiting prefill work while other requests decode whenever token and cache budgets permit. Deterministic fairness and progress rules must prevent a runnable request from starving behind a long-lived request.\n\n## Acceptance criteria\n\n- [ ] Waiting requests can enter a StepPlan while the running set contains decoding requests.\n- [ ] Mixed prefill and decode work in one scheduling horizon still respects the global token and cache budgets.\n- [ ] A runnable waiting request is selected within a deterministic bounded number of scheduling decisions under fixed available capacity.\n- [ ] Admission does not cause an incomplete prefill request to sample or a decoding request to lose causal state.\n- [ ] All accepted requests eventually return one correctly associated output in stress scenarios with staggered arrival and mixed prompt lengths.\n- [ ] A genuinely capacity-blocked request remains waiting with an observable reason rather than being treated as runnable progress.\n- [ ] Scheduler and LLM::generate scenarios cover interleaving, fairness, ordering, and completion.\n\n## Blocked by\n\n- #34 — Bound every Scheduler step and surface stalls\n- #37 — Finish chunked prefill before sampling\n\n"
+    },
+    {
+      "number": 39,
+      "database_id": 5292390543,
+      "node_id": "I_kwDOTi3M688AAAABO3N4jw",
+      "title": "Make prefix-cached prefill causally correct",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/39",
+      "created_at": "2026-08-30T13:46:05Z",
+      "updated_at": "2026-08-30T13:46:05Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 1,
+        "blocking": 2,
+        "total_blocked_by": 1,
+        "total_blocking": 2
+      },
+      "blocked_by": [
+        37
+      ],
+      "acceptance_obligations": [
+        "The uncached model-input range begins at the actual cached-token count for full and partial prefix hits.",
+        "Logical positions and attention KV lengths include cached history while model input contains only newly scheduled prompt tokens.",
+        "A request cannot sample until its full logical prompt, including cached and newly computed tokens, is represented.",
+        "One batch can mix full hits, partial hits, and misses without cross-request metadata or cache corruption.",
+        "Cache-enabled and cache-disabled deterministic runs produce the same RequestOutput for the same prompts and options.",
+        "Prefix block reference counts and ownership remain correct on completion, rejection, and execution failure.",
+        "Tests cover shared prefixes, block-boundary prefixes, partial final blocks, mixed hits, and collision-safe identity."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nUse cached prompt KV state and newly scheduled prompt tokens as one coherent causal history. Full, partial, and mixed prefix-cache hits must produce the same deterministic generation as cache-disabled execution while retaining correct BlockPool ownership.\n\n## Acceptance criteria\n\n- [ ] The uncached model-input range begins at the actual cached-token count for full and partial prefix hits.\n- [ ] Logical positions and attention KV lengths include cached history while model input contains only newly scheduled prompt tokens.\n- [ ] A request cannot sample until its full logical prompt, including cached and newly computed tokens, is represented.\n- [ ] One batch can mix full hits, partial hits, and misses without cross-request metadata or cache corruption.\n- [ ] Cache-enabled and cache-disabled deterministic runs produce the same RequestOutput for the same prompts and options.\n- [ ] Prefix block reference counts and ownership remain correct on completion, rejection, and execution failure.\n- [ ] Tests cover shared prefixes, block-boundary prefixes, partial final blocks, mixed hits, and collision-safe identity.\n\n## Blocked by\n\n- #37 — Finish chunked prefill before sampling\n\n"
+    },
+    {
+      "number": 40,
+      "database_id": 5292390765,
+      "node_id": "I_kwDOTi3M688AAAABO3N5bQ",
+      "title": "Recompute full causal history after preemption",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/40",
+      "created_at": "2026-08-30T13:46:08Z",
+      "updated_at": "2026-08-30T13:46:08Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 2,
+        "blocking": 2,
+        "total_blocked_by": 2,
+        "total_blocking": 2
+      },
+      "blocked_by": [
+        37,
+        38
+      ],
+      "acceptance_obligations": [
+        "Preemption releases the selected request's physical KV blocks transactionally while preserving its logical token history and SamplingParams.",
+        "Recompute work includes original prompt tokens and all previously generated completion tokens required by the causal prefix.",
+        "Recompute prefill obeys chunking and cannot sample before the full prior history is restored.",
+        "A forced low-capacity scenario produces the same deterministic output with and without preemption.",
+        "Multiple preemptions of one request do not duplicate tokens, leak blocks, lose request identity, or enter a no-progress loop.",
+        "Other continuously batched requests continue to respect fairness and token-budget rules during recovery.",
+        "Tests cover preemption before decode, after generated tokens exist, repeated preemption, and cache-allocation failure during recovery."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nMake recompute-only preemption discard physical cache residency without discarding the logical prompt-plus-completion history needed to resume generation. A preempted request must rebuild its causal state and converge on the same deterministic output as an unpreempted request.\n\n## Acceptance criteria\n\n- [ ] Preemption releases the selected request's physical KV blocks transactionally while preserving its logical token history and SamplingParams.\n- [ ] Recompute work includes original prompt tokens and all previously generated completion tokens required by the causal prefix.\n- [ ] Recompute prefill obeys chunking and cannot sample before the full prior history is restored.\n- [ ] A forced low-capacity scenario produces the same deterministic output with and without preemption.\n- [ ] Multiple preemptions of one request do not duplicate tokens, leak blocks, lose request identity, or enter a no-progress loop.\n- [ ] Other continuously batched requests continue to respect fairness and token-budget rules during recovery.\n- [ ] Tests cover preemption before decode, after generated tokens exist, repeated preemption, and cache-allocation failure during recovery.\n\n## Blocked by\n\n- #37 — Finish chunked prefill before sampling\n- #38 — Admit waiting requests during decode fairly\n\n"
+    },
+    {
+      "number": 41,
+      "database_id": 5292391000,
+      "node_id": "I_kwDOTi3M688AAAABO3N6WA",
+      "title": "Keep token sampling on the GPU hot path",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/41",
+      "created_at": "2026-08-30T13:46:12Z",
+      "updated_at": "2026-08-30T13:46:12Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 1,
+        "blocking": 2,
+        "total_blocked_by": 1,
+        "total_blocking": 2
+      },
+      "blocked_by": [
+        36
+      ],
+      "acceptance_obligations": [
+        "Normal greedy, top-k, top-p, and supported penalty paths do not perform a full-vocabulary device-to-host transfer.",
+        "Each supported SamplingParams behavior remains equivalent to the validated sampling contract.",
+        "Only selected token identifiers and explicitly requested diagnostic data cross to the host during normal generation.",
+        "Batched requests with different SamplingParams remain isolated and produce correctly associated outputs.",
+        "CUDA and tensor-operation failures return contextual errors rather than falling back silently to the legacy host loop.",
+        "Structural instrumentation or profiling assertions make the absence of full-logit host copies regression-testable.",
+        "Deterministic and statistical sanity tests cover the supported device-side paths."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nExecute supported logits penalties, filtering, probability selection, and token choice on the CUDA device so normal decode does not transfer a full vocabulary row to the CPU for every request and token. Transfer only the minimal selected-token data needed by scheduler state and public output.\n\n## Acceptance criteria\n\n- [ ] Normal greedy, top-k, top-p, and supported penalty paths do not perform a full-vocabulary device-to-host transfer.\n- [ ] Each supported SamplingParams behavior remains equivalent to the validated sampling contract.\n- [ ] Only selected token identifiers and explicitly requested diagnostic data cross to the host during normal generation.\n- [ ] Batched requests with different SamplingParams remain isolated and produce correctly associated outputs.\n- [ ] CUDA and tensor-operation failures return contextual errors rather than falling back silently to the legacy host loop.\n- [ ] Structural instrumentation or profiling assertions make the absence of full-logit host copies regression-testable.\n- [ ] Deterministic and statistical sanity tests cover the supported device-side paths.\n\n## Blocked by\n\n- #36 — Honor validated per-request SamplingParams\n\n"
+    },
+    {
+      "number": 42,
+      "database_id": 5292391258,
+      "node_id": "I_kwDOTi3M688AAAABO3N7Wg",
+      "title": "Prepare attention metadata once per StepPlan",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/42",
+      "created_at": "2026-08-30T13:46:15Z",
+      "updated_at": "2026-08-30T13:46:15Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 2,
+        "blocking": 2,
+        "total_blocked_by": 2,
+        "total_blocking": 2
+      },
+      "blocked_by": [
+        29,
+        39
+      ],
+      "acceptance_obligations": [
+        "One internal attention context owns the device-ready metadata derived from a StepPlan.",
+        "All participating layers reuse that context instead of rebuilding equivalent vectors or tensors.",
+        "Prefill, decode, chunked-prefill, and prefix-cache shapes and lengths remain correct.",
+        "No per-layer Vec-to-Tensor reconstruction or equivalent metadata upload occurs during one engine step.",
+        "Deterministic outputs remain unchanged for no-hit, partial-hit, full-hit, and mixed-batch scenarios.",
+        "Instrumentation or profiling assertions demonstrate one metadata preparation per StepPlan.",
+        "The existing CUDA paged-attention backend remains the only required runtime backend; no unused backend abstraction is introduced."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nConvert one StepPlan into device-ready attention metadata once per engine step and reuse it across every participating model layer. Preserve prefill, decode, and prefix-cache correctness while removing repeated per-layer or per-sequence host materialization.\n\n## Acceptance criteria\n\n- [ ] One internal attention context owns the device-ready metadata derived from a StepPlan.\n- [ ] All participating layers reuse that context instead of rebuilding equivalent vectors or tensors.\n- [ ] Prefill, decode, chunked-prefill, and prefix-cache shapes and lengths remain correct.\n- [ ] No per-layer Vec-to-Tensor reconstruction or equivalent metadata upload occurs during one engine step.\n- [ ] Deterministic outputs remain unchanged for no-hit, partial-hit, full-hit, and mixed-batch scenarios.\n- [ ] Instrumentation or profiling assertions demonstrate one metadata preparation per StepPlan.\n- [ ] The existing CUDA paged-attention backend remains the only required runtime backend; no unused backend abstraction is introduced.\n\n## Blocked by\n\n- #29 — Prefactor engine execution behind StepPlan / StepResult\n- #39 — Make prefix-cached prefill causally correct\n\n"
+    },
+    {
+      "number": 43,
+      "database_id": 5292391460,
+      "node_id": "I_kwDOTi3M688AAAABO3N8JA",
+      "title": "Unify golden publisher and downloader assets",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/43",
+      "created_at": "2026-08-30T13:46:19Z",
+      "updated_at": "2026-08-30T13:46:19Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 1,
+        "blocking": 2,
+        "total_blocked_by": 1,
+        "total_blocking": 2
+      },
+      "blocked_by": [
+        31
+      ],
+      "acceptance_obligations": [
+        "The release asset layout is exactly one versioned fixture archive plus one standalone manifest.",
+        "The manifest records schema version, product and golden versions, archive identity, archive checksum, and per-fixture checksums.",
+        "The archive contains every and only the fixtures declared by the manifest and does not rely on individual fixture release assets.",
+        "The downloader fetches both assets, validates version compatibility and checksums, and installs fixtures atomically.",
+        "Missing assets, checksum mismatch, malformed archives, path traversal entries, duplicate fixtures, and partial extraction fail closed.",
+        "Publisher and downloader contract tests use the same manifest schema and cover upgrade rejection.",
+        "The contract is documented sufficiently for a release producer and a clean consumer to interoperate."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nAdopt one versioned golden asset contract shared by publication and consumption. For v0.2, publish a standalone manifest and one compressed fixture archive; the downloader verifies the archive and every extracted fixture before exposing them to comparison.\n\n## Acceptance criteria\n\n- [ ] The release asset layout is exactly one versioned fixture archive plus one standalone manifest.\n- [ ] The manifest records schema version, product and golden versions, archive identity, archive checksum, and per-fixture checksums.\n- [ ] The archive contains every and only the fixtures declared by the manifest and does not rely on individual fixture release assets.\n- [ ] The downloader fetches both assets, validates version compatibility and checksums, and installs fixtures atomically.\n- [ ] Missing assets, checksum mismatch, malformed archives, path traversal entries, duplicate fixtures, and partial extraction fail closed.\n- [ ] Publisher and downloader contract tests use the same manifest schema and cover upgrade rejection.\n- [ ] The contract is documented sufficiently for a release producer and a clean consumer to interoperate.\n\n## Blocked by\n\n- #31 — Make the golden fixture lifecycle fail closed\n\n"
+    },
+    {
+      "number": 44,
+      "database_id": 5292391682,
+      "node_id": "I_kwDOTi3M688AAAABO3N9Ag",
+      "title": "Contract the public API around LLM::generate",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/44",
+      "created_at": "2026-08-30T13:46:22Z",
+      "updated_at": "2026-08-30T13:46:22Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 4,
+        "blocking": 1,
+        "total_blocked_by": 4,
+        "total_blocking": 1
+      },
+      "blocked_by": [
+        35,
+        40,
+        41,
+        42
+      ],
+      "acceptance_obligations": [
+        "The supported public surface is limited to LLM, EngineOptions, Prompt, SamplingParams, RequestOutput, Source, and the public error or result types required to use them.",
+        "Scheduler, Sequence, BlockPool, KVCacheManager, PagedKVCache, attention metadata, model-loader, registry, and sampler implementation types are no longer public API.",
+        "Workspace consumers and the CLI use only the contracted public surface.",
+        "An external-consumer compile test demonstrates construction and generation without internal imports.",
+        "Public documentation states the single-GPU Qwen3 offline-generation boundary and supported parameter semantics.",
+        "The semver-visible contraction is recorded for v0.2.0.",
+        "Existing end-to-end behavior and CUDA paths remain green after obsolete exports and compatibility scaffolding are removed."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nComplete the wide API contraction after engine and initialization behavior has stabilized. External users should need only the offline-generation composition root and its input, output, source, option, and error types; scheduler, sequence, cache, attention, loader, model, and sampler mechanics remain internal.\n\n## Acceptance criteria\n\n- [ ] The supported public surface is limited to LLM, EngineOptions, Prompt, SamplingParams, RequestOutput, Source, and the public error or result types required to use them.\n- [ ] Scheduler, Sequence, BlockPool, KVCacheManager, PagedKVCache, attention metadata, model-loader, registry, and sampler implementation types are no longer public API.\n- [ ] Workspace consumers and the CLI use only the contracted public surface.\n- [ ] An external-consumer compile test demonstrates construction and generation without internal imports.\n- [ ] Public documentation states the single-GPU Qwen3 offline-generation boundary and supported parameter semantics.\n- [ ] The semver-visible contraction is recorded for v0.2.0.\n- [ ] Existing end-to-end behavior and CUDA paths remain green after obsolete exports and compatibility scaffolding are removed.\n\n## Blocked by\n\n- #35 — Allocate one warmed KV cache within budget\n- #40 — Recompute full causal history after preemption\n- #41 — Keep token sampling on the GPU hot path\n- #42 — Prepare attention metadata once per StepPlan\n\n"
+    },
+    {
+      "number": 45,
+      "database_id": 5292391889,
+      "node_id": "I_kwDOTi3M688AAAABO3N90Q",
+      "title": "Calibrate and publish goldens-v0.2",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/45",
+      "created_at": "2026-08-30T13:46:25Z",
+      "updated_at": "2026-08-30T13:46:25Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 8,
+        "blocking": 1,
+        "total_blocked_by": 8,
+        "total_blocking": 1
+      },
+      "blocked_by": [
+        31,
+        32,
+        35,
+        39,
+        40,
+        41,
+        42,
+        43
+      ],
+      "acceptance_obligations": [
+        "Generation pins the exact Qwen3 revision, tokenizer, reference-oracle version, baseline-oracle version, CUDA runtime, kernel path, and dtype.",
+        "Every canonical, batch, and regression fixture declared by the manifest is generated and compared with zero missing, unexpected, skipped, or failed cases.",
+        "L1 results satisfy exact-token or documented near-tie policy, and L2 results stop at the first token divergence.",
+        "Observed error distributions are investigated and per-dtype or per-kernel tolerances are documented; the legacy broad tolerance is not carried forward without root-cause evidence.",
+        "The vLLM baseline is reported as calibration evidence and does not override a reference-oracle failure.",
+        "Prefill throughput, decode throughput, time to first token, per-token latency, and peak memory are recorded on the named release environment.",
+        "The goldens-v0.2 release uses the approved manifest and archive contract and can be downloaded and verified from a clean environment.",
+        "The release report records fixture totals, comparison results, tolerance rationale, performance evidence, and known limitations."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nRun the completed engine and golden toolchain on the release GPU to produce the authoritative v0.2 fixture corpus, justify numerical policy from observed evidence, record the performance baseline, and publish assets that a clean consumer can verify.\n\n## Acceptance criteria\n\n- [ ] Generation pins the exact Qwen3 revision, tokenizer, reference-oracle version, baseline-oracle version, CUDA runtime, kernel path, and dtype.\n- [ ] Every canonical, batch, and regression fixture declared by the manifest is generated and compared with zero missing, unexpected, skipped, or failed cases.\n- [ ] L1 results satisfy exact-token or documented near-tie policy, and L2 results stop at the first token divergence.\n- [ ] Observed error distributions are investigated and per-dtype or per-kernel tolerances are documented; the legacy broad tolerance is not carried forward without root-cause evidence.\n- [ ] The vLLM baseline is reported as calibration evidence and does not override a reference-oracle failure.\n- [ ] Prefill throughput, decode throughput, time to first token, per-token latency, and peak memory are recorded on the named release environment.\n- [ ] The goldens-v0.2 release uses the approved manifest and archive contract and can be downloaded and verified from a clean environment.\n- [ ] The release report records fixture totals, comparison results, tolerance rationale, performance evidence, and known limitations.\n\n## Blocked by\n\n- #31 — Make the golden fixture lifecycle fail closed\n- #32 — Compare L1/L2 only on the same prefix\n- #35 — Allocate one warmed KV cache within budget\n- #39 — Make prefix-cached prefill causally correct\n- #40 — Recompute full causal history after preemption\n- #41 — Keep token sampling on the GPU hot path\n- #42 — Prepare attention metadata once per StepPlan\n- #43 — Unify golden publisher and downloader assets\n\n"
+    },
+    {
+      "number": 46,
+      "database_id": 5292392136,
+      "node_id": "I_kwDOTi3M688AAAABO3N-yA",
+      "title": "Make the CUDA Quick Start the release quality gate",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/46",
+      "created_at": "2026-08-30T13:46:28Z",
+      "updated_at": "2026-08-30T13:46:28Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 2,
+        "blocking": 1,
+        "total_blocked_by": 2,
+        "total_blocking": 1
+      },
+      "blocked_by": [
+        43,
+        44
+      ],
+      "acceptance_obligations": [
+        "The CLI forwards or exposes the production CUDA feature expected by the documented command.",
+        "The exact Quick Start command builds and completes one deterministic Qwen3 generation on a supported CUDA host.",
+        "CPU CI passes Rust formatting, Clippy with warnings denied, unit and integration tests, doc tests, Python tests, Ruff, mypy, dependency-policy checks, and the declared MSRV.",
+        "Python development dependencies required by the documented quality commands are reproducibly installable.",
+        "The GPU workflow performs the production CUDA build, real warmup, repeated-call public API smoke test, mixed-batch smoke test, and CLI smoke test.",
+        "Any skipped phase, swallowed exception, unavailable required asset, or empty result makes the corresponding release gate fail.",
+        "Quick Start, supported environment, feature names, quality commands, and release workflow are documented consistently."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nMake the documented production command, CLI feature surface, CPU quality matrix, and CUDA smoke workflow describe the same supported product. A new user and the release automation must exercise the contracted LLM::generate API rather than an impossible or CPU-only substitute.\n\n## Acceptance criteria\n\n- [ ] The CLI forwards or exposes the production CUDA feature expected by the documented command.\n- [ ] The exact Quick Start command builds and completes one deterministic Qwen3 generation on a supported CUDA host.\n- [ ] CPU CI passes Rust formatting, Clippy with warnings denied, unit and integration tests, doc tests, Python tests, Ruff, mypy, dependency-policy checks, and the declared MSRV.\n- [ ] Python development dependencies required by the documented quality commands are reproducibly installable.\n- [ ] The GPU workflow performs the production CUDA build, real warmup, repeated-call public API smoke test, mixed-batch smoke test, and CLI smoke test.\n- [ ] Any skipped phase, swallowed exception, unavailable required asset, or empty result makes the corresponding release gate fail.\n- [ ] Quick Start, supported environment, feature names, quality commands, and release workflow are documented consistently.\n\n## Blocked by\n\n- #43 — Unify golden publisher and downloader assets\n- #44 — Contract the public API around LLM::generate\n\n"
+    },
+    {
+      "number": 47,
+      "database_id": 5292392366,
+      "node_id": "I_kwDOTi3M688AAAABO3N_rg",
+      "title": "Ship v0.2.0",
+      "state": "open",
+      "url": "https://github.com/RedHeartSecretMan/vllm-oxide/issues/47",
+      "created_at": "2026-08-30T13:46:32Z",
+      "updated_at": "2026-08-30T13:46:32Z",
+      "closed_at": null,
+      "labels": [
+        "ready-for-agent"
+      ],
+      "assignees": [],
+      "comments": [],
+      "issue_dependencies_summary": {
+        "blocked_by": 2,
+        "blocking": 0,
+        "total_blocked_by": 2,
+        "total_blocking": 0
+      },
+      "blocked_by": [
+        45,
+        46
+      ],
+      "acceptance_obligations": [
+        "All blocking v0.2 tickets are closed and the complete CPU and GPU release gates pass from a clean checkout.",
+        "The GPU gate consumes and verifies goldens-v0.2 and reports complete L1 and L2 coverage with no silent skips or failures.",
+        "Crate versions, CLI version, documentation, and changelog all identify v0.2.0 and describe the same supported scope.",
+        "The documented Quick Start succeeds unchanged in the recorded release environment.",
+        "A signed or otherwise repository-standard v0.2.0 tag and formal GitHub Release are created with release notes and known limitations.",
+        "The product release links the compatible goldens-v0.2 assets and records the pinned model and runtime evidence.",
+        "Release notes explicitly keep TP or NCCL, serving APIs, additional model families, quantization, LoRA, speculative decoding, and CUDA Graphs out of scope."
+      ],
+      "body": "## Parent\n\n- #28\n\n## What to build\n\nExecute the final integrated release gate and publish the trustworthy single-GPU Qwen3 offline-inference release defined by parent issue #28. Align code, documentation, golden assets, and release metadata under one reproducible v0.2.0 contract.\n\n## Acceptance criteria\n\n- [ ] All blocking v0.2 tickets are closed and the complete CPU and GPU release gates pass from a clean checkout.\n- [ ] The GPU gate consumes and verifies goldens-v0.2 and reports complete L1 and L2 coverage with no silent skips or failures.\n- [ ] Crate versions, CLI version, documentation, and changelog all identify v0.2.0 and describe the same supported scope.\n- [ ] The documented Quick Start succeeds unchanged in the recorded release environment.\n- [ ] A signed or otherwise repository-standard v0.2.0 tag and formal GitHub Release are created with release notes and known limitations.\n- [ ] The product release links the compatible goldens-v0.2 assets and records the pinned model and runtime evidence.\n- [ ] Release notes explicitly keep TP or NCCL, serving APIs, additional model families, quantization, LoRA, speculative decoding, and CUDA Graphs out of scope.\n\n## Blocked by\n\n- #45 — Calibrate and publish goldens-v0.2\n- #46 — Make the CUDA Quick Start the release quality gate\n\n"
+    }
+  ],
+  "hard_dependencies": [
+    {
+      "blocked_issue": 33,
+      "blocked_by_issue": 29
+    },
+    {
+      "blocked_issue": 34,
+      "blocked_by_issue": 29
+    },
+    {
+      "blocked_issue": 35,
+      "blocked_by_issue": 30
+    },
+    {
+      "blocked_issue": 36,
+      "blocked_by_issue": 30
+    },
+    {
+      "blocked_issue": 36,
+      "blocked_by_issue": 33
+    },
+    {
+      "blocked_issue": 37,
+      "blocked_by_issue": 34
+    },
+    {
+      "blocked_issue": 38,
+      "blocked_by_issue": 34
+    },
+    {
+      "blocked_issue": 38,
+      "blocked_by_issue": 37
+    },
+    {
+      "blocked_issue": 39,
+      "blocked_by_issue": 37
+    },
+    {
+      "blocked_issue": 40,
+      "blocked_by_issue": 37
+    },
+    {
+      "blocked_issue": 40,
+      "blocked_by_issue": 38
+    },
+    {
+      "blocked_issue": 41,
+      "blocked_by_issue": 36
+    },
+    {
+      "blocked_issue": 42,
+      "blocked_by_issue": 29
+    },
+    {
+      "blocked_issue": 42,
+      "blocked_by_issue": 39
+    },
+    {
+      "blocked_issue": 43,
+      "blocked_by_issue": 31
+    },
+    {
+      "blocked_issue": 44,
+      "blocked_by_issue": 35
+    },
+    {
+      "blocked_issue": 44,
+      "blocked_by_issue": 40
+    },
+    {
+      "blocked_issue": 44,
+      "blocked_by_issue": 41
+    },
+    {
+      "blocked_issue": 44,
+      "blocked_by_issue": 42
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 31
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 32
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 35
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 39
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 40
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 41
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 42
+    },
+    {
+      "blocked_issue": 45,
+      "blocked_by_issue": 43
+    },
+    {
+      "blocked_issue": 46,
+      "blocked_by_issue": 43
+    },
+    {
+      "blocked_issue": 46,
+      "blocked_by_issue": 44
+    },
+    {
+      "blocked_issue": 47,
+      "blocked_by_issue": 45
+    },
+    {
+      "blocked_issue": 47,
+      "blocked_by_issue": 46
+    }
+  ],
+  "graph_validation": {
+    "ticket_count": 19,
+    "hard_dependency_count": 31,
+    "acyclic": true,
+    "topological_order": [
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47
+    ],
+    "runnable_frontier_at_capture": [
+      29,
+      30,
+      31,
+      32
+    ],
+    "validation_errors": []
+  }
+}
