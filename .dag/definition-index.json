@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "077eeb0982433b1147d51ff3217a9209b868ef31"
+      "blob_oid": "6baba0832544897b20325cb80ab2a874157fc5dc"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -48,6 +48,10 @@
     {
       "path": "docs/adr/0010-golden-release-asset-contract.md",
       "blob_oid": "39a3da72dd217ecde4335f940757d5776efe1f69"
+    },
+    {
+      "path": "docs/adr/0011-public-generation-contract.md",
+      "blob_oid": "0d29209e69f85a290bee0fc83023ad10d843a6c5"
     }
   ]
 }

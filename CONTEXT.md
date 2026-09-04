@@ -1,6 +1,6 @@
 # vllm-oxide
 
-A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture: a single-GPU, Qwen3-focused, offline LLM inference engine for v0.1.
+A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture: a single-GPU, Qwen3 offline LLM inference engine with a correctness-first v0.2.0 contract.
 
 ## Language
 
@@ -101,8 +101,12 @@ _Avoid_: attention bundle, per-layer metadata.
 
 ## API surface
 
+**Public generation contract**:
+The supported v0.2.0 crate-root surface: `LLM`, `EngineOptions`, `Prompt`, `SamplingParams`, `RequestOutput`, and `Source`. Construction and offline generation are the public boundary; engine, model, cache, attention, loader, registry, and sampler mechanics remain internal.
+_Avoid_: public engine API, public model API, compatibility exports.
+
 **LLM::generate**:
-The single public function — `generate(&mut self, prompts: &[Prompt], sampling_params: &[SamplingParams]) -> Result<Vec<RequestOutput>>`. Internally loops `step()` until `scheduler.is_finished()`, then detokenizes. Mirrors nano-vllm `LLM.generate`.
+The authoritative supported generation method — `generate(&mut self, prompts: &[Prompt], sampling_params: &[SamplingParams]) -> Result<Vec<RequestOutput>>`. `LLM::new` is the composition-root constructor; raw logits and internal execution controls are not part of this contract.
 _Avoid_: run, infer, complete, __call__.
 
 **Prompt**:
