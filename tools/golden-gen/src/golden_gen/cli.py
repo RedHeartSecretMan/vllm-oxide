@@ -12,11 +12,12 @@ from golden_gen.calibrate import (
     calibrate_from_fixtures,
     validate_calibration_coverage,
 )
+from golden_gen.config import NEAR_TIE_ATOL_MULTIPLIER
 from golden_gen.generate import run_all
 from golden_gen.manifest import build_expected_fixtures, build_manifest, write_manifest
 from golden_gen.oracles.fake import FakeOracle
 from golden_gen.prompts import discover_fixtures, load_prompts
-from golden_gen.schema import PromptCategory, ToleranceCalibration
+from golden_gen.schema import ComparisonPolicy, PromptCategory, ToleranceCalibration
 
 
 def _resolve_prompts_dir() -> Path:
@@ -134,6 +135,7 @@ def _run_generate(args: argparse.Namespace) -> int:
 
     existing_manifest_path = output_dir / "manifest.json"
     existing_tolerance: ToleranceCalibration | None = None
+    existing_policy: ComparisonPolicy | None = None
     if existing_manifest_path.exists():
         from golden_gen.manifest import read_manifest
 
@@ -141,6 +143,7 @@ def _run_generate(args: argparse.Namespace) -> int:
         all_fixtures = list(existing.fixtures)
         if existing.tolerance.atol > 0.0:
             existing_tolerance = existing.tolerance
+            existing_policy = existing.comparison_policy
 
     failed_oracles: list[str] = []
     generated_this_run: set[str] = set()
@@ -210,6 +213,8 @@ def _run_generate(args: argparse.Namespace) -> int:
 
     if existing_tolerance is not None:
         tolerance = existing_tolerance
+        assert existing_policy is not None
+        comparison_policy = existing_policy
         print(f"Reusing existing calibrated tolerance: atol={tolerance.atol:.6f}")
     else:
         tolerance = ToleranceCalibration(
@@ -218,9 +223,15 @@ def _run_generate(args: argparse.Namespace) -> int:
             calibration_factor=2.0,
             method="pending -- run `golden-gen calibrate` to compute",
         )
+        comparison_policy = ComparisonPolicy(
+            version="same-prefix-v1",
+            l1_near_tie_max_abs_logit_gap=0.0,
+            l2_atol=0.0,
+        )
     manifest = build_manifest(
         fixtures=all_fixtures,
         tolerance=tolerance,
+        comparison_policy=comparison_policy,
         expected_fixtures=expected_fixtures,
     )
     manifest_path = output_dir / "manifest.json"
@@ -266,11 +277,13 @@ def _run_calibrate(args: argparse.Namespace) -> int:
         f"observed_max_abs_diff={tolerance.observed_max_abs_diff:.6f}"
     )
 
-    print("Regression skip map: disabled (baseline evidence cannot authorize skips)")
-
     manifest.tolerance = tolerance
+    manifest.comparison_policy = ComparisonPolicy(
+        version="same-prefix-v1",
+        l1_near_tie_max_abs_logit_gap=tolerance.atol * NEAR_TIE_ATOL_MULTIPLIER,
+        l2_atol=tolerance.atol,
+    )
     manifest.calibrated_fixtures = calibrated_fixtures
-    manifest.regression_skip_map = {}
     write_manifest(manifest, manifest_path)
     print(f"Updated manifest written to {manifest_path}")
 

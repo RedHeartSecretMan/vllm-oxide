@@ -14,11 +14,11 @@ generator (`tools/golden-gen/`):
 
 | Layer | What it compares | When |
 |-------|-----------------|------|
-| **L1** | Greedy token-sequence exact match | Always |
-| **L2** | Per-step logits tensor comparison (atol+rtol) | Always |
+| **L1** | Greedy token reference match or explicit candidate-logit near tie | Always |
+| **L2** | Same-prefix logits tensor comparison (absolute tolerance) | Always |
 | **L3** | Per-layer activations (debug only) | `--debug` flag |
 
-Before any GPU comparison, a CPU preflight matches the schema-v2 manifest to
+Before any GPU comparison, a CPU preflight matches the schema-v3 manifest to
 all canonical, flattened batch, and regression prompts; verifies asset names,
 SHA-256 digests, tensor sets, dtypes, and shapes; and classifies the two oracle
 roles. Only Transformers reference artifacts feed correctness comparisons.
@@ -59,7 +59,6 @@ cargo run --release -p vllm_oxide_test -- \
 | `--release-tag TAG` | GitHub Release tag to download goldens from |
 | `--repo OWNER/REPO` | GitHub repo (default: `RedHeartSecretMan/vllm-oxide`) |
 | `--cache-dir PATH` | Cache directory for downloaded goldens (default: `/tmp/vllm-oxide-goldens`) |
-| `--epsilon VALUE` | Override near-tie ε for L1 (default: 2× manifest atol) |
 | `--debug` | Enable L3 per-layer activations comparison |
 | `--json` | Output results as JSON |
 | `--l1-only` | Only run L1 comparison |
@@ -75,8 +74,10 @@ Golden fixtures are described by a `manifest.json` (produced by
 - **Provenance**: model ID, revision, architecture, dtype
 - **Expected fixtures**: family, immutable model identity, oracle role, and
   required comparison for every artifact
-- **Tolerances**: calibrated `atol` and `rtol` from oracle cross-validation
-- **Known deviations**: documented disagreements between oracle implementations
+- **Reference comparison policy**: an explicit version, L1 candidate-gap
+  threshold, and L2 absolute tolerance
+- **Baseline calibration**: observed oracle differences and methodology,
+  reported separately from reference correctness
 - **Fixtures**: per-file metadata including SHA-256 hashes
 
 The report includes exact `expected`, `discovered`, `generated`, `compared`,
@@ -93,9 +94,11 @@ gate.
 Drives the engine via `LLM::generate` (greedy, temperature=0). Compares
 generated token IDs against golden token IDs position-by-position.
 
-**Near-tie skipping**: positions where the top-2 logit gap < ε (default:
-2× calibrated atol) are skipped — these are inherently non-deterministic
-under BF16/FP16 precision.
+At the first token mismatch, L1 compares the expected and actual candidate
+logits from that same-prefix row. The mismatch is accepted only when their
+absolute gap satisfies `comparison_policy.l1_near_tie_max_abs_logit_gap`.
+The near tie remains an explicit classification, and later token positions are
+excluded because their causal histories differ.
 
 ### L2: Logits tensor comparison
 
@@ -103,10 +106,12 @@ Drives the engine via `LLM::generate_logits` and compares the raw pre-sampling
 logits `[n, vocab_size]` against golden logits using:
 
 ```
-|actual - expected| <= atol + rtol × |expected|
+|actual - expected| <= comparison_policy.l2_atol
 ```
 
-Tolerances are calibrated from oracle-vs-oracle divergence (×2 safety factor).
+The divergence row is still comparable because it was produced from the shared
+prefix. L2 stops immediately after that token is selected and excludes every
+later row from aggregate metrics.
 
 ### L3: Per-layer activations (debug)
 
@@ -139,8 +144,8 @@ crates/vllm-oxide-test/
     ├── manifest.rs    # Manifest parsing + fixture loading
     ├── lifecycle.rs   # Discovery, asset preflight, and exact coverage accounting
     ├── download.rs    # GitHub Release asset download + SHA-256 verification
-    ├── l1.rs          # L1: token-sequence exact match with near-tie skipping
-    ├── l2.rs          # L2: logits tensor comparison (atol+rtol)
+    ├── l1.rs          # L1: token reference match + explicit near-tie classification
+    ├── l2.rs          # L2: same-prefix logits comparison (absolute tolerance)
     ├── l3.rs          # L3: per-layer activations (debug-only, skeleton)
     └── report.rs      # Comparison report generation
 ```

@@ -111,7 +111,12 @@ class TestCLI:
 
         with open(manifest_path) as f:
             manifest = json.load(f)
-        assert manifest["schema_version"] == 2
+        assert manifest["schema_version"] == 3
+        assert manifest["comparison_policy"] == {
+            "version": "same-prefix-v1",
+            "l1_near_tie_max_abs_logit_gap": 0.0,
+            "l2_atol": 0.0,
+        }
         assert len(manifest["fixtures"]) > 0
         assert manifest["model"]["id"] == "Qwen/Qwen3-0.6B"
 
@@ -377,6 +382,5 @@ class TestCLI:
         assert exit_code != 0
         captured = capsys.readouterr()
         assert (
-            "Lifecycle totals: expected=8 discovered=8 generated=3 "
-            "compared=0 skipped=2 failed=3"
+            "Lifecycle totals: expected=8 discovered=8 generated=3 compared=0 skipped=2 failed=3"
         ) in captured.err

@@ -197,17 +197,6 @@ pub fn preflight(
         }
     }
 
-    for (prompt_id, positions) in &manifest.regression_skip_map {
-        if !positions.is_empty() {
-            let fixture_id = format!("{prompt_id}.transformers");
-            tracker.record_skipped(&fixture_id);
-            tracker.record_failed(&fixture_id);
-            errors.push(format!(
-                "legacy regression skip map is unsupported in release validation: {prompt_id}"
-            ));
-        }
-    }
-
     LifecyclePreflight {
         tracker,
         reference_cases,
@@ -380,7 +369,7 @@ mod tests {
 
     fn test_manifest() -> Manifest {
         serde_json::from_value(json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "generated_at": "2026-09-04T00:00:00Z",
             "model": {
                 "id": "model", "revision": "rev", "arch": "arch",
@@ -394,6 +383,11 @@ mod tests {
             "tolerance": {
                 "atol": 0.01, "observed_max_abs_diff": 0.005,
                 "calibration_factor": 2.0, "method": "test"
+            },
+            "comparison_policy": {
+                "version": "same-prefix-v1",
+                "l1_near_tie_max_abs_logit_gap": 0.02,
+                "l2_atol": 0.01
             },
             "expected_fixtures": [
                 {
@@ -414,8 +408,7 @@ mod tests {
                 }
             ],
             "fixtures": [],
-            "calibrated_fixtures": [],
-            "regression_skip_map": {}
+            "calibrated_fixtures": []
         }))
         .unwrap()
     }
@@ -671,27 +664,29 @@ mod tests {
             l1_only: false,
             l2_only: false,
             debug: false,
-            epsilon: None,
         };
         let report = run_prepared_comparisons(prepared, &options, |case| {
             let l1 = L1Result {
                 prompt_id: case.expected.prompt_id.clone(),
                 passed: true,
                 total_positions: 1,
+                compared_positions: 1,
                 exact_matches: 1,
-                near_tie_skips: 0,
-                regression_skips: 0,
+                near_ties: 0,
                 mismatches: 0,
-                first_mismatch: None,
-                epsilon: 0.0,
+                first_divergence: None,
+                excluded_positions: 0,
+                policy_version: "same-prefix-v1".to_string(),
+                near_tie_max_abs_logit_gap: 0.02,
                 details: Vec::new(),
             };
             let l2 =
                 (case.expected.required_comparison == RequiredComparison::L1L2).then(|| L2Result {
                     prompt_id: case.expected.prompt_id.clone(),
                     passed: true,
-                    same_token_steps: 1,
-                    diff_token_steps: 0,
+                    compared_steps: 1,
+                    first_divergence: None,
+                    excluded_steps: 0,
                     total_elements: 3,
                     max_abs_diff: 0.0,
                     elements_exceeding_tol: 0,
@@ -811,47 +806,5 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("not valid UTF-8")));
-    }
-
-    #[test]
-    fn preflight_rejects_legacy_regression_skip_map() {
-        let mut manifest = test_manifest();
-        for expected in &mut manifest.expected_fixtures {
-            expected.prompt_id = "regression_01".to_string();
-            expected.family = FixtureFamily::Regression;
-            let oracle = match expected.oracle {
-                OracleName::Transformers => "transformers",
-                OracleName::Vllm => "vllm",
-                OracleName::Fake => "fake",
-            };
-            expected.fixture_id = format!("regression_01.{oracle}");
-            expected.filename = format!("{}.safetensors", expected.fixture_id);
-            if expected.oracle == OracleName::Transformers {
-                expected.required_comparison = crate::types::RequiredComparison::L1;
-            }
-        }
-        manifest
-            .regression_skip_map
-            .insert("regression_01".to_string(), vec![0]);
-        let prompts = HashMap::from([(
-            "regression_01".to_string(),
-            PromptEntry {
-                id: "regression_01".to_string(),
-                family: FixtureFamily::Regression,
-                prompt: "regression".to_string(),
-            },
-        )]);
-        let fixtures = tempfile::tempdir().unwrap();
-
-        let result = preflight(&manifest, fixtures.path(), &prompts);
-        let totals = result.tracker.totals();
-
-        assert_eq!(totals.skipped, 1);
-        assert_eq!(totals.failed, 1);
-        assert!(!totals.release_passed());
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("legacy regression skip map")));
     }
 }

@@ -248,16 +248,18 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 
 | Layer | What | How |
 |-------|------|-----|
-| **L1** | Greedy token-sequence exact match | Compares generated token IDs against golden token IDs, position by position. Positions where the top-2 logit gap is within epsilon (2x calibrated atol) are skipped as BF16 precision artifacts. |
-| **L2** | Per-step logits tensor comparison | Runs `LLM::generate_logits` and compares raw pre-sampling logits against golden logits using calibrated absolute tolerance (`atol`). Only compares steps where the token sequence matches (same-prefix comparison). |
+| **L1** | Greedy token-sequence reference match | Accepts the reference token or an explicit near-tie classification from the same-prefix expected/actual candidate logits under the versioned manifest policy. |
+| **L2** | Same-prefix logits tensor comparison | Compares raw pre-sampling logits under the versioned absolute tolerance through the first divergent token, then excludes every later row because its causal prefix differs. |
 | **L3** | Per-layer activations (debug) | Skeleton in v0.1. |
 
 Golden fixtures are produced by `tools/golden-gen/` (Python), which runs two oracle engines:
 
-- **Reference oracle**: transformers (BF16, `output_logits=True`, `attn_implementation=flash_attention_2`)
-- **Baseline oracle**: vLLM (BF16, calibrates acceptable numerical drift)
+- **Reference oracle**: transformers (BF16, `output_logits=True`, `attn_implementation=sdpa`)
+- **Baseline oracle**: vLLM (BF16, records calibration observations only)
 
-Tolerance: `atol = max(|transformers - vllm|, across all canonical prompts) x 2.0`.
+The schema-v3 manifest records the versioned L1/L2 acceptance policy separately
+from baseline calibration observations. Baseline evidence cannot override a
+reference-oracle failure.
 
 Fixtures are stored as GitHub Release assets (tag: `goldens-v0.1`), not in git. See [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md) for the full strategy.
 

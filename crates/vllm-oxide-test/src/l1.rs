@@ -1,9 +1,7 @@
-use std::collections::{HashMap, HashSet};
-
 use anyhow::Result;
 use candle_core::{DType, Tensor};
 
-use crate::types::{FixtureData, ToleranceCalibration};
+use crate::types::{ComparisonPolicy, FixtureData};
 
 /// Result of an L1 token-sequence comparison.
 #[derive(Debug)]
@@ -11,18 +9,16 @@ pub struct L1Result {
     pub prompt_id: String,
     pub passed: bool,
     pub total_positions: usize,
+    pub compared_positions: usize,
     pub exact_matches: usize,
-    pub near_tie_skips: usize,
-    /// Number of positions skipped via `regression_skip_map` (only non-zero
-    /// during regression comparison). Stored separately from `near_tie_skips`
-    /// to avoid semantic conflation — near-tie skips and regression skips
-    /// have different causes.
-    pub regression_skips: usize,
+    pub near_ties: usize,
     pub mismatches: usize,
-    /// First mismatch position (if any), 0-indexed in completion tokens.
-    pub first_mismatch: Option<usize>,
-    /// The epsilon used for near-tie detection.
-    pub epsilon: f64,
+    /// First divergent token position, including an accepted near tie.
+    pub first_divergence: Option<usize>,
+    /// Token positions excluded after the causal histories diverged.
+    pub excluded_positions: usize,
+    pub policy_version: String,
+    pub near_tie_max_abs_logit_gap: f64,
     pub details: Vec<L1PositionDetail>,
 }
 
@@ -32,52 +28,43 @@ pub enum L1PositionDetail {
         position: usize,
         token_id: i64,
     },
-    NearTieSkip {
+    NearTie {
         position: usize,
-        token_id: i64,
-        gap: f64,
+        expected: i64,
+        actual: i64,
+        candidate_gap: f64,
     },
     Mismatch {
         position: usize,
         expected: i64,
         actual: i64,
     },
-    RegressionSkip {
-        position: usize,
-        token_id: i64,
-    },
 }
 
-/// Compare generated token IDs against golden token IDs with near-tie
-/// skipping. At positions where the top-2 logit gap < ε, the comparison
-/// is skipped — these are inherently non-deterministic under BF16/FP16.
+/// Compare generated token IDs against the reference oracle under one
+/// versioned candidate-gap policy.
 ///
 /// `generated_tokens` are the output from `LLM::generate` (greedy, temp=0).
 /// `fixture` holds the golden token_ids.
 /// `generated_logits` provides the raw logits for near-tie detection — shape
 /// `[n, vocab_size]` (from `generate_logits`).
-/// `tolerance` provides the calibrated `atol` which is used as the base for ε
-/// (multiplied by the calibration factor for a safety margin, per T8 Q8.2).
 pub fn compare_l1(
     fixture: &FixtureData,
     generated_tokens: &[u32],
     generated_logits: Option<&Tensor>,
-    tolerance: &ToleranceCalibration,
-    epsilon: Option<f64>,
+    policy: &ComparisonPolicy,
 ) -> Result<L1Result> {
-    let eps = epsilon.unwrap_or(tolerance.atol * 2.0);
-
-    compare_tokens_loop(fixture, generated_tokens, eps, |i, expected, actual| {
+    compare_tokens_loop(fixture, generated_tokens, policy, |i, expected, actual| {
         if expected == actual {
             return Ok(None);
         }
         let Some(logits) = generated_logits else {
             return Ok(Some(MismatchKind::Deterministic));
         };
-        // expected is a non-negative token id bounded by vocab_size ≪ usize::MAX
+        // Expected and actual are validated token ids bounded by vocab_size.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let gap = top2_logit_gap(logits, i, expected as usize)?;
-        if gap < eps {
+        let gap = candidate_logit_gap(logits, i, expected as usize, actual as usize)?;
+        if gap <= policy.l1_near_tie_max_abs_logit_gap {
             Ok(Some(MismatchKind::NearTie(gap)))
         } else {
             Ok(Some(MismatchKind::Deterministic))
@@ -86,45 +73,12 @@ pub fn compare_l1(
 }
 
 /// Run L1 comparison without logits (no near-tie detection).
-pub fn compare_l1_tokens_only(fixture: &FixtureData, generated_tokens: &[u32]) -> Result<L1Result> {
-    compare_tokens_loop(fixture, generated_tokens, 0.0, |_, expected, actual| {
-        if expected == actual {
-            Ok(None)
-        } else {
-            Ok(Some(MismatchKind::Deterministic))
-        }
-    })
-}
-
-/// Compare generated token IDs against golden token IDs for regression
-/// fixtures, using a `skip_map` to skip positions where vLLM also disagrees
-/// with transformers.
-///
-/// Regression fixtures do not have full logits, so near-tie ε-based gap
-/// detection is not available. Instead, this function uses a pre-computed
-/// `skip_map` where the key is a prompt_id and the value is a list of token
-/// positions to skip. The `skip_map` records positions where vLLM (the
-/// reference BF16 engine) disagrees with transformers; all other positions
-/// must match the golden token_ids exactly.
-///
-/// This delegates to `compare_tokens_loop` with a classifier that consults
-/// the skip_map, rather than duplicating the token-loop logic.
-pub fn compare_l1_regression(
+pub fn compare_l1_tokens_only(
     fixture: &FixtureData,
     generated_tokens: &[u32],
-    skip_map: &HashMap<String, Vec<usize>>,
+    policy: &ComparisonPolicy,
 ) -> Result<L1Result> {
-    let skips: HashSet<usize> = skip_map
-        .get(&fixture.prompt_id)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    compare_tokens_loop(fixture, generated_tokens, 0.0, |i, expected, actual| {
-        if skips.contains(&i) {
-            return Ok(Some(MismatchKind::RegressionSkip));
-        }
+    compare_tokens_loop(fixture, generated_tokens, policy, |_, expected, actual| {
         if expected == actual {
             Ok(None)
         } else {
@@ -136,13 +90,12 @@ pub fn compare_l1_regression(
 enum MismatchKind {
     Deterministic,
     NearTie(f64),
-    RegressionSkip,
 }
 
 fn compare_tokens_loop<F>(
     fixture: &FixtureData,
     generated_tokens: &[u32],
-    eps: f64,
+    policy: &ComparisonPolicy,
     classify: F,
 ) -> Result<L1Result>
 where
@@ -151,10 +104,9 @@ where
     let n = fixture.token_ids.len().min(generated_tokens.len());
     let mut details = Vec::with_capacity(n);
     let mut exact_matches = 0usize;
-    let mut near_tie_skips = 0usize;
-    let mut regression_skips = 0usize;
+    let mut near_ties = 0usize;
     let mut mismatches = 0usize;
-    let mut first_mismatch: Option<usize> = None;
+    let mut first_divergence = None;
 
     for (i, (&expected, &actual)) in fixture.token_ids[..n]
         .iter()
@@ -172,84 +124,72 @@ where
                 });
             }
             Some(MismatchKind::NearTie(gap)) => {
-                near_tie_skips += 1;
-                details.push(L1PositionDetail::NearTieSkip {
+                near_ties += 1;
+                first_divergence = Some(i);
+                details.push(L1PositionDetail::NearTie {
                     position: i,
-                    token_id: expected,
-                    gap,
+                    expected,
+                    actual,
+                    candidate_gap: gap,
                 });
+                break;
             }
             Some(MismatchKind::Deterministic) => {
                 mismatches += 1;
-                if first_mismatch.is_none() {
-                    first_mismatch = Some(i);
-                }
+                first_divergence = Some(i);
                 details.push(L1PositionDetail::Mismatch {
                     position: i,
                     expected,
                     actual,
                 });
-            }
-            Some(MismatchKind::RegressionSkip) => {
-                regression_skips += 1;
-                details.push(L1PositionDetail::RegressionSkip {
-                    position: i,
-                    token_id: expected,
-                });
+                break;
             }
         }
     }
 
-    mismatches +=
-        (generated_tokens.len().saturating_sub(n)) + (fixture.token_ids.len().saturating_sub(n));
+    let total_positions = fixture.token_ids.len().max(generated_tokens.len());
+    if fixture.token_ids.len() != generated_tokens.len() {
+        if first_divergence.is_none() {
+            first_divergence = Some(n);
+        }
+        mismatches += 1;
+    }
+    let compared_positions = details.len();
+    let excluded_positions = total_positions.saturating_sub(compared_positions);
 
     Ok(L1Result {
         prompt_id: fixture.prompt_id.clone(),
         passed: mismatches == 0,
-        total_positions: fixture.token_ids.len().max(generated_tokens.len()),
+        total_positions,
+        compared_positions,
         exact_matches,
-        near_tie_skips,
-        regression_skips,
+        near_ties,
         mismatches,
-        first_mismatch,
-        epsilon: eps,
+        first_divergence,
+        excluded_positions,
+        policy_version: policy.version.clone(),
+        near_tie_max_abs_logit_gap: policy.l1_near_tie_max_abs_logit_gap,
         details,
     })
 }
 
-/// Compute the gap between the top-2 logits at a given position.
-///
-/// Extracts row `position` from the logits tensor `[n, vocab_size]`, finds
-/// the top two values, and returns their difference. If the top-2 includes
-/// the expected token, returns the gap from the expected token to the next
-/// highest. Otherwise returns infinity (hard mismatch).
-fn top2_logit_gap(logits: &Tensor, position: usize, expected_token: usize) -> Result<f64> {
+/// Compute the absolute gap between the expected and actual candidate logits.
+fn candidate_logit_gap(
+    logits: &Tensor,
+    position: usize,
+    expected_token: usize,
+    actual_token: usize,
+) -> Result<f64> {
     let row = logits.get(position)?;
-    let _vocab_size = row.dims()[0];
     let row_f32 = row.to_dtype(DType::F32)?;
     let values = row_f32.to_vec1::<f32>()?;
-
-    // Find top-2 values.
-    let mut top1 = f32::NEG_INFINITY;
-    let mut top2 = f32::NEG_INFINITY;
-    let mut top1_idx = 0usize;
-
-    for (idx, &val) in values.iter().enumerate() {
-        if val > top1 {
-            top2 = top1;
-            top1 = val;
-            top1_idx = idx;
-        } else if val > top2 {
-            top2 = val;
-        }
-    }
-
-    if top1_idx == expected_token {
-        Ok((top1 - top2) as f64)
-    } else {
-        // Expected token not in top-2 — hard mismatch, no near-tie.
-        Ok(f64::INFINITY)
-    }
+    let expected = values.get(expected_token).ok_or_else(|| {
+        anyhow::anyhow!("expected token {expected_token} is outside candidate logits")
+    })?;
+    let actual = values.get(actual_token).ok_or_else(|| {
+        anyhow::anyhow!("actual token {actual_token} is outside candidate logits")
+    })?;
+    Ok(f64::from((actual - expected).abs()))
 }
 
 #[cfg(test)]
@@ -257,12 +197,11 @@ fn top2_logit_gap(logits: &Tensor, position: usize, expected_token: usize) -> Re
 mod tests {
     use super::*;
 
-    fn make_tolerance() -> ToleranceCalibration {
-        ToleranceCalibration {
-            atol: 1e-5,
-            observed_max_abs_diff: 0.1,
-            calibration_factor: 2.0,
-            method: "pairwise".into(),
+    fn make_policy() -> ComparisonPolicy {
+        ComparisonPolicy {
+            version: "same-prefix-v1".into(),
+            l1_near_tie_max_abs_logit_gap: 0.02,
+            l2_atol: 1e-5,
         }
     }
 
@@ -281,13 +220,13 @@ mod tests {
             top5_logits: None,
         };
         let generated: Vec<u32> = vec![1, 2, 3];
-        let tolerance = make_tolerance();
+        let policy = make_policy();
 
-        let result = compare_l1(&fixture, &generated, None, &tolerance, None).unwrap();
+        let result = compare_l1(&fixture, &generated, None, &policy).unwrap();
         assert!(result.passed);
         assert_eq!(result.exact_matches, 3);
         assert_eq!(result.mismatches, 0);
-        assert_eq!(result.near_tie_skips, 0);
+        assert_eq!(result.near_ties, 0);
     }
 
     #[test]
@@ -305,11 +244,88 @@ mod tests {
             top5_logits: None,
         };
         let generated: Vec<u32> = vec![1, 99, 3];
-        let tolerance = make_tolerance();
+        let policy = make_policy();
 
-        let result = compare_l1(&fixture, &generated, None, &tolerance, None).unwrap();
+        let result = compare_l1(&fixture, &generated, None, &policy).unwrap();
         assert!(!result.passed);
-        assert_eq!(result.exact_matches, 2);
+        assert_eq!(result.exact_matches, 1);
+        assert_eq!(result.mismatches, 1);
+    }
+
+    #[test]
+    fn genuine_top1_mismatch_within_candidate_gap_is_near_tie() {
+        let fixture = FixtureData {
+            prompt_id: "near-tie".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 1,
+            token_ids: vec![1],
+            n_prompt_tokens: 5,
+            logits: None,
+            logits_shape: (1, 3),
+            top5_indices: None,
+            top5_logits: None,
+        };
+        let generated: Vec<u32> = vec![2];
+        let logits = Tensor::new(&[[0.0_f32, 9.99, 10.0]], &candle_core::Device::Cpu).unwrap();
+        let policy = make_policy();
+
+        let result = compare_l1(&fixture, &generated, Some(&logits), &policy).unwrap();
+
+        assert!(result.passed);
+        assert_eq!(result.near_ties, 1);
+        assert_eq!(result.mismatches, 0);
+    }
+
+    #[test]
+    fn near_tie_stops_before_different_prefix_candidate_logits() {
+        let fixture = FixtureData {
+            prompt_id: "near-tie-prefix".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 2,
+            token_ids: vec![1, 1],
+            n_prompt_tokens: 5,
+            logits: None,
+            logits_shape: (2, 3),
+            top5_indices: None,
+            top5_logits: None,
+        };
+        let generated: Vec<u32> = vec![2, 2];
+        let logits = Tensor::new(
+            &[[0.0_f32, 9.99, 10.0], [0.0, 0.0, 10.0]],
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+
+        let result = compare_l1(&fixture, &generated, Some(&logits), &make_policy()).unwrap();
+
+        assert!(result.passed);
+        assert_eq!(result.near_ties, 1);
+        assert_eq!(result.mismatches, 0);
+    }
+
+    #[test]
+    fn near_tie_does_not_hide_a_length_mismatch() {
+        let fixture = FixtureData {
+            prompt_id: "near-tie-short".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 2,
+            token_ids: vec![1, 1],
+            n_prompt_tokens: 5,
+            logits: None,
+            logits_shape: (2, 3),
+            top5_indices: None,
+            top5_logits: None,
+        };
+        let generated = vec![2_u32];
+        let logits = Tensor::new(&[[0.0_f32, 9.99, 10.0]], &candle_core::Device::Cpu).unwrap();
+
+        let result = compare_l1(&fixture, &generated, Some(&logits), &make_policy()).unwrap();
+
+        assert!(!result.passed);
+        assert_eq!(result.near_ties, 1);
         assert_eq!(result.mismatches, 1);
     }
 
@@ -329,15 +345,17 @@ mod tests {
         };
         let generated: Vec<u32> = vec![1, 2, 3];
 
-        let tolerance = make_tolerance();
+        let policy = make_policy();
 
-        let result = compare_l1(&fixture, &generated, None, &tolerance, None).unwrap();
+        let result = compare_l1(&fixture, &generated, None, &policy).unwrap();
         assert!(!result.passed);
-        assert_eq!(result.mismatches, 2); // 2 extra in fixture
+        assert_eq!(result.mismatches, 1);
+        assert_eq!(result.first_divergence, Some(3));
+        assert_eq!(result.excluded_positions, 2);
     }
 
     #[test]
-    fn regression_skip_map_skips_known_positions() {
+    fn regression_tokens_require_an_exact_match() {
         let fixture = FixtureData {
             prompt_id: "reg-test".into(),
             category: crate::types::PromptCategory::Regression,
@@ -352,38 +370,9 @@ mod tests {
         };
         let generated: Vec<u32> = vec![10, 99, 30, 40];
 
-        let mut skip_map = HashMap::new();
-        skip_map.insert("reg-test".to_string(), vec![1]); // position 1 is where vLLM also disagrees
-
-        let result = compare_l1_regression(&fixture, &generated, &skip_map).unwrap();
-        assert!(result.passed);
-        assert_eq!(result.exact_matches, 3);
-        assert_eq!(result.regression_skips, 1);
-        assert_eq!(result.mismatches, 0);
-    }
-
-    #[test]
-    fn regression_skip_map_hard_mismatch() {
-        let fixture = FixtureData {
-            prompt_id: "reg-test".into(),
-            category: crate::types::PromptCategory::Regression,
-            oracle: crate::types::OracleName::Transformers,
-            num_tokens: 4,
-            token_ids: vec![10, 20, 30, 40],
-            n_prompt_tokens: 3,
-            logits: None,
-            logits_shape: (0, 0),
-            top5_indices: None,
-            top5_logits: None,
-        };
-        let generated: Vec<u32> = vec![10, 99, 30, 40];
-
-        // Empty skip_map — position 1 should be a hard mismatch.
-        let skip_map = HashMap::new();
-        let result = compare_l1_regression(&fixture, &generated, &skip_map).unwrap();
+        let result = compare_l1_tokens_only(&fixture, &generated, &make_policy()).unwrap();
         assert!(!result.passed);
-        assert_eq!(result.exact_matches, 3);
-        assert_eq!(result.regression_skips, 0);
+        assert_eq!(result.exact_matches, 1);
         assert_eq!(result.mismatches, 1);
     }
 }

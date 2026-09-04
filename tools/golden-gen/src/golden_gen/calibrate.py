@@ -1,4 +1,4 @@
-"""Calibrate tolerance from canonical fixture pairs and compute regression skip map."""
+"""Record calibration observations from canonical reference/baseline pairs."""
 
 from __future__ import annotations
 

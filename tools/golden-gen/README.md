@@ -57,8 +57,9 @@ uv run python -m golden_gen calibrate --manifest-dir ./output
 
 Validates every declared reference/baseline pair, computes `atol` from the
 oracle pair, records the baseline artifacts consumed as calibration evidence,
-and updates `manifest.json` in place. Baseline disagreement never authorizes a
-regression skip map. A missing pair, empty comparison set, unmatched oracle
+materializes the explicit versioned comparison policy, and updates
+`manifest.json` in place. Baseline disagreement never authorizes reference
+acceptance. A missing pair, empty comparison set, unmatched oracle
 length, or unsupported tensor shape exits non-zero.
 
 ```bash
@@ -91,7 +92,7 @@ All unit tests run on CPU and do not require a GPU.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | int | Manifest format version (currently 2) |
+| `schema_version` | int | Manifest format version (currently 3) |
 | `generated_at` | ISO 8601 | UTC timestamp of generation |
 | `model.id` | str | HuggingFace model ID (`Qwen/Qwen3-0.6B`) |
 | `model.revision` | str | Git revision (commit hash) of the model weights |
@@ -104,13 +105,15 @@ All unit tests run on CPU and do not require a GPU.
 | `generation.regression_max_tokens` | int | Max generated tokens for regression prompts (32) |
 | `generation.temperature` | float | Sampling temperature (0.0) |
 | `generation.attn_implementation` | str | Attention backend (`eager`) |
-| `tolerance.atol` | float | Absolute tolerance for logit comparison |
+| `comparison_policy.version` | str | Supported comparison semantics (`same-prefix-v1`) |
+| `comparison_policy.l1_near_tie_max_abs_logit_gap` | float | Maximum expected/actual candidate-logit gap for an explicit L1 near tie |
+| `comparison_policy.l2_atol` | float | Absolute tolerance for same-prefix L2 logit comparison |
+| `tolerance.atol` | float | Candidate tolerance produced by baseline calibration |
 | `tolerance.observed_max_abs_diff` | float | Maximum observed absolute difference across oracle pair |
 | `tolerance.calibration_factor` | float | Safety factor applied (2.0) |
 | `tolerance.method` | str | Description of calibration method |
 | `expected_fixtures` | list[object] | Independent contract for every required oracle artifact |
 | `calibrated_fixtures` | list[str] | Baseline fixture IDs successfully consumed by calibration |
-| `regression_skip_map` | dict | Legacy field; must remain empty for release validation |
 | `fixtures` | list[object] | List of `FixtureMetadata` records |
 
 Each `expected_fixtures` entry declares the concrete `fixture_id`, `prompt_id`,
@@ -213,7 +216,7 @@ tools/golden-gen/
 │       ├── io.py             # safetensors save/load
 │       ├── manifest.py       # manifest build/write/read
 │       ├── generate.py       # oracle × prompt orchestration
-│       ├── calibrate.py      # tolerance calibration + regression skip map
+│       ├── calibrate.py      # baseline calibration observations + comparison policy
 │       └── oracles/
 │           ├── __init__.py
 │           ├── base.py       # Oracle protocol + result dataclass

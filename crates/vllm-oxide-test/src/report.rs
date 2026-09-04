@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::l1::L1Result;
 use crate::l2::L2Result;
 use crate::l3::L3Result;
-use crate::types::ToleranceCalibration;
+use crate::types::{ComparisonPolicy, ToleranceCalibration};
 
 /// Exact fixture lifecycle accounting for one validation run.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -56,29 +56,43 @@ impl ComparisonReport {
         self.l2_results.iter().all(|r| r.passed)
     }
 
-    pub fn overall_passed(&self) -> bool {
+    pub fn reference_passed(&self) -> bool {
         (!self.l1_results.is_empty() || !self.l2_results.is_empty())
             && self.l1_passed()
             && self.l2_passed()
-            && self.lifecycle.release_passed()
+    }
+
+    pub fn overall_passed(&self) -> bool {
+        self.reference_passed() && self.lifecycle.release_passed()
     }
 }
 
 /// Print a human-readable comparison report to stdout.
-pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration) {
+pub fn print_report(
+    report: &ComparisonReport,
+    policy: &ComparisonPolicy,
+    calibration: &ToleranceCalibration,
+    calibrated_fixtures: &[String],
+) {
     println!("══════════════════════════════════════════════════");
     println!("  vllm-oxide Golden Comparison Report");
     println!("══════════════════════════════════════════════════");
     println!("  Manifest:  {}", report.manifest_path);
     println!("  Model:     {}", report.model_path);
     println!(
-        "  Tolerance: atol={:.2e}, method={}",
-        tolerance.atol, tolerance.method,
+        "  Reference correctness policy: version={}, L1 candidate-gap≤{:.2e}, L2 atol={:.2e}",
+        policy.version, policy.l1_near_tie_max_abs_logit_gap, policy.l2_atol,
     );
-    if tolerance.observed_max_abs_diff > 1e-1 {
+    println!(
+        "  Baseline calibration observation: fixtures={}, observed_max_abs_diff={:.2e}, method={}",
+        calibrated_fixtures.len(),
+        calibration.observed_max_abs_diff,
+        calibration.method,
+    );
+    if calibration.observed_max_abs_diff > 1e-1 {
         println!(
             "  ⚠ WARNING: observed_max_abs_diff ({:.2e}) > 1e-1 — investigate oracle first (T8 Q8.2)",
-            tolerance.observed_max_abs_diff,
+            calibration.observed_max_abs_diff,
         );
     }
     println!();
@@ -150,15 +164,23 @@ fn print_l1_section(report: &ComparisonReport) {
         return;
     }
 
-    println!("── L1 (greedy token-sequence exact match) ──");
+    println!("── L1 (reference token or explicit near tie) ──");
     for r in &report.l1_results {
         let status = if r.passed { "✓" } else { "✗" };
         println!(
-            "  {} {}: matches={}, near-tie-skips={}, mismatches={}, ε={:.2e}",
-            status, r.prompt_id, r.exact_matches, r.near_tie_skips, r.mismatches, r.epsilon,
+            "  {} {}: matches={}, near-ties={}, mismatches={}, candidate-gap≤{:.2e}",
+            status,
+            r.prompt_id,
+            r.exact_matches,
+            r.near_ties,
+            r.mismatches,
+            r.near_tie_max_abs_logit_gap,
         );
-        if let Some(pos) = r.first_mismatch {
-            println!("    first mismatch at position {}", pos);
+        if let Some(pos) = r.first_divergence {
+            println!(
+                "    first divergence at position {}; {} later positions excluded",
+                pos, r.excluded_positions,
+            );
         }
     }
     println!();
@@ -173,16 +195,19 @@ fn print_l2_section(report: &ComparisonReport) {
     for r in &report.l2_results {
         let status = if r.passed { "✓" } else { "✗" };
         println!(
-            "  {} {}: same-token steps={}, max_abs_diff={:.2e}, exceeding={}/{} elements",
+            "  {} {}: compared steps={}, max_abs_diff={:.2e}, exceeding={}/{} elements",
             status,
             r.prompt_id,
-            r.same_token_steps,
+            r.compared_steps,
             r.max_abs_diff,
             r.elements_exceeding_tol,
             r.total_elements,
         );
-        if r.diff_token_steps > 0 {
-            println!("    {} steps skipped (token mismatch)", r.diff_token_steps,);
+        if let Some(position) = r.first_divergence {
+            println!(
+                "    first divergence at position {}; {} later steps excluded",
+                position, r.excluded_steps,
+            );
         }
     }
     println!();
@@ -192,12 +217,27 @@ fn print_l2_section(report: &ComparisonReport) {
 
 #[derive(Serialize)]
 struct JsonReportEntry<'a> {
-    tolerance: &'a ToleranceCalibration,
     lifecycle: &'a LifecycleTotals,
     failures: &'a [String],
+    reference_correctness: JsonReferenceCorrectness<'a>,
+    baseline_calibration: JsonBaselineCalibration<'a>,
+    overall: bool,
+}
+
+#[derive(Serialize)]
+struct JsonReferenceCorrectness<'a> {
+    policy: &'a ComparisonPolicy,
     l1: Vec<JsonL1Entry>,
     l2: Vec<JsonL2Entry>,
-    overall: bool,
+    passed: bool,
+}
+
+#[derive(Serialize)]
+struct JsonBaselineCalibration<'a> {
+    observed_max_abs_diff: f64,
+    calibration_factor: f64,
+    method: &'a str,
+    calibrated_fixtures: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -205,49 +245,75 @@ struct JsonL1Entry {
     prompt_id: String,
     passed: bool,
     exact_matches: usize,
-    near_tie_skips: usize,
-    regression_skips: usize,
+    near_ties: usize,
     mismatches: usize,
-    epsilon: f64,
+    first_divergence: Option<usize>,
+    excluded_positions: usize,
+    policy_version: String,
+    near_tie_max_abs_logit_gap: f64,
 }
 
 #[derive(Serialize)]
 struct JsonL2Entry {
     prompt_id: String,
     passed: bool,
+    compared_steps: usize,
+    first_divergence: Option<usize>,
+    excluded_steps: usize,
+    total_elements: usize,
     max_abs_diff: f64,
     elements_exceeding_tol: usize,
 }
 
 /// Generate a JSON report string using serde serialization.
-pub fn json_report(report: &ComparisonReport, tolerance: &ToleranceCalibration) -> String {
+pub fn json_report(
+    report: &ComparisonReport,
+    policy: &ComparisonPolicy,
+    calibration: &ToleranceCalibration,
+    calibrated_fixtures: &[String],
+) -> String {
     let data = JsonReportEntry {
-        tolerance,
         lifecycle: &report.lifecycle,
         failures: &report.failures,
-        l1: report
-            .l1_results
-            .iter()
-            .map(|r| JsonL1Entry {
-                prompt_id: r.prompt_id.clone(),
-                passed: r.passed,
-                exact_matches: r.exact_matches,
-                near_tie_skips: r.near_tie_skips,
-                regression_skips: r.regression_skips,
-                mismatches: r.mismatches,
-                epsilon: r.epsilon,
-            })
-            .collect(),
-        l2: report
-            .l2_results
-            .iter()
-            .map(|r| JsonL2Entry {
-                prompt_id: r.prompt_id.clone(),
-                passed: r.passed,
-                max_abs_diff: r.max_abs_diff,
-                elements_exceeding_tol: r.elements_exceeding_tol,
-            })
-            .collect(),
+        reference_correctness: JsonReferenceCorrectness {
+            policy,
+            l1: report
+                .l1_results
+                .iter()
+                .map(|r| JsonL1Entry {
+                    prompt_id: r.prompt_id.clone(),
+                    passed: r.passed,
+                    exact_matches: r.exact_matches,
+                    near_ties: r.near_ties,
+                    mismatches: r.mismatches,
+                    first_divergence: r.first_divergence,
+                    excluded_positions: r.excluded_positions,
+                    policy_version: r.policy_version.clone(),
+                    near_tie_max_abs_logit_gap: r.near_tie_max_abs_logit_gap,
+                })
+                .collect(),
+            l2: report
+                .l2_results
+                .iter()
+                .map(|r| JsonL2Entry {
+                    prompt_id: r.prompt_id.clone(),
+                    passed: r.passed,
+                    compared_steps: r.compared_steps,
+                    first_divergence: r.first_divergence,
+                    excluded_steps: r.excluded_steps,
+                    total_elements: r.total_elements,
+                    max_abs_diff: r.max_abs_diff,
+                    elements_exceeding_tol: r.elements_exceeding_tol,
+                })
+                .collect(),
+            passed: report.reference_passed(),
+        },
+        baseline_calibration: JsonBaselineCalibration {
+            observed_max_abs_diff: calibration.observed_max_abs_diff,
+            calibration_factor: calibration.calibration_factor,
+            method: &calibration.method,
+            calibrated_fixtures,
+        },
         overall: report.overall_passed(),
     };
     serde_json::to_string_pretty(&data)
@@ -258,7 +324,7 @@ pub fn json_report(report: &ComparisonReport, tolerance: &ToleranceCalibration) 
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{json_report, ComparisonReport, LifecycleTotals};
-    use crate::types::ToleranceCalibration;
+    use crate::types::{ComparisonPolicy, ToleranceCalibration};
 
     #[test]
     fn empty_comparison_set_fails_closed() {
@@ -304,9 +370,20 @@ mod tests {
             calibration_factor: 2.0,
             method: "test".to_string(),
         };
+        let policy = ComparisonPolicy {
+            version: "same-prefix-v1".to_string(),
+            l1_near_tie_max_abs_logit_gap: 0.02,
+            l2_atol: 0.01,
+        };
+        let calibrated_fixtures = vec!["canonical_01.vllm".to_string()];
 
-        let json: serde_json::Value =
-            serde_json::from_str(&json_report(&report, &tolerance)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json_report(
+            &report,
+            &policy,
+            &tolerance,
+            &calibrated_fixtures,
+        ))
+        .unwrap();
 
         assert_eq!(json["lifecycle"]["expected"], 8);
         assert_eq!(json["lifecycle"]["discovered"], 7);
@@ -316,6 +393,16 @@ mod tests {
         assert_eq!(json["lifecycle"]["unexpected"], 1);
         assert_eq!(json["lifecycle"]["skipped"], 1);
         assert_eq!(json["lifecycle"]["failed"], 3);
+        assert_eq!(
+            json["reference_correctness"]["policy"]["version"],
+            "same-prefix-v1"
+        );
+        assert_eq!(json["reference_correctness"]["passed"], false);
+        assert_eq!(
+            json["baseline_calibration"]["calibrated_fixtures"][0],
+            "canonical_01.vllm"
+        );
+        assert_eq!(json["baseline_calibration"]["observed_max_abs_diff"], 0.005);
         assert_eq!(json["overall"], false);
     }
 }

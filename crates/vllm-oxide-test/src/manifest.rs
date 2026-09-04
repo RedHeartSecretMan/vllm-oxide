@@ -25,11 +25,22 @@ pub fn parse_manifest_bytes(content: &[u8], source: &str) -> Result<Manifest> {
 }
 
 fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
-    if manifest.schema_version != 2 {
+    if manifest.schema_version != 3 {
         anyhow::bail!(
-            "unsupported manifest schema_version {}; expected 2",
+            "unsupported manifest schema_version {}; expected 3",
             manifest.schema_version
         );
+    }
+    let policy = &manifest.comparison_policy;
+    if policy.version != "same-prefix-v1" {
+        anyhow::bail!("unsupported comparison policy version: {}", policy.version);
+    }
+    if !policy.l1_near_tie_max_abs_logit_gap.is_finite()
+        || policy.l1_near_tie_max_abs_logit_gap < 0.0
+        || !policy.l2_atol.is_finite()
+        || policy.l2_atol < 0.0
+    {
+        anyhow::bail!("comparison policy thresholds must be finite and non-negative");
     }
     if manifest.expected_fixtures.is_empty() {
         anyhow::bail!("manifest expected_fixtures is empty");
@@ -186,23 +197,6 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
                 "generated fixture {} family does not match expectation",
                 fixture.prompt_id
             );
-        }
-    }
-    let regression_ids: HashSet<_> = manifest
-        .expected_fixtures
-        .iter()
-        .filter(|expected| {
-            expected.family == FixtureFamily::Regression
-                && expected.oracle_role == OracleRole::Reference
-        })
-        .map(|expected| expected.prompt_id.as_str())
-        .collect();
-    for (prompt_id, positions) in &manifest.regression_skip_map {
-        if !regression_ids.contains(prompt_id.as_str()) {
-            anyhow::bail!("unmatched regression skip identifier: {prompt_id}");
-        }
-        if positions.iter().collect::<HashSet<_>>().len() != positions.len() {
-            anyhow::bail!("duplicate regression skip positions: {prompt_id}");
         }
     }
     Ok(())
@@ -372,7 +366,7 @@ mod tests {
 
     fn valid_manifest_json() -> Value {
         json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "generated_at": "2026-09-04T00:00:00Z",
             "model": {
                 "id": "Qwen/Qwen3-0.6B",
@@ -393,6 +387,11 @@ mod tests {
                 "observed_max_abs_diff": 0.005,
                 "calibration_factor": 2.0,
                 "method": "test"
+            },
+            "comparison_policy": {
+                "version": "same-prefix-v1",
+                "l1_near_tie_max_abs_logit_gap": 0.02,
+                "l2_atol": 0.01
             },
             "expected_fixtures": [
                 {
@@ -419,9 +418,22 @@ mod tests {
                 }
             ],
             "fixtures": [],
-            "calibrated_fixtures": [],
-            "regression_skip_map": {}
+            "calibrated_fixtures": []
         })
+    }
+
+    #[test]
+    fn manifest_exposes_explicit_versioned_comparison_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let manifest = valid_manifest_json();
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let parsed = parse_manifest(&path).unwrap();
+
+        assert_eq!(parsed.comparison_policy.version, "same-prefix-v1");
+        assert_eq!(parsed.comparison_policy.l1_near_tie_max_abs_logit_gap, 0.02);
+        assert_eq!(parsed.comparison_policy.l2_atol, 0.01);
     }
 
     #[test]
@@ -438,6 +450,35 @@ mod tests {
             error.contains("unsupported manifest schema_version"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn unsupported_comparison_policy_version_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let mut manifest = valid_manifest_json();
+        manifest["comparison_policy"]["version"] = json!("latest");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let error = parse_manifest(&path).unwrap_err().to_string();
+
+        assert!(
+            error.contains("unsupported comparison policy version"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn legacy_regression_skip_map_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let mut manifest = valid_manifest_json();
+        manifest["regression_skip_map"] = json!({"canonical_01": [0]});
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let error = parse_manifest(&path).unwrap_err().to_string();
+
+        assert!(error.contains("unknown field"), "{error}");
     }
 
     #[test]

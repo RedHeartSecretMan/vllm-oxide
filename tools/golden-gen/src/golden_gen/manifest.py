@@ -16,13 +16,17 @@ from golden_gen.config import (
     VOCAB_SIZE,
 )
 from golden_gen.schema import (
+    ComparisonPolicy,
     DiscoveredFixture,
     ExpectedFixture,
     FixtureMetadata,
     GenerationConfig,
     Manifest,
     ModelInfo,
+    OracleName,
+    OracleRole,
     OracleVersions,
+    RequiredComparison,
     ToleranceCalibration,
 )
 
@@ -31,11 +35,12 @@ def build_expected_fixtures(discovered: list[DiscoveredFixture]) -> list[Expecte
     """Declare every required reference and baseline artifact for discovered cases."""
     expected: list[ExpectedFixture] = []
     for case in discovered:
-        reference_comparison = "l1" if case.family == "regression" else "l1_l2"
-        for oracle, role, comparison in (
+        reference_comparison: RequiredComparison = "l1" if case.family == "regression" else "l1_l2"
+        oracle_contracts: tuple[tuple[OracleName, OracleRole, RequiredComparison], ...] = (
             ("transformers", "reference", reference_comparison),
             ("vllm", "baseline", "calibration"),
-        ):
+        )
+        for oracle, role, comparison in oracle_contracts:
             fixture_id = f"{case.prompt_id}.{oracle}"
             expected.append(
                 ExpectedFixture(
@@ -77,18 +82,18 @@ def build_manifest(
     fixtures: list[FixtureMetadata],
     tolerance: ToleranceCalibration,
     *,
+    comparison_policy: ComparisonPolicy,
     expected_fixtures: list[ExpectedFixture],
     generated_at: datetime | None = None,
-    regression_skip_map: dict[str, list[int]] | None = None,
 ) -> Manifest:
     """Build a Manifest from fixture metadata and tolerance calibration.
 
     Args:
         fixtures: List of FixtureMetadata for all generated fixtures.
         expected_fixtures: Independent contracts for all required fixtures.
+        comparison_policy: Versioned L1/L2 mathematical acceptance inputs.
         tolerance: Calibrated tolerance values.
         generated_at: Timestamp (defaults to now UTC).
-        regression_skip_map: Positions to skip per regression prompt.
 
     Returns:
         A fully populated Manifest.
@@ -97,7 +102,7 @@ def build_manifest(
         generated_at = datetime.now(UTC)
 
     return Manifest(
-        schema_version=2,
+        schema_version=3,
         generated_at=generated_at,
         model=ModelInfo(
             id=MODEL_ID,
@@ -113,10 +118,10 @@ def build_manifest(
             temperature=0.0,
             attn_implementation=ATTN_IMPLEMENTATION,
         ),
+        comparison_policy=comparison_policy,
         tolerance=tolerance,
         expected_fixtures=expected_fixtures,
         fixtures=fixtures,
-        regression_skip_map=regression_skip_map or {},
     )
 
 

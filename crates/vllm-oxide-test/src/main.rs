@@ -42,10 +42,6 @@ struct Cli {
     #[arg(long, default_value = "/tmp/vllm-oxide-goldens")]
     cache_dir: PathBuf,
 
-    /// Override the near-tie epsilon for L1 (default: 2× manifest atol).
-    #[arg(long)]
-    epsilon: Option<f64>,
-
     /// Enable L3 per-layer activations comparison (debug-only, skeleton).
     #[arg(long)]
     debug: bool,
@@ -101,7 +97,6 @@ fn main() -> Result<()> {
         l1_only: cli.l1_only,
         l2_only: cli.l2_only,
         debug: cli.debug,
-        epsilon: cli.epsilon,
     };
     let mut report = vllm_oxide_test::run_comparison(
         &golden_manifest,
@@ -118,14 +113,23 @@ fn main() -> Result<()> {
     report.model_path = cli.model_path.display().to_string();
 
     // 3. Print report.
-    let tolerance = &golden_manifest.tolerance;
     if cli.json {
         println!(
             "{}",
-            vllm_oxide_test::report::json_report(&report, tolerance)
+            vllm_oxide_test::report::json_report(
+                &report,
+                &golden_manifest.comparison_policy,
+                &golden_manifest.tolerance,
+                &golden_manifest.calibrated_fixtures,
+            )
         );
     } else {
-        print_report(&report, tolerance);
+        print_report(
+            &report,
+            &golden_manifest.comparison_policy,
+            &golden_manifest.tolerance,
+            &golden_manifest.calibrated_fixtures,
+        );
     }
 
     if !report.overall_passed() {

@@ -14,7 +14,7 @@ use anyhow::Result;
 use candle_core::DType;
 use vllm_oxide::{EngineOptions, Prompt, Source, LLM};
 
-use crate::l1::{compare_l1, compare_l1_regression};
+use crate::l1::{compare_l1, compare_l1_tokens_only};
 use crate::l2::compare_l2;
 use crate::l3::compare_l3;
 use crate::lifecycle::{preflight, LifecyclePreflight, ReferenceCase};
@@ -28,7 +28,6 @@ pub struct DriverOptions {
     pub l1_only: bool,
     pub l2_only: bool,
     pub debug: bool,
-    pub epsilon: Option<f64>,
 }
 
 /// Run all golden comparisons described by `manifest`.
@@ -154,21 +153,20 @@ fn compare_reference_case(
                 &case.fixture,
                 &generated_tokens,
                 Some(&logits),
-                &manifest.tolerance,
-                opts.epsilon,
+                &manifest.comparison_policy,
             )?),
             Some(compare_l2(
                 &case.fixture,
                 &logits_vals,
                 &generated_tokens,
-                &manifest.tolerance,
+                &manifest.comparison_policy,
             )?),
         ),
         PromptCategory::Regression => (
-            Some(compare_l1_regression(
+            Some(compare_l1_tokens_only(
                 &case.fixture,
                 &generated_tokens,
-                &manifest.regression_skip_map,
+                &manifest.comparison_policy,
             )?),
             None,
         ),
@@ -273,7 +271,6 @@ mod tests {
             l1_only: false,
             l2_only: false,
             debug: false,
-            epsilon: None,
         };
         let l1_only = DriverOptions {
             l1_only: true,

@@ -30,7 +30,7 @@ uv run python -m golden_gen generate \
     --output-dir "$GOLDEN_OUTPUT"
 echo ""
 
-# Step 2: Calibrate tolerance + regression skip map
+# Step 2: Record calibration observations and explicit comparison policy
 echo "── Step 2: Calibrating tolerance ──"
 uv run python -m golden_gen calibrate \
     --manifest-dir "$GOLDEN_OUTPUT"

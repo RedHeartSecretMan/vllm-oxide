@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from golden_gen.schema import (
+    ComparisonPolicy,
     ExpectedFixture,
     FixtureMetadata,
     GenerationConfig,
@@ -14,6 +15,27 @@ from golden_gen.schema import (
     PromptSpec,
     ToleranceCalibration,
 )
+
+
+class TestComparisonPolicy:
+    def test_same_prefix_policy_is_an_explicit_versioned_input(self):
+        policy = ComparisonPolicy(
+            version="same-prefix-v1",
+            l1_near_tie_max_abs_logit_gap=0.02,
+            l2_atol=0.01,
+        )
+
+        assert policy.version == "same-prefix-v1"
+        assert policy.l1_near_tie_max_abs_logit_gap == 0.02
+        assert policy.l2_atol == 0.01
+
+    def test_unknown_policy_version_is_rejected(self):
+        with pytest.raises(ValidationError, match="version"):
+            ComparisonPolicy(
+                version="latest",  # type: ignore[arg-type]
+                l1_near_tie_max_abs_logit_gap=0.02,
+                l2_atol=0.01,
+            )
 
 
 class TestPromptSpec:
@@ -225,7 +247,7 @@ class TestManifest:
             ),
         ]
         manifest = Manifest(
-            schema_version=2,
+            schema_version=3,
             generated_at=datetime.now(UTC),
             model=ModelInfo(
                 id="Qwen/Qwen3-0.6B",
@@ -241,6 +263,11 @@ class TestManifest:
                 temperature=0.0,
                 attn_implementation="eager",
             ),
+            comparison_policy=ComparisonPolicy(
+                version="same-prefix-v1",
+                l1_near_tie_max_abs_logit_gap=0.02,
+                l2_atol=0.01,
+            ),
             tolerance=tolerance,
             expected_fixtures=expected,
             fixtures=[fixture],
@@ -248,7 +275,8 @@ class TestManifest:
         path = tmp_path / "manifest.json"
         manifest.to_json(path)
         restored = Manifest.from_json(path)
-        assert restored.schema_version == 2
+        assert restored.schema_version == 3
         assert len(restored.fixtures) == 1
         assert restored.fixtures[0].sha256 == "abc123"
         assert restored.tolerance.atol == 0.01
+        assert restored.comparison_policy.version == "same-prefix-v1"

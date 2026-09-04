@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from golden_gen.manifest import build_manifest, get_oracle_versions, read_manifest, write_manifest
 from golden_gen.schema import (
+    ComparisonPolicy,
     ExpectedFixture,
     FixtureMetadata,
     Manifest,
@@ -13,6 +14,14 @@ from golden_gen.schema import (
 )
 
 MODEL_REVISION = "7e4ae267688d671ddfca3122e4528ee980cf3234"
+
+
+def same_prefix_policy() -> ComparisonPolicy:
+    return ComparisonPolicy(
+        version="same-prefix-v1",
+        l1_near_tie_max_abs_logit_gap=0.02,
+        l2_atol=0.01,
+    )
 
 
 def expected_pair() -> list[ExpectedFixture]:
@@ -52,7 +61,12 @@ class TestManifest:
         )
 
         with pytest.raises(ValidationError, match="expected_fixtures"):
-            build_manifest(fixtures=[], expected_fixtures=[], tolerance=tolerance)
+            build_manifest(
+                fixtures=[],
+                expected_fixtures=[],
+                comparison_policy=same_prefix_policy(),
+                tolerance=tolerance,
+            )
 
     def test_generated_fixture_identifier_must_match_an_expectation(self):
         tolerance = ToleranceCalibration(
@@ -76,6 +90,7 @@ class TestManifest:
             build_manifest(
                 fixtures=[unexpected],
                 expected_fixtures=expected_pair(),
+                comparison_policy=same_prefix_policy(),
                 tolerance=tolerance,
             )
 
@@ -102,6 +117,7 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=[expected, expected.model_copy()],
+                comparison_policy=same_prefix_policy(),
                 tolerance=tolerance,
             )
 
@@ -113,11 +129,32 @@ class TestManifest:
             method="test",
         )
         manifest = build_manifest(
-            fixtures=[], expected_fixtures=expected_pair(), tolerance=tolerance
+            fixtures=[],
+            expected_fixtures=expected_pair(),
+            comparison_policy=same_prefix_policy(),
+            tolerance=tolerance,
         ).model_dump()
         manifest["schema_version"] = 999
 
         with pytest.raises(ValidationError, match="schema_version"):
+            Manifest.model_validate(manifest)
+
+    def test_legacy_regression_skip_map_is_rejected(self):
+        tolerance = ToleranceCalibration(
+            atol=0.01,
+            observed_max_abs_diff=0.005,
+            calibration_factor=2.0,
+            method="test",
+        )
+        manifest = build_manifest(
+            fixtures=[],
+            expected_fixtures=expected_pair(),
+            comparison_policy=same_prefix_policy(),
+            tolerance=tolerance,
+        ).model_dump()
+        manifest["regression_skip_map"] = {"canonical_01": [0]}
+
+        with pytest.raises(ValidationError, match="regression_skip_map"):
             Manifest.model_validate(manifest)
 
     def test_oracle_name_role_and_comparison_must_be_consistent(self):
@@ -140,7 +177,12 @@ class TestManifest:
         )
 
         with pytest.raises(ValidationError, match="oracle role contract"):
-            build_manifest(fixtures=[], expected_fixtures=[invalid], tolerance=tolerance)
+            build_manifest(
+                fixtures=[],
+                expected_fixtures=[invalid],
+                comparison_policy=same_prefix_policy(),
+                tolerance=tolerance,
+            )
 
     def test_each_prompt_requires_reference_and_baseline_expectations(self):
         reference_only = ExpectedFixture(
@@ -165,6 +207,7 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=[reference_only],
+                comparison_policy=same_prefix_policy(),
                 tolerance=tolerance,
             )
 
@@ -179,7 +222,12 @@ class TestManifest:
         )
 
         with pytest.raises(ValidationError, match="model revision or dtype"):
-            build_manifest(fixtures=[], expected_fixtures=expected, tolerance=tolerance)
+            build_manifest(
+                fixtures=[],
+                expected_fixtures=expected,
+                comparison_policy=same_prefix_policy(),
+                tolerance=tolerance,
+            )
 
     def test_generated_fixture_family_must_match_expectation(self):
         fixture = FixtureMetadata(
@@ -203,6 +251,7 @@ class TestManifest:
             build_manifest(
                 fixtures=[fixture],
                 expected_fixtures=expected_pair(),
+                comparison_policy=same_prefix_policy(),
                 tolerance=tolerance,
             )
 
@@ -228,6 +277,7 @@ class TestManifest:
             build_manifest(
                 fixtures=[fixture, fixture.model_copy()],
                 expected_fixtures=expected_pair(),
+                comparison_policy=same_prefix_policy(),
                 tolerance=tolerance,
             )
 
@@ -242,7 +292,12 @@ class TestManifest:
         )
 
         with pytest.raises(ValidationError, match="non-canonical fixture identifier"):
-            build_manifest(fixtures=[], expected_fixtures=expected, tolerance=tolerance)
+            build_manifest(
+                fixtures=[],
+                expected_fixtures=expected,
+                comparison_policy=same_prefix_policy(),
+                tolerance=tolerance,
+            )
 
     def test_build_manifest_minimal(self):
         tolerance = ToleranceCalibration(
@@ -266,10 +321,11 @@ class TestManifest:
         manifest = build_manifest(
             fixtures=fixtures,
             expected_fixtures=expected_pair(),
+            comparison_policy=same_prefix_policy(),
             tolerance=tolerance,
             generated_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
-        assert manifest.schema_version == 2
+        assert manifest.schema_version == 3
         assert manifest.model.id == "Qwen/Qwen3-0.6B"
         assert manifest.model.arch == "Qwen3ForCausalLM"
         assert manifest.model.vocab_size == 151936
@@ -277,6 +333,7 @@ class TestManifest:
         assert manifest.generation.regression_max_tokens == 32
         assert len(manifest.fixtures) == 1
         assert manifest.generation.temperature == 0.0
+        assert manifest.comparison_policy == same_prefix_policy()
 
     def test_write_read_roundtrip(self, tmp_path):
         tolerance = ToleranceCalibration(
@@ -300,6 +357,7 @@ class TestManifest:
         manifest = build_manifest(
             fixtures=fixtures,
             expected_fixtures=expected_pair(),
+            comparison_policy=same_prefix_policy(),
             tolerance=tolerance,
             generated_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )

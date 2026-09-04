@@ -3,8 +3,6 @@
 //! These types are the Rust-side parse targets for `manifest.json` and the
 //! `.safetensors` fixture files produced by the Python golden generator.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 /// Top-level manifest describing a set of golden fixtures.
@@ -16,17 +14,15 @@ pub struct Manifest {
     pub model: ModelInfo,
     pub oracle_versions: OracleVersions,
     pub generation: GenerationConfig,
+    /// Versioned acceptance inputs consumed by the reference comparator.
+    pub comparison_policy: ComparisonPolicy,
+    /// Baseline-oracle calibration observations; never a correctness oracle.
     pub tolerance: ToleranceCalibration,
     pub expected_fixtures: Vec<ExpectedFixture>,
     pub fixtures: Vec<FixtureMetadata>,
     /// Baseline fixture identifiers successfully consumed by calibration.
     #[serde(default)]
     pub calibrated_fixtures: Vec<String>,
-    /// Mapping from prompt_id to a list of token positions where vLLM (the
-    /// reference BF16 engine) disagrees with transformers. These positions are
-    /// skipped during L1 regression comparison.
-    #[serde(default)]
-    pub regression_skip_map: HashMap<String, Vec<usize>>,
 }
 
 /// Contract for one oracle artifact required by the release manifest.
@@ -73,7 +69,7 @@ pub struct GenerationConfig {
     pub attn_implementation: String,
 }
 
-/// Calibrated tolerances from oracle cross-validation.
+/// Baseline-oracle calibration observations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToleranceCalibration {
@@ -81,6 +77,15 @@ pub struct ToleranceCalibration {
     pub observed_max_abs_diff: f64,
     pub calibration_factor: f64,
     pub method: String,
+}
+
+/// Explicit, versioned mathematical policy for reference-oracle comparison.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComparisonPolicy {
+    pub version: String,
+    pub l1_near_tie_max_abs_logit_gap: f64,
+    pub l2_atol: f64,
 }
 
 /// Metadata for a single fixture file.

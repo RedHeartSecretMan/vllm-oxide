@@ -87,6 +87,16 @@ class FixtureMetadata(BaseModel):
     filename: str
 
 
+class ComparisonPolicy(BaseModel):
+    """Versioned mathematical inputs for reference-oracle comparison."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    version: Literal["same-prefix-v1"]
+    l1_near_tie_max_abs_logit_gap: float = Field(ge=0.0)
+    l2_atol: float = Field(ge=0.0)
+
+
 class ToleranceCalibration(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -137,16 +147,16 @@ class Manifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     generated_at: datetime
     model: ModelInfo
     oracle_versions: OracleVersions
     generation: GenerationConfig
+    comparison_policy: ComparisonPolicy
     tolerance: ToleranceCalibration
     expected_fixtures: list[ExpectedFixture] = Field(min_length=1)
     fixtures: list[FixtureMetadata]
     calibrated_fixtures: list[str] = Field(default_factory=list)
-    regression_skip_map: dict[str, list[int]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def generated_fixtures_match_expectations(self) -> Self:
@@ -223,16 +233,6 @@ class Manifest(BaseModel):
                 raise ValueError(
                     f"generated fixture {fixture.prompt_id} family does not match expectation"
                 )
-        regression_ids = {
-            entry.prompt_id
-            for entry in self.expected_fixtures
-            if entry.family == "regression" and entry.oracle_role == "reference"
-        }
-        for prompt_id, positions in self.regression_skip_map.items():
-            if prompt_id not in regression_ids:
-                raise ValueError(f"unmatched regression skip identifier: {prompt_id}")
-            if any(position < 0 for position in positions) or len(positions) != len(set(positions)):
-                raise ValueError(f"invalid regression skip positions: {prompt_id}")
         return self
 
     def to_json(self, path: str | Path) -> None:
