@@ -211,13 +211,14 @@ impl BlockPool {
             .get(&hash)?
             .iter()
             .copied()
-            .find(|&block_id| {
+            .filter(|&block_id| {
                 self.blocks.get(block_id).is_some_and(|block| {
                     block.hash == hash
                         && block.prefix_identity.as_deref() == Some(identity)
                         && block.token_ids == identity.token_ids
                 })
             })
+            .max_by_key(|block_id| self.used_block_ids.contains(block_id))
     }
 
     fn cached_prefix_block_ids(&self, seq: &Sequence, max_blocks: usize) -> Vec<usize> {
@@ -934,6 +935,48 @@ mod tests {
             assert_ne!(target.block_table[1], wrong_second_block);
             assert_eq!(pool.blocks[correct_second_block].ref_count, 2);
             assert_eq!(pool.blocks[wrong_second_block].ref_count, 1);
+        }
+
+        #[test]
+        fn duplicate_exact_identity_prefers_used_candidate_under_tight_capacity() {
+            let mut pool = BlockPool::new(4, 256);
+            let tokens = (0..257).collect::<Vec<u32>>();
+
+            let mut free_owner = make_seq(tokens.clone());
+            pool.allocate(&mut free_owner, 0).unwrap();
+            free_owner.num_scheduled_tokens = 256;
+            pool.hash_blocks(&mut free_owner);
+            let hash = pool.blocks[free_owner.block_table[0]].hash;
+            let free_candidate = free_owner.block_table[0];
+            pool.deallocate(&mut free_owner).unwrap();
+
+            let mut used_owner = make_seq(tokens.clone());
+            pool.allocate(&mut used_owner, 0).unwrap();
+            used_owner.num_scheduled_tokens = 256;
+            pool.hash_blocks(&mut used_owner);
+            let used_candidate = used_owner.block_table[0];
+            assert_eq!(
+                pool.hash_to_block_id[&hash],
+                vec![free_candidate, used_candidate]
+            );
+
+            let mut capacity_holder = make_seq(vec![9]);
+            pool.allocate(&mut capacity_holder, 0).unwrap();
+            assert_eq!(pool.num_free_blocks(), 1);
+
+            let mut target = make_seq(tokens);
+            let cached = pool.can_allocate(&target);
+            assert_eq!(
+                cached,
+                Some(1),
+                "the used exact match leaves the sole free block for the uncached tail"
+            );
+            pool.allocate(&mut target, cached.unwrap()).unwrap();
+            assert_eq!(target.block_table[0], used_candidate);
+            assert_eq!(target.block_table[1], free_candidate);
+            assert_eq!(pool.blocks[used_candidate].ref_count, 2);
+            assert_eq!(pool.blocks[free_candidate].ref_count, 1);
+            assert_eq!(pool.hash_to_block_id[&hash], vec![used_candidate]);
         }
     }
 
