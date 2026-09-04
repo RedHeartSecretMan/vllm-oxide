@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -134,6 +134,27 @@ fn archive_bytes_with_raw_name(raw_name: &[u8]) -> Vec<u8> {
     header.set_cksum();
     archive.append(&header, [0_u8].as_slice()).unwrap();
     let encoder = archive.into_inner().unwrap();
+    encoder.finish().unwrap()
+}
+
+fn archive_bytes_with_end_markers(fixtures: &[(&str, &[u8])], marker_blocks: usize) -> Vec<u8> {
+    let compressed = archive_bytes(fixtures);
+    let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
+    let mut tar_bytes = Vec::new();
+    decoder.read_to_end(&mut tar_bytes).unwrap();
+    let entries_end = fixtures.iter().fold(0_usize, |offset, (_, payload)| {
+        offset + 512 + payload.len().div_ceil(512) * 512
+    });
+    tar_bytes.truncate(entries_end + marker_blocks * 512);
+
+    gzip_bytes(&tar_bytes)
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::default());
+    encoder.write_all(bytes).unwrap();
     encoder.finish().unwrap()
 }
 
@@ -564,6 +585,27 @@ fn downloader_rejects_malformed_archive_after_partial_extraction_and_cleans_stag
     archive.truncate(archive.len() - 12);
 
     assert_archive_rejected(archive, "archive");
+}
+
+#[test]
+fn downloader_requires_two_ustar_end_marker_blocks() {
+    let fixtures: [(&str, &[u8]); 2] = [
+        ("canonical_01.transformers.safetensors", b"reference"),
+        ("canonical_01.vllm.safetensors", b"baseline"),
+    ];
+    for marker_blocks in [0, 1] {
+        assert_archive_rejected(
+            archive_bytes_with_end_markers(&fixtures, marker_blocks),
+            "two zero USTAR end blocks",
+        );
+    }
+
+    let compressed = archive_bytes_with_end_markers(&fixtures, 2);
+    let mut decoder = flate2::read::GzDecoder::new(compressed.as_slice());
+    let mut tar_bytes = Vec::new();
+    decoder.read_to_end(&mut tar_bytes).unwrap();
+    tar_bytes.extend_from_slice(&[1_u8; 512]);
+    assert_archive_rejected(gzip_bytes(&tar_bytes), "only zero record padding");
 }
 
 #[test]

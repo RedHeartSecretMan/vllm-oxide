@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import gzip
 import hashlib
 import os
@@ -12,6 +14,42 @@ from pathlib import Path
 
 from golden_gen.config import ARCHIVE_FILENAME
 from golden_gen.schema import ArchiveInfo, FixtureMetadata, Manifest
+
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    """Atomically rename on Linux while refusing to replace any destination entry."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError as error:
+        raise OSError(
+            errno.ENOSYS, "renameat2 is required for atomic bundle publication"
+        ) from error
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if b"\0" in source_bytes or b"\0" in destination_bytes:
+        raise ValueError("bundle paths cannot contain NUL bytes")
+    result = renameat2(
+        _AT_FDCWD,
+        source_bytes,
+        _AT_FDCWD,
+        destination_bytes,
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
 
 
 def _validate_fixture_filename(filename: str) -> None:
@@ -133,9 +171,6 @@ def publish_release_bundle(fixture_dir: Path, release_dir: Path) -> Path:
     manifest_bytes = manifest_path.read_bytes()
     manifest = Manifest.model_validate_json(manifest_bytes)
     _validate_release_coverage(manifest)
-    if os.path.lexists(release_dir):
-        raise FileExistsError(f"release bundle destination already exists: {release_dir}")
-
     release_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{release_dir.name}.staging-", dir=release_dir.parent))
     try:
@@ -152,7 +187,7 @@ def publish_release_bundle(fixture_dir: Path, release_dir: Path) -> Path:
             os.fsync(output.fileno())
         if {path.name for path in staging.iterdir()} != {"manifest.json", ARCHIVE_FILENAME}:
             raise ValueError("release bundle must contain exactly two assets")
-        staging.rename(release_dir)
+        _rename_no_replace(staging, release_dir)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise

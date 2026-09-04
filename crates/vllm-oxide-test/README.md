@@ -97,6 +97,10 @@ closed. Extraction occurs in a unique sibling staging directory; only a fully
 verified fixture set and standalone manifest become visible through one rename.
 Failures clean only their unpublished staging directory, preserving older
 installs. Concurrent installers verify and reuse the winning rename.
+The Linux installer uses `renameat2(RENAME_NOREPLACE)` through safe `rustix`
+bindings; unsupported kernels/filesystems fail closed rather than falling back
+to a racy replacement. Staging and final paths share the same version directory
+and therefore the same filesystem.
 
 The report includes exact `expected`, `discovered`, `generated`, `compared`,
 `missing`, `unexpected`, `skipped`, and `failed` totals. Release acceptance is

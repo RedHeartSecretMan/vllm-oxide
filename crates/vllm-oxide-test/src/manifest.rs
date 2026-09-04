@@ -6,7 +6,7 @@ use safetensors::SafeTensors;
 
 use crate::types::{
     FixtureData, FixtureFamily, FixtureMetadata, Manifest, OracleName, OracleRole, PromptCategory,
-    RequiredComparison,
+    RequiredComparison, ARCHIVE_FILENAME, GOLDEN_VERSION, MANIFEST_SCHEMA_VERSION, PRODUCT_VERSION,
 };
 
 /// Parse a `manifest.json` file.
@@ -25,19 +25,19 @@ pub fn parse_manifest_bytes(content: &[u8], source: &str) -> Result<Manifest> {
 }
 
 fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
-    if manifest.schema_version != 4 {
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
         anyhow::bail!(
-            "unsupported manifest schema_version {}; expected 4",
-            manifest.schema_version
+            "unsupported manifest schema_version {}; expected {MANIFEST_SCHEMA_VERSION}",
+            manifest.schema_version,
         );
     }
-    if manifest.product_version != "v0.2.0" {
+    if manifest.product_version != PRODUCT_VERSION {
         anyhow::bail!("unsupported product version: {}", manifest.product_version);
     }
-    if manifest.golden_version != "goldens-v0.2" {
+    if manifest.golden_version != GOLDEN_VERSION {
         anyhow::bail!("unsupported golden version: {}", manifest.golden_version);
     }
-    if manifest.archive.filename != "goldens-v0.2.tar.gz" {
+    if manifest.archive.filename != ARCHIVE_FILENAME {
         anyhow::bail!(
             "unsupported golden archive filename: {}",
             manifest.archive.filename

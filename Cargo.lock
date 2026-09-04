@@ -2635,6 +2635,7 @@ dependencies = [
  "candle-core",
  "clap",
  "flate2",
+ "rustix",
  "safetensors 0.4.5",
  "serde",
  "serde_json",

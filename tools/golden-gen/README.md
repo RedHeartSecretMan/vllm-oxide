@@ -87,6 +87,9 @@ manifest, requires complete expected-fixture and calibration coverage, and
 rejects missing, unexpected, or checksum-mismatched working fixtures. This
 command creates local release inputs only; Ticket #45 owns the actual GitHub
 Release publication.
+Publication requires the Linux release host's `renameat2(RENAME_NOREPLACE)`
+support. An unsupported kernel or filesystem fails closed; the publisher never
+falls back to a check-then-rename sequence that could overwrite a racing target.
 
 ```bash
 uv run python -m golden_gen --help   # full usage

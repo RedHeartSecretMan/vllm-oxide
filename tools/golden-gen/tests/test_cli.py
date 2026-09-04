@@ -117,6 +117,16 @@ class TestCLI:
         assert exit_code == 0
         assert observed == [(fixture_dir, release_dir)]
 
+    def test_release_script_uploads_only_the_schema_v4_bundle(self):
+        script = (Path(__file__).resolve().parents[3] / "tools" / "validate-release.sh").read_text()
+
+        assert "${2:-goldens-v0.2}" in script
+        assert "python -m golden_gen bundle" in script
+        assert '"$GOLDEN_BUNDLE/manifest.json"' in script
+        assert '"$GOLDEN_BUNDLE/goldens-v0.2.tar.gz"' in script
+        assert "goldens-v0.1" not in script
+        assert "*.safetensors" not in script
+
     def test_dry_run_produces_manifest(self, tmp_path):
         """generate --dry-run should produce a fake manifest + fixtures."""
         result = subprocess.run(

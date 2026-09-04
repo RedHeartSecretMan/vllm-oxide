@@ -1,23 +1,120 @@
 //! Fetch, verify, and atomically install a golden asset bundle.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use flate2::bufread::GzDecoder;
+use rustix::fs::{renameat_with, RenameFlags, CWD};
 use sha2::{Digest, Sha256};
 
 use crate::manifest;
-use crate::types::{FixtureMetadata, Manifest, OracleRole, PromptCategory};
-
-const MANIFEST_FILENAME: &str = "manifest.json";
-const ARCHIVE_FILENAME: &str = "goldens-v0.2.tar.gz";
-const GOLDEN_VERSION: &str = "goldens-v0.2";
+use crate::types::{
+    FixtureMetadata, Manifest, OracleRole, PromptCategory, ARCHIVE_FILENAME, GOLDEN_VERSION,
+    MANIFEST_FILENAME,
+};
 const SAFETENSORS_HEADER_LIMIT: u64 = 1024 * 1024;
+const USTAR_BLOCK_SIZE: u64 = 512;
+const USTAR_BLOCK_BYTES: usize = 512;
+const USTAR_END_MARKER_BYTES: usize = 2 * USTAR_BLOCK_BYTES;
+const USTAR_TRAILING_LIMIT: usize = 1024 * 1024;
 static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+struct UstarStructureTracker(Rc<RefCell<UstarStructure>>);
+
+struct UstarStructure {
+    position: u64,
+    capture_from: Option<u64>,
+    trailing: Vec<u8>,
+    overflowed: bool,
+}
+
+impl UstarStructureTracker {
+    fn new() -> Self {
+        Self(Rc::new(RefCell::new(UstarStructure {
+            position: 0,
+            capture_from: None,
+            trailing: Vec::new(),
+            overflowed: false,
+        })))
+    }
+
+    fn set_last_entry_end(&self, end: u64) -> Result<()> {
+        let mut state = self.0.borrow_mut();
+        if end < state.position {
+            anyhow::bail!("USTAR reader advanced beyond the declared entry payload");
+        }
+        state.capture_from = Some(end);
+        state.trailing.clear();
+        state.overflowed = false;
+        Ok(())
+    }
+
+    fn validate_end_markers(&self) -> Result<()> {
+        let state = self.0.borrow();
+        if state.capture_from.is_none()
+            || state.overflowed
+            || state.trailing.len() < USTAR_END_MARKER_BYTES
+            || state.trailing.len() % USTAR_BLOCK_BYTES != 0
+            || state.trailing.iter().any(|byte| *byte != 0)
+        {
+            anyhow::bail!(
+                "archive must end with at least two zero USTAR end blocks and only zero record padding"
+            );
+        }
+        Ok(())
+    }
+}
+
+struct UstarTrackingReader<R> {
+    inner: R,
+    tracker: UstarStructureTracker,
+}
+
+impl<R> UstarTrackingReader<R> {
+    fn new(inner: R, tracker: UstarStructureTracker) -> Self {
+        Self { inner, tracker }
+    }
+
+    fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: Read> Read for UstarTrackingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        let mut state = self.tracker.0.borrow_mut();
+        let start = state.position;
+        state.position = state
+            .position
+            .checked_add(u64::try_from(count).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("USTAR stream position overflow"))?;
+        if let Some(capture_from) = state.capture_from {
+            let end = state.position;
+            if end > capture_from {
+                let offset = usize::try_from(capture_from.saturating_sub(start))
+                    .map_err(std::io::Error::other)?
+                    .min(count);
+                let available = USTAR_TRAILING_LIMIT.saturating_sub(state.trailing.len());
+                let captured = &buffer[offset..count];
+                state
+                    .trailing
+                    .extend_from_slice(&captured[..captured.len().min(available)]);
+                if captured.len() > available {
+                    state.overflowed = true;
+                }
+            }
+        }
+        Ok(count)
+    }
+}
 
 /// Adapter at the remote-release seam.
 ///
@@ -192,17 +289,17 @@ pub fn download_release_with<S: ReleaseSource>(
         return Ok((manifest, final_dir));
     }
 
-    match std::fs::rename(staging.path(), &final_dir) {
+    match rename_no_replace(staging.path(), &final_dir) {
         Ok(()) => staging.publish(),
-        Err(error) if path_exists_no_follow(&final_dir)? => {
+        Err(rustix::io::Errno::EXIST) => {
             verify_install(&final_dir, &manifest_bytes, &manifest)
                 .context("concurrent golden install winner is invalid")?;
-            tracing::debug!("concurrent golden install won rename race: {error}");
+            tracing::debug!("concurrent golden install won atomic rename race");
         }
         Err(error) => {
-            return Err(error).with_context(|| {
+            return Err(anyhow::anyhow!(error)).with_context(|| {
                 format!(
-                    "publishing golden install {} -> {}",
+                    "atomically publishing golden install {} -> {} without replacement",
                     staging.path().display(),
                     final_dir.display()
                 )
@@ -296,7 +393,9 @@ fn extract_verified_archive(
     }
     let mut seen = HashSet::new();
     let mut previous_name: Option<String> = None;
-    let mut archive = tar::Archive::new(decoder);
+    let structure = UstarStructureTracker::new();
+    let tracked_decoder = UstarTrackingReader::new(decoder, structure.clone());
+    let mut archive = tar::Archive::new(tracked_decoder);
     {
         let entries = archive.entries().context("reading USTAR archive entries")?;
         for entry in entries.raw(true) {
@@ -330,6 +429,15 @@ fn extract_verified_archive(
             let entry_size = header
                 .size()
                 .with_context(|| format!("reading size for {name}"))?;
+            let padded_size = entry_size
+                .checked_add(USTAR_BLOCK_SIZE - 1)
+                .map(|size| size / USTAR_BLOCK_SIZE * USTAR_BLOCK_SIZE)
+                .context("USTAR entry padding overflow")?;
+            let entry_end = entry
+                .raw_file_position()
+                .checked_add(padded_size)
+                .context("USTAR entry position overflow")?;
+            structure.set_last_entry_end(entry_end)?;
             let size_limit = fixture_size_limit(metadata, manifest)?;
             if entry_size > size_limit {
                 anyhow::bail!(
@@ -347,26 +455,11 @@ fn extract_verified_archive(
             }
         }
     }
-    let mut decoder = archive.into_inner();
-    let mut trailing_tar_bytes = 0_u64;
-    let mut trailing = [0_u8; 8192];
-    loop {
-        let count = decoder
-            .read(&mut trailing)
-            .context("finishing gzip archive stream")?;
-        if count == 0 {
-            break;
-        }
-        if trailing[..count].iter().any(|byte| *byte != 0) {
-            anyhow::bail!("archive contains data after the USTAR end marker");
-        }
-        trailing_tar_bytes = trailing_tar_bytes
-            .checked_add(u64::try_from(count).context("trailing archive size overflow")?)
-            .context("trailing archive size overflow")?;
-        if trailing_tar_bytes > SAFETENSORS_HEADER_LIMIT {
-            anyhow::bail!("archive contains excessive trailing padding");
-        }
-    }
+    let mut tracked_decoder = archive.into_inner();
+    std::io::copy(&mut tracked_decoder, &mut std::io::sink())
+        .context("finishing gzip archive stream")?;
+    structure.validate_end_markers()?;
+    let decoder = tracked_decoder.into_inner();
     let mut compressed_reader = decoder.into_inner();
     let mut trailing_compressed = [0_u8; 1];
     if compressed_reader
@@ -541,6 +634,10 @@ fn path_exists_no_follow(path: &Path) -> Result<bool> {
     }
 }
 
+fn rename_no_replace(source: &Path, destination: &Path) -> rustix::io::Result<()> {
+    renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE)
+}
+
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -604,5 +701,27 @@ impl Drop for StagingDir {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::rename_no_replace;
+
+    #[test]
+    fn atomic_publish_does_not_replace_an_empty_destination_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("manifest.json"), b"candidate").unwrap();
+        std::fs::create_dir(&destination).unwrap();
+
+        let error = rename_no_replace(&staging, &destination).unwrap_err();
+
+        assert_eq!(error, rustix::io::Errno::EXIST);
+        assert!(staging.join("manifest.json").is_file());
+        assert_eq!(std::fs::read_dir(destination).unwrap().count(), 0);
     }
 }

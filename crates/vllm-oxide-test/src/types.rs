@@ -5,6 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const MANIFEST_SCHEMA_VERSION: u32 = 4;
+pub const PRODUCT_VERSION: &str = "v0.2.0";
+pub const GOLDEN_VERSION: &str = "goldens-v0.2";
+pub const MANIFEST_FILENAME: &str = "manifest.json";
+pub const ARCHIVE_FILENAME: &str = "goldens-v0.2.tar.gz";
+
 /// Top-level manifest describing a set of golden fixtures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

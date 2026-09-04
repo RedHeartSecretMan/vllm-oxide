@@ -4,7 +4,8 @@ import tarfile
 
 import pytest
 
-from golden_gen.assets import build_fixture_archive, publish_release_bundle
+import golden_gen.assets as assets
+from golden_gen.assets import _rename_no_replace, build_fixture_archive, publish_release_bundle
 from golden_gen.manifest import (
     build_expected_fixtures,
     build_manifest,
@@ -113,6 +114,34 @@ def test_archive_is_reproducible_ustar_with_normalized_root_entries(tmp_path):
         and member.mtime == 0
         for member in members
     )
+
+
+def test_atomic_publish_does_not_replace_an_empty_destination_directory(tmp_path):
+    staging = tmp_path / "staging"
+    destination = tmp_path / "destination"
+    staging.mkdir()
+    (staging / "manifest.json").write_bytes(b"candidate")
+    destination.mkdir()
+
+    with pytest.raises(FileExistsError):
+        _rename_no_replace(staging, destination)
+
+    assert (staging / "manifest.json").read_bytes() == b"candidate"
+    assert list(destination.iterdir()) == []
+
+
+def test_atomic_publish_fails_closed_when_renameat2_is_unavailable(tmp_path, monkeypatch):
+    staging = tmp_path / "staging"
+    destination = tmp_path / "destination"
+    staging.mkdir()
+    monkeypatch.setattr(assets.ctypes, "CDLL", lambda *_args, **_kwargs: object())
+
+    with pytest.raises(OSError, match="renameat2 is required") as raised:
+        _rename_no_replace(staging, destination)
+
+    assert raised.value.errno == assets.errno.ENOSYS
+    assert staging.is_dir()
+    assert not destination.exists()
 
 
 def test_publisher_exposes_exactly_the_two_release_assets(tmp_path):
