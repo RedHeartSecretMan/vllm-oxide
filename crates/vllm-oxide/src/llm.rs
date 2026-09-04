@@ -500,7 +500,9 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::attention::{build_prefill_metadata, AttentionContext, PagedKVCacheGeometry};
+    use crate::attention::{
+        build_prefill_metadata, AttentionContext, AttnMetadata, PagedKVCacheGeometry,
+    };
     use crate::causal_lm::CausalLM;
     use crate::engine::sequence::BLOCK_SIZE;
     use candle_core::Tensor;
@@ -522,11 +524,23 @@ mod tests {
         physical_tokens: Arc<Mutex<HashMap<usize, u32>>>,
     }
 
+    #[derive(Clone)]
+    struct CausalFingerprintControls {
+        fail_next: Arc<AtomicBool>,
+        seen_metadata: Arc<Mutex<Vec<AttnMetadata>>>,
+    }
+
+    impl CausalFingerprintControls {
+        fn take_metadata(&self) -> Vec<AttnMetadata> {
+            std::mem::take(&mut *self.seen_metadata.lock().unwrap())
+        }
+    }
+
     struct CausalFingerprintModel {
         device: Device,
         attn_ctx: AttentionContext,
         physical_tokens: HashMap<usize, u32>,
-        fail_next: Option<Arc<AtomicBool>>,
+        controls: CausalFingerprintControls,
     }
 
     fn cached_token_at(
@@ -566,16 +580,17 @@ mod tests {
             input_ids: &Tensor,
             positions: &Tensor,
         ) -> candle_core::Result<Tensor> {
-            if self
-                .fail_next
-                .as_ref()
-                .is_some_and(|fail_next| fail_next.swap(false, Ordering::SeqCst))
-            {
+            let metadata = self.attn_ctx.attn_meta.lock().unwrap().clone();
+            self.controls
+                .seen_metadata
+                .lock()
+                .unwrap()
+                .push(metadata.clone());
+            if self.controls.fail_next.swap(false, Ordering::SeqCst) {
                 candle_core::bail!("injected prefix-cache execution failure");
             }
             let input_ids = input_ids.to_vec1::<u32>()?;
             let positions = positions.to_vec1::<u32>()?;
-            let metadata = self.attn_ctx.attn_meta.lock().unwrap().clone();
             if input_ids.len() != positions.len() || input_ids.len() != metadata.slot_mapping.len()
             {
                 candle_core::bail!("causal model received inconsistent step metadata");
@@ -961,10 +976,11 @@ mod tests {
         finish_test_llm(engine, paged_kv, device)
     }
 
-    fn causal_fingerprint_test_llm_with_limits(
+    fn causal_fingerprint_test_harness(
         max_num_batched_tokens: usize,
         max_num_seqs: usize,
-    ) -> LLM {
+        prefix_cache_enabled: bool,
+    ) -> (LLM, CausalFingerprintControls) {
         let device = Device::Cpu;
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
@@ -973,13 +989,22 @@ mod tests {
             paged_kv: paged_kv.clone(),
             attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
         };
+        let controls = CausalFingerprintControls {
+            fail_next: Arc::new(AtomicBool::new(false)),
+            seen_metadata: Arc::new(Mutex::new(Vec::new())),
+        };
         let scheduler = Scheduler::new(max_num_batched_tokens, max_num_seqs, 0.9);
-        let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, paged_kv.clone());
+        let kv_cache_manager = KvCacheManager::new_with_prefix_cache(
+            32,
+            BLOCK_SIZE,
+            paged_kv.clone(),
+            prefix_cache_enabled,
+        );
         let model: Box<dyn CausalLM> = Box::new(CausalFingerprintModel {
             device: device.clone(),
             attn_ctx: attn_ctx.clone(),
             physical_tokens: HashMap::new(),
-            fail_next: None,
+            controls: controls.clone(),
         });
         let engine = EngineCore::new(
             scheduler,
@@ -989,38 +1014,27 @@ mod tests {
             attn_ctx,
             device.clone(),
         );
-        finish_test_llm(engine, paged_kv, device)
+        (finish_test_llm(engine, paged_kv, device), controls)
+    }
+
+    fn causal_fingerprint_test_llm_with_limits(
+        max_num_batched_tokens: usize,
+        max_num_seqs: usize,
+    ) -> LLM {
+        causal_fingerprint_test_harness(max_num_batched_tokens, max_num_seqs, true).0
     }
 
     fn causal_fingerprint_test_llm(max_num_batched_tokens: usize) -> LLM {
         causal_fingerprint_test_llm_with_limits(max_num_batched_tokens, 16)
     }
 
-    fn causal_fingerprint_test_llm_with_failure_switch() -> (LLM, Arc<AtomicBool>) {
-        let device = Device::Cpu;
-        let paged_kv = Arc::new(Mutex::new(
-            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
-        ));
-        let attn_ctx = AttentionContext {
-            paged_kv: paged_kv.clone(),
-            attn_meta: Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[]))),
-        };
-        let fail_next = Arc::new(AtomicBool::new(false));
-        let model: Box<dyn CausalLM> = Box::new(CausalFingerprintModel {
-            device: device.clone(),
-            attn_ctx: attn_ctx.clone(),
-            physical_tokens: HashMap::new(),
-            fail_next: Some(fail_next.clone()),
-        });
-        let engine = EngineCore::new(
-            Scheduler::new(1_024, 16, 0.9),
-            KvCacheManager::new(32, BLOCK_SIZE, paged_kv.clone()),
-            model,
-            Sampler::new_with_seed(0),
-            attn_ctx,
-            device.clone(),
-        );
-        (finish_test_llm(engine, paged_kv, device), fail_next)
+    fn deterministic_causal_params(max_tokens: usize) -> SamplingParams {
+        SamplingParams {
+            temperature: 0.0,
+            max_tokens,
+            ignore_eos: true,
+            ..SamplingParams::default()
+        }
     }
 
     mod engine_options {
@@ -1159,15 +1173,6 @@ mod tests {
     mod prefix_cached_prefill {
         use super::*;
 
-        fn deterministic_params(max_tokens: usize) -> SamplingParams {
-            SamplingParams {
-                temperature: 0.0,
-                max_tokens,
-                ignore_eos: true,
-                ..SamplingParams::default()
-            }
-        }
-
         fn assert_same_output(actual: &RequestOutput, expected: &RequestOutput) {
             assert_eq!(actual.request_id, expected.request_id);
             assert_eq!(actual.token_ids, expected.token_ids);
@@ -1176,35 +1181,43 @@ mod tests {
         }
 
         #[test]
-        fn warm_prefix_hit_matches_cache_miss_control_for_the_same_request() {
+        fn cache_enabled_and_disabled_match_for_the_same_request_output() {
             let target = Prompt::TokenIds((0..513).collect());
-            let unrelated = Prompt::TokenIds((2_000..2_513).collect());
-            let params = deterministic_params(3);
-            let mut cache_hit = causal_fingerprint_test_llm(1_024);
-            let mut cache_miss = causal_fingerprint_test_llm(1_024);
+            let params = deterministic_causal_params(3);
+            let (mut cache_enabled, enabled_controls) =
+                causal_fingerprint_test_harness(1_024, 16, true);
+            let (mut cache_disabled, disabled_controls) =
+                causal_fingerprint_test_harness(1_024, 16, false);
 
-            cache_hit
+            cache_enabled
                 .generate(std::slice::from_ref(&target), std::slice::from_ref(&params))
                 .unwrap();
-            cache_miss
-                .generate(
-                    std::slice::from_ref(&unrelated),
-                    std::slice::from_ref(&params),
-                )
-                .unwrap();
-
-            let hit = cache_hit
+            cache_disabled
                 .generate(std::slice::from_ref(&target), std::slice::from_ref(&params))
                 .unwrap();
-            let miss = cache_miss
+            enabled_controls.take_metadata();
+            disabled_controls.take_metadata();
+
+            let enabled = cache_enabled
+                .generate(std::slice::from_ref(&target), std::slice::from_ref(&params))
+                .unwrap();
+            let disabled = cache_disabled
                 .generate(std::slice::from_ref(&target), std::slice::from_ref(&params))
                 .unwrap();
 
-            assert_eq!(hit.len(), 1);
-            assert_eq!(hit[0].request_id, 1);
-            assert_same_output(&hit[0], &miss[0]);
-            assert_eq!(cache_hit.engine.kv_cache_manager.num_free_blocks(), 32);
-            assert_eq!(cache_miss.engine.kv_cache_manager.num_free_blocks(), 32);
+            assert_eq!(enabled.len(), 1);
+            assert_eq!(enabled[0].request_id, 1);
+            assert_same_output(&enabled[0], &disabled[0]);
+            let enabled_metadata = enabled_controls.take_metadata();
+            let disabled_metadata = disabled_controls.take_metadata();
+            assert_eq!(enabled_metadata[0].cu_seqlens_q, vec![0, 1]);
+            assert_eq!(enabled_metadata[0].cu_seqlens_k, vec![0, 513]);
+            assert_eq!(enabled_metadata[0].block_table.len(), 1);
+            assert_eq!(disabled_metadata[0].cu_seqlens_q, vec![0, 513]);
+            assert_eq!(disabled_metadata[0].cu_seqlens_k, vec![0, 513]);
+            assert!(disabled_metadata[0].block_table.is_empty());
+            assert_eq!(cache_enabled.engine.kv_cache_manager.num_free_blocks(), 32);
+            assert_eq!(cache_disabled.engine.kv_cache_manager.num_free_blocks(), 32);
         }
 
         #[test]
@@ -1227,13 +1240,16 @@ mod tests {
                 Prompt::TokenIds(miss_prompt),
             ];
             let params = [
-                deterministic_params(1),
-                deterministic_params(2),
-                deterministic_params(3),
+                deterministic_causal_params(1),
+                deterministic_causal_params(2),
+                deterministic_causal_params(3),
             ];
             let mut mixed = causal_fingerprint_test_llm(1_024);
             mixed
-                .generate(&[Prompt::TokenIds(full_prompt)], &[deterministic_params(1)])
+                .generate(
+                    &[Prompt::TokenIds(full_prompt)],
+                    &[deterministic_causal_params(1)],
+                )
                 .unwrap();
 
             let outputs = mixed.generate(&prompts, &params).unwrap();
@@ -1254,11 +1270,15 @@ mod tests {
 
         #[test]
         fn rejected_request_does_not_borrow_or_discard_cached_prefix_ownership() {
-            let mut llm = causal_fingerprint_test_llm(1_024);
+            let (mut llm, controls) = causal_fingerprint_test_harness(1_024, 16, true);
             let prompt = [Prompt::TokenIds((0..513).collect())];
-            let valid = [deterministic_params(1)];
+            let valid = [deterministic_causal_params(1)];
             llm.generate(&prompt, &valid).unwrap();
-            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+            let ownership_before = llm.engine.kv_cache_manager.ownership_snapshot();
+            assert_eq!(ownership_before.free_block_ids.len(), 32);
+            assert!(ownership_before.used_block_ids.is_empty());
+            assert!(ownership_before.ref_counts.iter().all(|&count| count == 0));
+            assert_eq!(ownership_before.cache_entries.len(), 2);
 
             let error = llm
                 .generate(
@@ -1272,26 +1292,25 @@ mod tests {
 
             assert!(error.to_string().contains("max_tokens=0"));
             assert!(!llm.engine.is_running());
-            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+            assert_eq!(
+                llm.engine.kv_cache_manager.ownership_snapshot(),
+                ownership_before
+            );
 
+            controls.take_metadata();
             let accepted = llm.generate(&prompt, &valid).unwrap();
             assert_eq!(accepted[0].request_id, 1);
             assert!(accepted[0].finished);
+            let metadata = controls.take_metadata();
+            assert_eq!(metadata[0].cu_seqlens_q, vec![0, 1]);
+            assert_eq!(metadata[0].cu_seqlens_k, vec![0, 513]);
+            assert_eq!(metadata[0].block_table.len(), 1);
             assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
         }
     }
 
     mod continuous_batching {
         use super::*;
-
-        fn deterministic_params(max_tokens: usize) -> SamplingParams {
-            SamplingParams {
-                temperature: 0.0,
-                max_tokens,
-                ignore_eos: true,
-                ..SamplingParams::default()
-            }
-        }
 
         #[test]
         fn generate_preserves_order_and_outputs_when_admission_interleaves_with_decode() {
@@ -1301,9 +1320,9 @@ mod tests {
                 Prompt::TokenIds(vec![11, 13, 17, 19, 23]),
             ];
             let params = [
-                deterministic_params(1),
-                deterministic_params(3),
-                deterministic_params(2),
+                deterministic_causal_params(1),
+                deterministic_causal_params(3),
+                deterministic_causal_params(2),
             ];
             let mut mixed = causal_fingerprint_test_llm_with_limits(4, 2);
 
@@ -1998,31 +2017,58 @@ mod tests {
 
         #[test]
         fn prefix_hit_execution_failure_releases_all_ownership_and_allows_retry() {
-            let (mut llm, fail_next) = causal_fingerprint_test_llm_with_failure_switch();
-            let prompt = [Prompt::TokenIds((0..513).collect())];
-            let params = [SamplingParams {
-                temperature: 0.0,
-                max_tokens: 1,
-                ignore_eos: true,
-                ..SamplingParams::default()
-            }];
-            let warmup = llm.generate(&prompt, &params).unwrap();
-            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+            let (mut llm, controls) = causal_fingerprint_test_harness(1_024, 16, true);
+            let prompt = Prompt::TokenIds((0..513).collect());
+            let params = deterministic_causal_params(1);
+            let warmup = llm
+                .generate(std::slice::from_ref(&prompt), std::slice::from_ref(&params))
+                .unwrap();
+            let ownership_before = llm.engine.kv_cache_manager.ownership_snapshot();
+            assert_eq!(ownership_before.free_block_ids.len(), 32);
+            assert!(ownership_before.used_block_ids.is_empty());
+            assert!(ownership_before.ref_counts.iter().all(|&count| count == 0));
+            assert_eq!(ownership_before.cache_entries.len(), 2);
+            controls.take_metadata();
 
-            fail_next.store(true, Ordering::SeqCst);
-            let error = llm.generate(&prompt, &params).unwrap_err();
+            controls.fail_next.store(true, Ordering::SeqCst);
+            let error = llm
+                .generate(
+                    &[prompt.clone(), prompt.clone()],
+                    &[params.clone(), params.clone()],
+                )
+                .unwrap_err();
 
             assert!(format!("{error:#}").contains("injected prefix-cache execution failure"));
+            let failed_metadata = controls.take_metadata();
+            assert_eq!(failed_metadata.len(), 1);
+            assert_eq!(failed_metadata[0].cu_seqlens_q, vec![0, 1, 2]);
+            assert_eq!(failed_metadata[0].cu_seqlens_k, vec![0, 513, 1_026]);
+            assert_eq!(failed_metadata[0].block_table.len(), 2);
+            assert_eq!(
+                &failed_metadata[0].block_table[0][..2],
+                &failed_metadata[0].block_table[1][..2],
+                "both active requests must borrow the same two cached prefix blocks"
+            );
             assert!(!llm.engine.is_running());
             assert_eq!(llm.engine.scheduler.num_waiting(), 0);
             assert_eq!(llm.engine.scheduler.num_running(), 0);
-            assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+            assert_eq!(
+                llm.engine.kv_cache_manager.ownership_snapshot(),
+                ownership_before,
+                "failure cleanup must restore refcounts, used/free ownership, and cache identities"
+            );
 
-            let retry = llm.generate(&prompt, &params).unwrap();
-            assert_eq!(retry[0].request_id, 2);
+            let retry = llm
+                .generate(std::slice::from_ref(&prompt), std::slice::from_ref(&params))
+                .unwrap();
+            assert_eq!(retry[0].request_id, 3);
             assert_eq!(retry[0].token_ids, warmup[0].token_ids);
             assert_eq!(retry[0].text, warmup[0].text);
             assert!(retry[0].finished);
+            let retry_metadata = controls.take_metadata();
+            assert_eq!(retry_metadata[0].cu_seqlens_q, vec![0, 1]);
+            assert_eq!(retry_metadata[0].cu_seqlens_k, vec![0, 513]);
+            assert_eq!(retry_metadata[0].block_table.len(), 1);
             assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
         }
 

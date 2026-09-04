@@ -63,6 +63,15 @@ struct PrefixCacheIdentity {
     token_ids: Vec<u32>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BlockPoolOwnershipSnapshot {
+    pub(crate) free_block_ids: Vec<usize>,
+    pub(crate) used_block_ids: Vec<usize>,
+    pub(crate) ref_counts: Vec<usize>,
+    pub(crate) cache_entries: Vec<(i64, usize, Vec<Vec<u32>>)>,
+}
+
 impl PrefixCacheIdentity {
     fn extend(parent: Option<Arc<Self>>, token_ids: Vec<u32>) -> Arc<Self> {
         Arc::new(Self { parent, token_ids })
@@ -127,11 +136,16 @@ pub struct BlockPool {
     pub(crate) hash_to_block_id: HashMap<i64, Vec<usize>>,
     pub(crate) free_block_ids: VecDeque<usize>,
     pub(crate) used_block_ids: HashSet<usize>,
+    prefix_cache_enabled: bool,
 }
 
 impl BlockPool {
     /// Create a pool with `num_blocks` pre-allocated (all free).
     pub fn new(num_blocks: usize, block_size: usize) -> Self {
+        Self::new_inner(num_blocks, block_size, true)
+    }
+
+    fn new_inner(num_blocks: usize, block_size: usize, prefix_cache_enabled: bool) -> Self {
         let blocks: Vec<Block> = (0..num_blocks).map(Block::new).collect();
         let free_block_ids: VecDeque<usize> = (0..num_blocks).collect();
         Self {
@@ -140,7 +154,17 @@ impl BlockPool {
             hash_to_block_id: HashMap::new(),
             free_block_ids,
             used_block_ids: HashSet::new(),
+            prefix_cache_enabled,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_prefix_cache(
+        num_blocks: usize,
+        block_size: usize,
+        prefix_cache_enabled: bool,
+    ) -> Self {
+        Self::new_inner(num_blocks, block_size, prefix_cache_enabled)
     }
 
     /// Compute the chained xxhash for a set of token ids with the given
@@ -194,6 +218,23 @@ impl BlockPool {
                         && block.token_ids == identity.token_ids
                 })
             })
+    }
+
+    fn cached_prefix_block_ids(&self, seq: &Sequence, max_blocks: usize) -> Vec<usize> {
+        let mut hash = -1;
+        let mut identity = None;
+        let mut block_ids = Vec::with_capacity(max_blocks);
+        for block_index in 0..max_blocks {
+            let token_ids = seq.block(block_index);
+            hash = Self::compute_hash(token_ids, hash);
+            let next_identity = PrefixCacheIdentity::extend(identity, token_ids.to_vec());
+            let Some(block_id) = self.cached_block_id(hash, &next_identity) else {
+                break;
+            };
+            block_ids.push(block_id);
+            identity = Some(next_identity);
+        }
+        block_ids
     }
 
     fn remove_cache_entry(&mut self, hash: i64, block_id: usize) {
@@ -259,35 +300,24 @@ impl BlockPool {
         if seq.num_blocks() == 0 {
             return Some(0);
         }
-        let mut h: i64 = -1;
-        let mut identity = None;
-        let mut num_cached_blocks: usize = 0;
         let num_blocks = seq.num_blocks();
+        if !self.prefix_cache_enabled {
+            return (self.free_block_ids.len() >= num_blocks).then_some(0);
+        }
         // Recompute the final logical block even when it is exactly full so a
         // non-empty request never becomes a zero-token sampling plan.
-        let check_until = if num_blocks > 0 { num_blocks - 1 } else { 0 };
-
+        let cached_block_ids = self.cached_prefix_block_ids(seq, num_blocks - 1);
         let mut num_new_blocks = num_blocks;
-        for i in 0..check_until {
-            let token_ids = seq.block(i);
-            h = Self::compute_hash(token_ids, h);
-            let next_identity = PrefixCacheIdentity::extend(identity, token_ids.to_vec());
-            match self.cached_block_id(h, &next_identity) {
-                Some(block_id) => {
-                    num_cached_blocks += 1;
-                    if self.used_block_ids.contains(&block_id) {
-                        num_new_blocks -= 1;
-                    }
-                    identity = Some(next_identity);
-                }
-                _ => break,
+        for &block_id in &cached_block_ids {
+            if self.used_block_ids.contains(&block_id) {
+                num_new_blocks -= 1;
             }
         }
 
         if self.free_block_ids.len() < num_new_blocks {
             return None;
         }
-        Some(num_cached_blocks)
+        Some(cached_block_ids.len())
     }
 
     /// Allocate blocks for a sequence, using cached blocks where possible.
@@ -318,25 +348,15 @@ impl BlockPool {
                 seq.num_blocks()
             )));
         }
-        let mut h: i64 = -1;
-        let mut identity = None;
-        let mut cached_block_ids = Vec::with_capacity(num_cached_blocks);
+        let cached_block_ids = self.cached_prefix_block_ids(seq, num_cached_blocks);
+        if cached_block_ids.len() != num_cached_blocks {
+            return Err(BlockPoolError("cached block hash not found".to_string()));
+        }
         let mut distinct_cached_block_ids = HashSet::with_capacity(num_cached_blocks);
-        for i in 0..num_cached_blocks {
-            let token_ids = seq.block(i);
-            h = Self::compute_hash(token_ids, h);
-            let next_identity = PrefixCacheIdentity::extend(identity, token_ids.to_vec());
-            let block_id = self
-                .cached_block_id(h, &next_identity)
-                .ok_or_else(|| BlockPoolError("cached block hash not found".to_string()))?;
+        for &block_id in &cached_block_ids {
             let block = self.blocks.get(block_id).ok_or_else(|| {
                 BlockPoolError(format!("cached block {block_id} is out of range"))
             })?;
-            if block.token_ids != token_ids {
-                return Err(BlockPoolError(format!(
-                    "cached block {block_id} token ids do not match"
-                )));
-            }
             if !distinct_cached_block_ids.insert(block_id) {
                 return Err(BlockPoolError(format!(
                     "cached block {block_id} appears more than once"
@@ -357,8 +377,6 @@ impl BlockPool {
                     "cached block {block_id} has inconsistent free-list ownership"
                 )));
             }
-            cached_block_ids.push(block_id);
-            identity = Some(next_identity);
         }
 
         let required_uncached_blocks = seq.num_blocks() - num_cached_blocks;
@@ -495,7 +513,6 @@ impl BlockPool {
         }
         for sequence in sequences {
             sequence.num_cached_tokens = 0;
-            sequence.num_scheduled_tokens = 0;
             sequence.block_table.clear();
         }
         Ok(())
@@ -596,6 +613,9 @@ impl BlockPool {
     /// from the previous block's hash (or -1 if starting from block 0),
     /// then updates each block and the hashtable.
     pub fn hash_blocks(&mut self, seq: &mut Sequence) {
+        if !self.prefix_cache_enabled {
+            return;
+        }
         let start = seq.num_cached_tokens / self.block_size;
         let end = (seq.num_cached_tokens + seq.num_scheduled_tokens) / self.block_size;
         if start >= end {
@@ -633,6 +653,41 @@ impl BlockPool {
     /// Total number of blocks in the pool.
     pub fn num_blocks(&self) -> usize {
         self.blocks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ownership_snapshot(&self) -> BlockPoolOwnershipSnapshot {
+        let mut free_block_ids = self.free_block_ids.iter().copied().collect::<Vec<_>>();
+        free_block_ids.sort_unstable();
+        let mut used_block_ids = self.used_block_ids.iter().copied().collect::<Vec<_>>();
+        used_block_ids.sort_unstable();
+        let mut cache_entries = Vec::new();
+        for (&hash, block_ids) in &self.hash_to_block_id {
+            for &block_id in block_ids {
+                let Some(identity) = self
+                    .blocks
+                    .get(block_id)
+                    .and_then(|block| block.prefix_identity.as_deref())
+                else {
+                    continue;
+                };
+                let mut token_chain = Vec::new();
+                let mut current = Some(identity);
+                while let Some(node) = current {
+                    token_chain.push(node.token_ids.clone());
+                    current = node.parent.as_deref();
+                }
+                token_chain.reverse();
+                cache_entries.push((hash, block_id, token_chain));
+            }
+        }
+        cache_entries.sort_by_key(|(hash, block_id, _)| (*hash, *block_id));
+        BlockPoolOwnershipSnapshot {
+            free_block_ids,
+            used_block_ids,
+            ref_counts: self.blocks.iter().map(|block| block.ref_count).collect(),
+            cache_entries,
+        }
     }
 }
 
@@ -743,6 +798,20 @@ mod tests {
 
     mod can_allocate {
         use super::*;
+
+        #[test]
+        fn disabled_prefix_cache_never_indexes_or_reuses_completed_blocks() {
+            let mut pool = BlockPool::new_with_prefix_cache(10, 256, false);
+            let tokens = (0..513).collect::<Vec<u32>>();
+            let mut warmup = make_seq(tokens.clone());
+            pool.allocate(&mut warmup, 0).unwrap();
+            warmup.num_scheduled_tokens = 512;
+            pool.hash_blocks(&mut warmup);
+            pool.deallocate(&mut warmup).unwrap();
+
+            assert!(pool.hash_to_block_id.is_empty());
+            assert_eq!(pool.can_allocate(&make_seq(tokens)), Some(0));
+        }
 
         #[test]
         fn returns_some_zero_for_empty_seq() {
@@ -1002,6 +1071,20 @@ mod tests {
 
             pool.deallocate(&mut seq).unwrap();
             assert_eq!(pool.num_free_blocks(), initial_free);
+            assert!(seq.block_table.is_empty());
+            assert_eq!(seq.num_cached_tokens, 0);
+        }
+
+        #[test]
+        fn release_does_not_mutate_scheduler_owned_progress() {
+            let mut pool = BlockPool::new(5, 256);
+            let mut seq = make_seq((0..257).collect());
+            pool.allocate(&mut seq, 0).unwrap();
+            seq.num_scheduled_tokens = 17;
+
+            pool.deallocate(&mut seq).unwrap();
+
+            assert_eq!(seq.num_scheduled_tokens, 17);
             assert!(seq.block_table.is_empty());
             assert_eq!(seq.num_cached_tokens, 0);
         }

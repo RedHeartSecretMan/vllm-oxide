@@ -36,6 +36,8 @@
 use std::sync::{Arc, Mutex};
 
 use crate::attention::PagedKVCache;
+#[cfg(test)]
+use crate::engine::block_pool::BlockPoolOwnershipSnapshot;
 use crate::engine::block_pool::{BlockPool, BlockPoolError};
 use crate::engine::sequence::Sequence;
 
@@ -84,12 +86,33 @@ impl KvCacheManager {
     /// Construct a new `KvCacheManager` with the given pool size and
     /// shared paged KV cache.
     pub fn new(num_blocks: usize, block_size: usize, paged_kv: Arc<Mutex<PagedKVCache>>) -> Self {
-        let block_pool = BlockPool::new(num_blocks, block_size);
+        Self::from_block_pool(BlockPool::new(num_blocks, block_size), block_size, paged_kv)
+    }
+
+    fn from_block_pool(
+        block_pool: BlockPool,
+        block_size: usize,
+        paged_kv: Arc<Mutex<PagedKVCache>>,
+    ) -> Self {
         Self {
             block_pool,
             paged_kv,
             block_size,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_prefix_cache(
+        num_blocks: usize,
+        block_size: usize,
+        paged_kv: Arc<Mutex<PagedKVCache>>,
+        prefix_cache_enabled: bool,
+    ) -> Self {
+        Self::from_block_pool(
+            BlockPool::new_with_prefix_cache(num_blocks, block_size, prefix_cache_enabled),
+            block_size,
+            paged_kv,
+        )
     }
 
     /// Forwarded: check whether a sequence can be allocated.
@@ -189,6 +212,11 @@ impl KvCacheManager {
     /// Number of free (unused) blocks.
     pub fn num_free_blocks(&self) -> usize {
         self.block_pool.num_free_blocks()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ownership_snapshot(&self) -> BlockPoolOwnershipSnapshot {
+        self.block_pool.ownership_snapshot()
     }
 }
 
