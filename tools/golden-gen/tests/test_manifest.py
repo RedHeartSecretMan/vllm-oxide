@@ -5,22 +5,26 @@ from pydantic import ValidationError
 
 from golden_gen.manifest import build_manifest, get_oracle_versions, read_manifest, write_manifest
 from golden_gen.schema import (
-    ComparisonPolicy,
+    BaselineCalibration,
     ExpectedFixture,
     FixtureMetadata,
     Manifest,
     OracleVersions,
-    ToleranceCalibration,
+    TolerancePolicy,
 )
 
 MODEL_REVISION = "7e4ae267688d671ddfca3122e4528ee980cf3234"
 
 
-def same_prefix_policy() -> ComparisonPolicy:
-    return ComparisonPolicy(
+def same_prefix_policy() -> TolerancePolicy:
+    return TolerancePolicy(
         version="same-prefix-v1",
+        dtype="bfloat16",
+        kernel="sdpa",
         l1_near_tie_max_abs_logit_gap=0.02,
         l2_atol=0.01,
+        rationale="Reviewed synthetic policy",
+        evidence=["synthetic:test_manifest"],
     )
 
 
@@ -53,8 +57,8 @@ def expected_pair() -> list[ExpectedFixture]:
 
 class TestManifest:
     def test_empty_expected_fixture_set_is_rejected(self):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -64,13 +68,13 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=[],
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_generated_fixture_identifier_must_match_an_expectation(self):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -90,13 +94,13 @@ class TestManifest:
             build_manifest(
                 fixtures=[unexpected],
                 expected_fixtures=expected_pair(),
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_duplicate_expected_fixture_identifier_is_rejected(self):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -117,13 +121,13 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=[expected, expected.model_copy()],
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_unsupported_manifest_schema_version_is_rejected(self):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -131,8 +135,8 @@ class TestManifest:
         manifest = build_manifest(
             fixtures=[],
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=tolerance,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=tolerance,
         ).model_dump()
         manifest["schema_version"] = 999
 
@@ -140,8 +144,8 @@ class TestManifest:
             Manifest.model_validate(manifest)
 
     def test_legacy_regression_skip_map_is_rejected(self):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -149,8 +153,8 @@ class TestManifest:
         manifest = build_manifest(
             fixtures=[],
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=tolerance,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=tolerance,
         ).model_dump()
         manifest["regression_skip_map"] = {"canonical_01": [0]}
 
@@ -169,8 +173,8 @@ class TestManifest:
             required_comparison="calibration",
             filename="canonical_01.transformers.safetensors",
         )
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -180,8 +184,8 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=[invalid],
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_each_prompt_requires_reference_and_baseline_expectations(self):
@@ -196,8 +200,8 @@ class TestManifest:
             required_comparison="l1_l2",
             filename="canonical_01.transformers.safetensors",
         )
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -207,15 +211,15 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=[reference_only],
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_expected_fixture_identity_must_match_manifest_model(self):
         expected = expected_pair()
         expected[1] = expected[1].model_copy(update={"model_revision": "moving-tag"})
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -225,8 +229,8 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=expected,
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_generated_fixture_family_must_match_expectation(self):
@@ -240,8 +244,8 @@ class TestManifest:
             sha256="abc123",
             filename="canonical_01.transformers.safetensors",
         )
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -251,8 +255,8 @@ class TestManifest:
             build_manifest(
                 fixtures=[fixture],
                 expected_fixtures=expected_pair(),
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_duplicate_generated_fixture_identifier_is_rejected(self):
@@ -266,8 +270,8 @@ class TestManifest:
             sha256="abc123",
             filename="canonical_01.transformers.safetensors",
         )
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -277,15 +281,15 @@ class TestManifest:
             build_manifest(
                 fixtures=[fixture, fixture.model_copy()],
                 expected_fixtures=expected_pair(),
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_expected_identifier_and_filename_are_canonical(self):
         expected = expected_pair()
         expected[0] = expected[0].model_copy(update={"fixture_id": "wrong"})
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -295,13 +299,13 @@ class TestManifest:
             build_manifest(
                 fixtures=[],
                 expected_fixtures=expected,
-                comparison_policy=same_prefix_policy(),
-                tolerance=tolerance,
+                tolerance_policy=same_prefix_policy(),
+                baseline_calibration=tolerance,
             )
 
     def test_build_manifest_minimal(self):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="2x max pairwise abs diff",
@@ -321,8 +325,8 @@ class TestManifest:
         manifest = build_manifest(
             fixtures=fixtures,
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=tolerance,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=tolerance,
             generated_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
         assert manifest.schema_version == 3
@@ -333,11 +337,11 @@ class TestManifest:
         assert manifest.generation.regression_max_tokens == 32
         assert len(manifest.fixtures) == 1
         assert manifest.generation.temperature == 0.0
-        assert manifest.comparison_policy == same_prefix_policy()
+        assert manifest.tolerance_policy == same_prefix_policy()
 
     def test_write_read_roundtrip(self, tmp_path):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="test",
@@ -357,8 +361,8 @@ class TestManifest:
         manifest = build_manifest(
             fixtures=fixtures,
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=tolerance,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=tolerance,
             generated_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC),
         )
         path = tmp_path / "manifest.json"

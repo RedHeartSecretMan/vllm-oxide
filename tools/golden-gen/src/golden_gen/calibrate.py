@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from golden_gen.config import TOLERANCE_CALIBRATION_FACTOR
 from golden_gen.io import load_fixture
 from golden_gen.manifest import read_manifest
-from golden_gen.schema import ExpectedFixture, FixtureMetadata, Manifest, ToleranceCalibration
+from golden_gen.schema import BaselineCalibration, ExpectedFixture, FixtureMetadata, Manifest
 
 
 def _group_fixtures_by_oracle(
@@ -188,7 +188,7 @@ def count_argmax_mismatches(
     return int((token_ids_a != token_ids_b).sum())
 
 
-def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
+def calibrate_from_fixtures(manifest_dir: Path) -> BaselineCalibration:
     """Calibrate atol from transformers vs vllm canonical fixture pairs.
 
     Loads canonical fixtures from manifest_dir, computes the per-element
@@ -200,7 +200,7 @@ def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
         manifest_dir: Directory containing manifest.json and .safetensors fixtures.
 
     Returns:
-        ToleranceCalibration with atol, observed_max_abs_diff, etc.
+        BaselineCalibration with candidate_atol and observed distribution evidence.
     """
     manifest = read_manifest(manifest_dir / "manifest.json")
     grouped = _group_fixtures_by_oracle(manifest, "canonical")
@@ -234,8 +234,8 @@ def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
         f"through first divergence between transformers and vllm on canonical prompts"
     )
 
-    return ToleranceCalibration(
-        atol=atol,
+    return BaselineCalibration(
+        candidate_atol=atol,
         observed_max_abs_diff=observed_max_abs_diff,
         calibration_factor=TOLERANCE_CALIBRATION_FACTOR,
         method=method,

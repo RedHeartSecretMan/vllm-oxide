@@ -16,7 +16,7 @@ from golden_gen.config import (
     VOCAB_SIZE,
 )
 from golden_gen.schema import (
-    ComparisonPolicy,
+    BaselineCalibration,
     DiscoveredFixture,
     ExpectedFixture,
     FixtureMetadata,
@@ -27,7 +27,7 @@ from golden_gen.schema import (
     OracleRole,
     OracleVersions,
     RequiredComparison,
-    ToleranceCalibration,
+    TolerancePolicy,
 )
 
 
@@ -80,19 +80,19 @@ def get_oracle_versions() -> OracleVersions:
 
 def build_manifest(
     fixtures: list[FixtureMetadata],
-    tolerance: ToleranceCalibration,
+    baseline_calibration: BaselineCalibration,
     *,
-    comparison_policy: ComparisonPolicy,
+    tolerance_policy: TolerancePolicy,
     expected_fixtures: list[ExpectedFixture],
     generated_at: datetime | None = None,
 ) -> Manifest:
-    """Build a Manifest from fixture metadata and tolerance calibration.
+    """Build a Manifest from fixtures, baseline observations, and tolerance policy.
 
     Args:
         fixtures: List of FixtureMetadata for all generated fixtures.
         expected_fixtures: Independent contracts for all required fixtures.
-        comparison_policy: Versioned L1/L2 mathematical acceptance inputs.
-        tolerance: Calibrated tolerance values.
+        tolerance_policy: Versioned L1/L2 mathematical acceptance inputs.
+        baseline_calibration: Baseline-oracle calibration observations.
         generated_at: Timestamp (defaults to now UTC).
 
     Returns:
@@ -118,8 +118,8 @@ def build_manifest(
             temperature=0.0,
             attn_implementation=ATTN_IMPLEMENTATION,
         ),
-        comparison_policy=comparison_policy,
-        tolerance=tolerance,
+        tolerance_policy=tolerance_policy,
+        baseline_calibration=baseline_calibration,
         expected_fixtures=expected_fixtures,
         fixtures=fixtures,
     )

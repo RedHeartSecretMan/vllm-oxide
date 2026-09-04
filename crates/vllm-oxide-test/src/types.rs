@@ -15,9 +15,9 @@ pub struct Manifest {
     pub oracle_versions: OracleVersions,
     pub generation: GenerationConfig,
     /// Versioned acceptance inputs consumed by the reference comparator.
-    pub comparison_policy: ComparisonPolicy,
+    pub tolerance_policy: TolerancePolicy,
     /// Baseline-oracle calibration observations; never a correctness oracle.
-    pub tolerance: ToleranceCalibration,
+    pub baseline_calibration: BaselineCalibration,
     pub expected_fixtures: Vec<ExpectedFixture>,
     pub fixtures: Vec<FixtureMetadata>,
     /// Baseline fixture identifiers successfully consumed by calibration.
@@ -72,8 +72,8 @@ pub struct GenerationConfig {
 /// Baseline-oracle calibration observations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ToleranceCalibration {
-    pub atol: f64,
+pub struct BaselineCalibration {
+    pub candidate_atol: f64,
     pub observed_max_abs_diff: f64,
     pub calibration_factor: f64,
     pub method: String,
@@ -82,10 +82,14 @@ pub struct ToleranceCalibration {
 /// Explicit, versioned mathematical policy for reference-oracle comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ComparisonPolicy {
+pub struct TolerancePolicy {
     pub version: String,
+    pub dtype: String,
+    pub kernel: String,
     pub l1_near_tie_max_abs_logit_gap: f64,
     pub l2_atol: f64,
+    pub rationale: String,
+    pub evidence: Vec<String>,
 }
 
 /// Metadata for a single fixture file.

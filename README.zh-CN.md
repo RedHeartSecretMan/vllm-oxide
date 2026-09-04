@@ -247,7 +247,7 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 
 | 层级         | 验证对象                    | 验证方式                                                                                                                                       |
 | ------------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| **L1** | 贪心解码 token 参考匹配 | 接受参考 token，或按 manifest 中显式且版本化的策略、使用相同前缀下 expected/actual candidate logits 得出的 near-tie 分类。 |
+| **L1** | 贪心解码 token 参考匹配 | 接受参考 token，或按 manifest 中显式且版本化的容差策略、使用相同前缀下 expected/actual candidate logits 得出的 near-tie 分类。 |
 | **L2** | 相同前缀 logits 张量比较 | 按版本化绝对容差比较原始采样前 logits，包含首个 divergence 的同因果前缀行；随后停止并排除所有不同因果前缀的行。 |
 | **L3** | 每层激活值（调试用）        | v0.1 中为骨架代码。                                                                                                                            |
 
@@ -256,7 +256,7 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 - **参考预言机**：transformers（BF16，`output_logits=True`，`attn_implementation=sdpa`）
 - **基线预言机**：vLLM（BF16，仅记录校准观察）
 
-schema-v3 manifest 将版本化的 L1/L2 接受策略与基线校准观察分开记录；
+schema-v3 manifest 将版本化的容差策略与基线校准观察分开记录；
 基线证据不能覆盖参考预言机失败。
 
 夹具作为 GitHub Release 资产（标签：`goldens-v0.1`）存储，不在 git 中。完整策略见 [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md)。

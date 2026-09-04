@@ -1,6 +1,7 @@
 """Golden fixture generator for vllm-oxide oracle comparison."""
 
 from golden_gen.schema import (
+    BaselineCalibration,
     FixtureMetadata,
     Manifest,
     ManifestEntry,
@@ -8,11 +9,12 @@ from golden_gen.schema import (
     OracleVersions,
     PromptCategory,
     PromptSpec,
-    ToleranceCalibration,
+    TolerancePolicy,
 )
 
 __version__ = "0.1.0"
 __all__ = [
+    "BaselineCalibration",
     "FixtureMetadata",
     "Manifest",
     "ManifestEntry",
@@ -20,5 +22,5 @@ __all__ = [
     "OracleVersions",
     "PromptCategory",
     "PromptSpec",
-    "ToleranceCalibration",
+    "TolerancePolicy",
 ]

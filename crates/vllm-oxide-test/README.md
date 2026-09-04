@@ -74,8 +74,8 @@ Golden fixtures are described by a `manifest.json` (produced by
 - **Provenance**: model ID, revision, architecture, dtype
 - **Expected fixtures**: family, immutable model identity, oracle role, and
   required comparison for every artifact
-- **Reference comparison policy**: an explicit version, L1 candidate-gap
-  threshold, and L2 absolute tolerance
+- **Tolerance policy**: an explicit version and dtype/kernel scope, L1
+  candidate-gap threshold, L2 absolute tolerance, rationale, and evidence
 - **Baseline calibration**: observed oracle differences and methodology,
   reported separately from reference correctness
 - **Fixtures**: per-file metadata including SHA-256 hashes
@@ -96,7 +96,7 @@ generated token IDs against golden token IDs position-by-position.
 
 At the first token mismatch, L1 compares the expected and actual candidate
 logits from that same-prefix row. The mismatch is accepted only when their
-absolute gap satisfies `comparison_policy.l1_near_tie_max_abs_logit_gap`.
+absolute gap satisfies `tolerance_policy.l1_near_tie_max_abs_logit_gap`.
 The near tie remains an explicit classification, and later token positions are
 excluded because their causal histories differ.
 
@@ -106,7 +106,7 @@ Drives the engine via `LLM::generate_logits` and compares the raw pre-sampling
 logits `[n, vocab_size]` against golden logits using:
 
 ```
-|actual - expected| <= comparison_policy.l2_atol
+|actual - expected| <= tolerance_policy.l2_atol
 ```
 
 The divergence row is still comparable because it was produced from the shared

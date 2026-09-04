@@ -85,9 +85,11 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert "--manifest-dir" in result.stdout
-        assert "--comparison-policy-version" in result.stdout
+        assert "--tolerance-policy-version" in result.stdout
         assert "--l1-near-tie-max-abs-logit-gap" in result.stdout
         assert "--l2-atol" in result.stdout
+        assert "--tolerance-policy-rationale" in result.stdout
+        assert "--tolerance-policy-evidence" in result.stdout
 
     def test_dry_run_produces_manifest(self, tmp_path):
         """generate --dry-run should produce a fake manifest + fixtures."""
@@ -115,10 +117,14 @@ class TestCLI:
         with open(manifest_path) as f:
             manifest = json.load(f)
         assert manifest["schema_version"] == 3
-        assert manifest["comparison_policy"] == {
+        assert manifest["tolerance_policy"] == {
             "version": "same-prefix-v1",
+            "dtype": "bfloat16",
+            "kernel": "sdpa",
             "l1_near_tie_max_abs_logit_gap": 0.0,
             "l2_atol": 0.0,
+            "rationale": "pending reviewed policy selection",
+            "evidence": [],
         }
         assert len(manifest["fixtures"]) > 0
         assert manifest["model"]["id"] == "Qwen/Qwen3-0.6B"

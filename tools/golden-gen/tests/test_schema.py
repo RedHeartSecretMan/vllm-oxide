@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from golden_gen.schema import (
-    ComparisonPolicy,
+    BaselineCalibration,
     ExpectedFixture,
     FixtureMetadata,
     GenerationConfig,
@@ -13,28 +13,38 @@ from golden_gen.schema import (
     ModelInfo,
     OracleVersions,
     PromptSpec,
-    ToleranceCalibration,
+    TolerancePolicy,
 )
 
 
-class TestComparisonPolicy:
+class TestTolerancePolicy:
     def test_same_prefix_policy_is_an_explicit_versioned_input(self):
-        policy = ComparisonPolicy(
+        policy = TolerancePolicy(
             version="same-prefix-v1",
+            dtype="bfloat16",
+            kernel="sdpa",
             l1_near_tie_max_abs_logit_gap=0.02,
             l2_atol=0.01,
+            rationale="Reviewed synthetic policy",
+            evidence=["synthetic:test_schema"],
         )
 
         assert policy.version == "same-prefix-v1"
         assert policy.l1_near_tie_max_abs_logit_gap == 0.02
         assert policy.l2_atol == 0.01
+        assert policy.rationale == "Reviewed synthetic policy"
+        assert policy.evidence == ["synthetic:test_schema"]
 
     def test_unknown_policy_version_is_rejected(self):
         with pytest.raises(ValidationError, match="version"):
-            ComparisonPolicy(
+            TolerancePolicy(
                 version="latest",  # type: ignore[arg-type]
+                dtype="bfloat16",
+                kernel="sdpa",
                 l1_near_tie_max_abs_logit_gap=0.02,
                 l2_atol=0.01,
+                rationale="Reviewed synthetic policy",
+                evidence=["synthetic:test_schema"],
             )
 
 
@@ -191,23 +201,23 @@ class TestFixtureMetadata:
             )
 
 
-class TestToleranceCalibration:
+class TestBaselineCalibration:
     def test_valid(self):
-        tol = ToleranceCalibration(
-            atol=0.01,
+        calibration = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="2x max pairwise abs diff",
         )
-        assert tol.atol == 0.01
-        assert tol.calibration_factor == 2.0
-        assert tol.observed_max_abs_diff == 0.005
+        assert calibration.candidate_atol == 0.01
+        assert calibration.calibration_factor == 2.0
+        assert calibration.observed_max_abs_diff == 0.005
 
 
 class TestManifest:
     def test_build_and_roundtrip(self, tmp_path):
-        tolerance = ToleranceCalibration(
-            atol=0.01,
+        calibration = BaselineCalibration(
+            candidate_atol=0.01,
             observed_max_abs_diff=0.005,
             calibration_factor=2.0,
             method="2x max pairwise abs diff",
@@ -263,12 +273,16 @@ class TestManifest:
                 temperature=0.0,
                 attn_implementation="eager",
             ),
-            comparison_policy=ComparisonPolicy(
+            tolerance_policy=TolerancePolicy(
                 version="same-prefix-v1",
+                dtype="bfloat16",
+                kernel="eager",
                 l1_near_tie_max_abs_logit_gap=0.02,
                 l2_atol=0.01,
+                rationale="Reviewed synthetic policy",
+                evidence=["synthetic:test_schema"],
             ),
-            tolerance=tolerance,
+            baseline_calibration=calibration,
             expected_fixtures=expected,
             fixtures=[fixture],
         )
@@ -278,5 +292,5 @@ class TestManifest:
         assert restored.schema_version == 3
         assert len(restored.fixtures) == 1
         assert restored.fixtures[0].sha256 == "abc123"
-        assert restored.tolerance.atol == 0.01
-        assert restored.comparison_policy.version == "same-prefix-v1"
+        assert restored.baseline_calibration.candidate_atol == 0.01
+        assert restored.tolerance_policy.version == "same-prefix-v1"

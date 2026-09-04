@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::types::{ComparisonPolicy, FixtureData};
+use crate::types::{FixtureData, TolerancePolicy};
 
 /// Result of L2 comparison over shared-prefix steps only.
 ///
@@ -34,7 +34,7 @@ pub fn compare_l2(
     fixture: &FixtureData,
     generated_logits: &[f32],
     generated_tokens: &[u32],
-    policy: &ComparisonPolicy,
+    policy: &TolerancePolicy,
 ) -> Result<L2Result> {
     let Some(logits_flat) = &fixture.logits else {
         anyhow::bail!("L2 comparison requires canonical fixture with logits tensor.")
@@ -110,11 +110,15 @@ pub fn compare_l2(
 mod tests {
     use super::*;
 
-    fn make_policy() -> ComparisonPolicy {
-        ComparisonPolicy {
+    fn make_policy() -> TolerancePolicy {
+        TolerancePolicy {
             version: "same-prefix-v1".into(),
+            dtype: "bfloat16".into(),
+            kernel: "sdpa".into(),
             l1_near_tie_max_abs_logit_gap: 0.02,
             l2_atol: 1e-5,
+            rationale: "Reviewed synthetic policy".into(),
+            evidence: vec!["synthetic:l2".into()],
         }
     }
 

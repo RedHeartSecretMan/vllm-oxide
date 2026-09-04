@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::l1::L1Result;
 use crate::l2::L2Result;
 use crate::l3::L3Result;
-use crate::types::{ComparisonPolicy, ToleranceCalibration};
+use crate::types::{BaselineCalibration, TolerancePolicy};
 
 /// Exact fixture lifecycle accounting for one validation run.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -70,8 +70,8 @@ impl ComparisonReport {
 /// Print a human-readable comparison report to stdout.
 pub fn print_report(
     report: &ComparisonReport,
-    policy: &ComparisonPolicy,
-    calibration: &ToleranceCalibration,
+    policy: &TolerancePolicy,
+    calibration: &BaselineCalibration,
     calibrated_fixtures: &[String],
 ) {
     println!("══════════════════════════════════════════════════");
@@ -80,13 +80,19 @@ pub fn print_report(
     println!("  Manifest:  {}", report.manifest_path);
     println!("  Model:     {}", report.model_path);
     println!(
-        "  Reference correctness policy: version={}, L1 candidate-gap≤{:.2e}, L2 atol={:.2e}",
-        policy.version, policy.l1_near_tie_max_abs_logit_gap, policy.l2_atol,
+        "  Tolerance policy: version={}, dtype={}, kernel={}, L1 candidate-gap≤{:.2e}, L2 atol={:.2e}",
+        policy.version,
+        policy.dtype,
+        policy.kernel,
+        policy.l1_near_tie_max_abs_logit_gap,
+        policy.l2_atol,
     );
+    println!("  Policy rationale: {}", policy.rationale);
+    println!("  Policy evidence: {}", policy.evidence.join(", "));
     println!(
         "  Baseline calibration observation: fixtures={}, candidate_atol={:.2e}, observed_max_abs_diff={:.2e}, method={}",
         calibrated_fixtures.len(),
-        calibration.atol,
+        calibration.candidate_atol,
         calibration.observed_max_abs_diff,
         calibration.method,
     );
@@ -227,7 +233,7 @@ struct JsonReportEntry<'a> {
 
 #[derive(Serialize)]
 struct JsonReferenceCorrectness<'a> {
-    policy: &'a ComparisonPolicy,
+    tolerance_policy: &'a TolerancePolicy,
     l1: Vec<JsonL1Entry>,
     l2: Vec<JsonL2Entry>,
     passed: bool,
@@ -270,15 +276,15 @@ struct JsonL2Entry {
 /// Generate a JSON report string using serde serialization.
 pub fn json_report(
     report: &ComparisonReport,
-    policy: &ComparisonPolicy,
-    calibration: &ToleranceCalibration,
+    policy: &TolerancePolicy,
+    calibration: &BaselineCalibration,
     calibrated_fixtures: &[String],
 ) -> String {
     let data = JsonReportEntry {
         lifecycle: &report.lifecycle,
         failures: &report.failures,
         reference_correctness: JsonReferenceCorrectness {
-            policy,
+            tolerance_policy: policy,
             l1: report
                 .l1_results
                 .iter()
@@ -311,7 +317,7 @@ pub fn json_report(
             passed: report.reference_passed(),
         },
         baseline_calibration: JsonBaselineCalibration {
-            candidate_atol: calibration.atol,
+            candidate_atol: calibration.candidate_atol,
             observed_max_abs_diff: calibration.observed_max_abs_diff,
             calibration_factor: calibration.calibration_factor,
             method: &calibration.method,
@@ -327,7 +333,7 @@ pub fn json_report(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{json_report, ComparisonReport, LifecycleTotals};
-    use crate::types::{ComparisonPolicy, ToleranceCalibration};
+    use crate::types::{BaselineCalibration, TolerancePolicy};
 
     #[test]
     fn empty_comparison_set_fails_closed() {
@@ -367,23 +373,27 @@ mod tests {
             },
             ..ComparisonReport::default()
         };
-        let tolerance = ToleranceCalibration {
-            atol: 0.01,
+        let calibration = BaselineCalibration {
+            candidate_atol: 0.01,
             observed_max_abs_diff: 0.005,
             calibration_factor: 2.0,
             method: "test".to_string(),
         };
-        let policy = ComparisonPolicy {
+        let policy = TolerancePolicy {
             version: "same-prefix-v1".to_string(),
+            dtype: "bfloat16".to_string(),
+            kernel: "sdpa".to_string(),
             l1_near_tie_max_abs_logit_gap: 0.02,
             l2_atol: 0.01,
+            rationale: "Reviewed synthetic policy".to_string(),
+            evidence: vec!["synthetic:report".to_string()],
         };
         let calibrated_fixtures = vec!["canonical_01.vllm".to_string()];
 
         let json: serde_json::Value = serde_json::from_str(&json_report(
             &report,
             &policy,
-            &tolerance,
+            &calibration,
             &calibrated_fixtures,
         ))
         .unwrap();
@@ -397,7 +407,7 @@ mod tests {
         assert_eq!(json["lifecycle"]["skipped"], 1);
         assert_eq!(json["lifecycle"]["failed"], 3);
         assert_eq!(
-            json["reference_correctness"]["policy"]["version"],
+            json["reference_correctness"]["tolerance_policy"]["version"],
             "same-prefix-v1"
         );
         assert_eq!(json["reference_correctness"]["passed"], false);

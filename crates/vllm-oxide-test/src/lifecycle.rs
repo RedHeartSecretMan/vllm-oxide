@@ -380,14 +380,18 @@ mod tests {
                 "canonical_max_tokens": 1, "regression_max_tokens": 1,
                 "temperature": 0.0, "attn_implementation": "sdpa"
             },
-            "tolerance": {
-                "atol": 0.01, "observed_max_abs_diff": 0.005,
+            "baseline_calibration": {
+                "candidate_atol": 0.01, "observed_max_abs_diff": 0.005,
                 "calibration_factor": 2.0, "method": "test"
             },
-            "comparison_policy": {
+            "tolerance_policy": {
                 "version": "same-prefix-v1",
+                "dtype": "bfloat16",
+                "kernel": "sdpa",
                 "l1_near_tie_max_abs_logit_gap": 0.02,
-                "l2_atol": 0.01
+                "l2_atol": 0.01,
+                "rationale": "Reviewed synthetic policy",
+                "evidence": ["synthetic:lifecycle"]
             },
             "expected_fixtures": [
                 {

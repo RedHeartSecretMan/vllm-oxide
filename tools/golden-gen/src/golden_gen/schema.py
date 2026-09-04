@@ -87,23 +87,27 @@ class FixtureMetadata(BaseModel):
     filename: str
 
 
-class ComparisonPolicy(BaseModel):
+class TolerancePolicy(BaseModel):
     """Versioned mathematical inputs for reference-oracle comparison."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     version: Literal["same-prefix-v1"]
+    dtype: str = Field(min_length=1)
+    kernel: str = Field(min_length=1)
     l1_near_tie_max_abs_logit_gap: float = Field(ge=0.0)
     l2_atol: float = Field(ge=0.0)
+    rationale: str = Field(min_length=1)
+    evidence: list[str]
 
 
-class ToleranceCalibration(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class BaselineCalibration(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    atol: float
-    observed_max_abs_diff: float
-    calibration_factor: float
-    method: str
+    candidate_atol: float = Field(ge=0.0)
+    observed_max_abs_diff: float = Field(ge=0.0)
+    calibration_factor: float = Field(gt=0.0)
+    method: str = Field(min_length=1)
 
 
 class ModelInfo(BaseModel):
@@ -152,14 +156,25 @@ class Manifest(BaseModel):
     model: ModelInfo
     oracle_versions: OracleVersions
     generation: GenerationConfig
-    comparison_policy: ComparisonPolicy
-    tolerance: ToleranceCalibration
+    tolerance_policy: TolerancePolicy
+    baseline_calibration: BaselineCalibration
     expected_fixtures: list[ExpectedFixture] = Field(min_length=1)
     fixtures: list[FixtureMetadata]
     calibrated_fixtures: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def generated_fixtures_match_expectations(self) -> Self:
+        if (
+            self.tolerance_policy.dtype != self.model.dtype
+            or self.tolerance_policy.kernel != self.generation.attn_implementation
+        ):
+            raise ValueError("tolerance policy scope does not match model dtype and kernel")
+        if not self.tolerance_policy.rationale.strip() or any(
+            not item.strip() for item in self.tolerance_policy.evidence
+        ):
+            raise ValueError("tolerance policy rationale and evidence must be non-empty")
+        if self.calibrated_fixtures and not self.tolerance_policy.evidence:
+            raise ValueError("calibrated tolerance policy requires non-empty evidence")
         fixture_ids = [entry.fixture_id for entry in self.expected_fixtures]
         if len(fixture_ids) != len(set(fixture_ids)):
             raise ValueError("duplicate expected fixture identifier")

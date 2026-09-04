@@ -153,20 +153,20 @@ fn compare_reference_case(
                 &case.fixture,
                 &generated_tokens,
                 Some(&logits),
-                &manifest.comparison_policy,
+                &manifest.tolerance_policy,
             )?),
             Some(compare_l2(
                 &case.fixture,
                 &logits_vals,
                 &generated_tokens,
-                &manifest.comparison_policy,
+                &manifest.tolerance_policy,
             )?),
         ),
         PromptCategory::Regression => (
             Some(compare_l1_tokens_only(
                 &case.fixture,
                 &generated_tokens,
-                &manifest.comparison_policy,
+                &manifest.tolerance_policy,
             )?),
             None,
         ),

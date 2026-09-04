@@ -118,16 +118,16 @@ fn main() -> Result<()> {
             "{}",
             vllm_oxide_test::report::json_report(
                 &report,
-                &golden_manifest.comparison_policy,
-                &golden_manifest.tolerance,
+                &golden_manifest.tolerance_policy,
+                &golden_manifest.baseline_calibration,
                 &golden_manifest.calibrated_fixtures,
             )
         );
     } else {
         print_report(
             &report,
-            &golden_manifest.comparison_policy,
-            &golden_manifest.tolerance,
+            &golden_manifest.tolerance_policy,
+            &golden_manifest.baseline_calibration,
             &golden_manifest.calibrated_fixtures,
         );
     }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use candle_core::{DType, Tensor};
 
-use crate::types::{ComparisonPolicy, FixtureData};
+use crate::types::{FixtureData, TolerancePolicy};
 
 /// Result of an L1 token-sequence comparison.
 #[derive(Debug)]
@@ -52,7 +52,7 @@ pub fn compare_l1(
     fixture: &FixtureData,
     generated_tokens: &[u32],
     generated_logits: Option<&Tensor>,
-    policy: &ComparisonPolicy,
+    policy: &TolerancePolicy,
 ) -> Result<L1Result> {
     compare_tokens_loop(fixture, generated_tokens, policy, |i, expected, actual| {
         if expected == actual {
@@ -76,7 +76,7 @@ pub fn compare_l1(
 pub fn compare_l1_tokens_only(
     fixture: &FixtureData,
     generated_tokens: &[u32],
-    policy: &ComparisonPolicy,
+    policy: &TolerancePolicy,
 ) -> Result<L1Result> {
     compare_tokens_loop(fixture, generated_tokens, policy, |_, expected, actual| {
         if expected == actual {
@@ -95,7 +95,7 @@ enum MismatchKind {
 fn compare_tokens_loop<F>(
     fixture: &FixtureData,
     generated_tokens: &[u32],
-    policy: &ComparisonPolicy,
+    policy: &TolerancePolicy,
     classify: F,
 ) -> Result<L1Result>
 where
@@ -195,11 +195,15 @@ fn candidate_logit_gap(
 mod tests {
     use super::*;
 
-    fn make_policy() -> ComparisonPolicy {
-        ComparisonPolicy {
+    fn make_policy() -> TolerancePolicy {
+        TolerancePolicy {
             version: "same-prefix-v1".into(),
+            dtype: "bfloat16".into(),
+            kernel: "sdpa".into(),
             l1_near_tie_max_abs_logit_gap: 0.02,
             l2_atol: 1e-5,
+            rationale: "Reviewed synthetic policy".into(),
+            evidence: vec!["synthetic:l1".into()],
         }
     }
 

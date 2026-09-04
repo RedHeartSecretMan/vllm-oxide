@@ -54,17 +54,20 @@ Options:
 cd tools/golden-gen
 uv run python -m golden_gen calibrate \
   --manifest-dir ./output \
-  --comparison-policy-version same-prefix-v1 \
+  --tolerance-policy-version same-prefix-v1 \
   --l1-near-tie-max-abs-logit-gap <reviewed-threshold> \
-  --l2-atol <reviewed-threshold>
+  --l2-atol <reviewed-threshold> \
+  --tolerance-policy-rationale <reviewed-rationale> \
+  --tolerance-policy-evidence <evidence-id-or-uri>
 ```
 
 Validates every declared reference/baseline pair, computes same-prefix
 calibration observations, and records the consumed baseline artifacts. The
-version and both acceptance thresholds are required reviewed inputs; observed
-baseline differences are never promoted into reference acceptance thresholds
-automatically. A missing pair, empty comparison set, unmatched oracle length,
-or unsupported tensor shape exits non-zero.
+version, both acceptance thresholds, rationale, and evidence references are
+required reviewed inputs; dtype and kernel scope are bound to the manifest.
+Observed baseline differences are never promoted into reference acceptance
+thresholds automatically. A missing pair, empty comparison set, unmatched
+oracle length, or unsupported tensor shape exits non-zero.
 
 ```bash
 uv run python -m golden_gen --help   # full usage
@@ -109,13 +112,17 @@ All unit tests run on CPU and do not require a GPU.
 | `generation.regression_max_tokens` | int | Max generated tokens for regression prompts (32) |
 | `generation.temperature` | float | Sampling temperature (0.0) |
 | `generation.attn_implementation` | str | Attention backend (`eager`) |
-| `comparison_policy.version` | str | Supported comparison semantics (`same-prefix-v1`) |
-| `comparison_policy.l1_near_tie_max_abs_logit_gap` | float | Maximum expected/actual candidate-logit gap for an explicit L1 near tie |
-| `comparison_policy.l2_atol` | float | Absolute tolerance for same-prefix L2 logit comparison |
-| `tolerance.atol` | float | Candidate tolerance produced by baseline calibration |
-| `tolerance.observed_max_abs_diff` | float | Maximum observed absolute difference across oracle pair |
-| `tolerance.calibration_factor` | float | Safety factor applied (2.0) |
-| `tolerance.method` | str | Description of calibration method |
+| `tolerance_policy.version` | str | Supported comparison semantics (`same-prefix-v1`) |
+| `tolerance_policy.dtype` | str | Dtype scope, matched to the manifest model |
+| `tolerance_policy.kernel` | str | Kernel scope, matched to the manifest generation path |
+| `tolerance_policy.l1_near_tie_max_abs_logit_gap` | float | Maximum expected/actual candidate-logit gap for an explicit L1 near tie |
+| `tolerance_policy.l2_atol` | float | Absolute tolerance for same-prefix L2 logit comparison |
+| `tolerance_policy.rationale` | str | Reviewed reason for the selected thresholds |
+| `tolerance_policy.evidence` | list[str] | Evidence identifiers or URIs supporting the selection |
+| `baseline_calibration.candidate_atol` | float | Non-authoritative candidate derived from baseline observations |
+| `baseline_calibration.observed_max_abs_diff` | float | Maximum observed same-prefix absolute difference |
+| `baseline_calibration.calibration_factor` | float | Factor used for the candidate observation (2.0) |
+| `baseline_calibration.method` | str | Description of the observation method |
 | `expected_fixtures` | list[object] | Independent contract for every required oracle artifact |
 | `calibrated_fixtures` | list[str] | Baseline fixture IDs successfully consumed by calibration |
 | `fixtures` | list[object] | List of `FixtureMetadata` records |
@@ -220,7 +227,7 @@ tools/golden-gen/
 │       ├── io.py             # safetensors save/load
 │       ├── manifest.py       # manifest build/write/read
 │       ├── generate.py       # oracle × prompt orchestration
-│       ├── calibrate.py      # baseline calibration observations + comparison policy
+│       ├── calibrate.py      # baseline observations + explicit tolerance policy
 │       └── oracles/
 │           ├── __init__.py
 │           ├── base.py       # Oracle protocol + result dataclass

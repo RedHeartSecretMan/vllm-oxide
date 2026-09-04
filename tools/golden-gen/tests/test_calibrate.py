@@ -16,18 +16,22 @@ from golden_gen.config import VOCAB_SIZE
 from golden_gen.io import save_fixture
 from golden_gen.manifest import build_manifest, read_manifest, write_manifest
 from golden_gen.schema import (
-    ComparisonPolicy,
+    BaselineCalibration,
     ExpectedFixture,
     FixtureMetadata,
-    ToleranceCalibration,
+    TolerancePolicy,
 )
 
 
-def same_prefix_policy() -> ComparisonPolicy:
-    return ComparisonPolicy(
+def same_prefix_policy() -> TolerancePolicy:
+    return TolerancePolicy(
         version="same-prefix-v1",
+        dtype="bfloat16",
+        kernel="sdpa",
         l1_near_tie_max_abs_logit_gap=0.0,
         l2_atol=0.0,
+        rationale="Reviewed synthetic policy",
+        evidence=["synthetic:test_calibrate"],
     )
 
 
@@ -186,8 +190,8 @@ class TestCalibrateFromFixtures:
             calibrate_from_fixtures(tmp_path / "nonexistent")
 
     def test_empty_comparison_set_fails_closed(self, tmp_path):
-        tolerance = ToleranceCalibration(
-            atol=0.0,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.0,
             observed_max_abs_diff=0.0,
             calibration_factor=2.0,
             method="pending",
@@ -195,8 +199,8 @@ class TestCalibrateFromFixtures:
         manifest = build_manifest(
             fixtures=[],
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=tolerance,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=tolerance,
         )
         write_manifest(manifest, tmp_path / "manifest.json")
 
@@ -236,8 +240,8 @@ class TestCalibrateFromFixtures:
                     filename=filename,
                 )
             )
-        tolerance = ToleranceCalibration(
-            atol=0.0,
+        tolerance = BaselineCalibration(
+            candidate_atol=0.0,
             observed_max_abs_diff=0.0,
             calibration_factor=2.0,
             method="pending",
@@ -245,8 +249,8 @@ class TestCalibrateFromFixtures:
         manifest = build_manifest(
             fixtures=fixtures,
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=tolerance,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=tolerance,
         )
         write_manifest(manifest, tmp_path / "manifest.json")
 
@@ -255,30 +259,36 @@ class TestCalibrateFromFixtures:
                 "calibrate",
                 "--manifest-dir",
                 str(tmp_path),
-                "--comparison-policy-version",
+                "--tolerance-policy-version",
                 "same-prefix-v1",
                 "--l1-near-tie-max-abs-logit-gap",
                 "0.125",
                 "--l2-atol",
                 "0.25",
+                "--tolerance-policy-rationale",
+                "Synthetic reviewed thresholds",
+                "--tolerance-policy-evidence",
+                "synthetic:test_calibrate",
             ]
         )
 
         assert exit_code == 0
         calibrated = read_manifest(tmp_path / "manifest.json")
         assert calibrated.calibrated_fixtures == ["canonical_01.vllm"]
-        assert calibrated.comparison_policy.version == "same-prefix-v1"
-        assert calibrated.tolerance.observed_max_abs_diff == pytest.approx(0.001)
-        assert calibrated.comparison_policy.l2_atol == pytest.approx(0.25)
-        assert calibrated.comparison_policy.l1_near_tie_max_abs_logit_gap == pytest.approx(0.125)
+        assert calibrated.tolerance_policy.version == "same-prefix-v1"
+        assert calibrated.baseline_calibration.observed_max_abs_diff == pytest.approx(0.001)
+        assert calibrated.tolerance_policy.l2_atol == pytest.approx(0.25)
+        assert calibrated.tolerance_policy.l1_near_tie_max_abs_logit_gap == pytest.approx(0.125)
+        assert calibrated.tolerance_policy.rationale == "Synthetic reviewed thresholds"
+        assert calibrated.tolerance_policy.evidence == ["synthetic:test_calibrate"]
 
     def test_missing_baseline_fixture_fails_closed(self, tmp_path):
         manifest = build_manifest(
             fixtures=[save_canonical_metadata(tmp_path, "transformers")],
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=ToleranceCalibration(
-                atol=0.0,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=BaselineCalibration(
+                candidate_atol=0.0,
                 observed_max_abs_diff=0.0,
                 calibration_factor=2.0,
                 method="pending",
@@ -295,9 +305,9 @@ class TestCalibrateFromFixtures:
                 save_canonical_metadata(tmp_path, "vllm", vocab_size=2),
             ],
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=ToleranceCalibration(
-                atol=0.0,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=BaselineCalibration(
+                candidate_atol=0.0,
                 observed_max_abs_diff=0.0,
                 calibration_factor=2.0,
                 method="pending",
@@ -314,9 +324,9 @@ class TestCalibrateFromFixtures:
                 save_canonical_metadata(tmp_path, "vllm", num_tokens=2),
             ],
             expected_fixtures=expected_pair(),
-            comparison_policy=same_prefix_policy(),
-            tolerance=ToleranceCalibration(
-                atol=0.0,
+            tolerance_policy=same_prefix_policy(),
+            baseline_calibration=BaselineCalibration(
+                candidate_atol=0.0,
                 observed_max_abs_diff=0.0,
                 calibration_factor=2.0,
                 method="pending",

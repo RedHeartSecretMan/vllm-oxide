@@ -12,11 +12,12 @@ from golden_gen.calibrate import (
     calibrate_from_fixtures,
     validate_calibration_coverage,
 )
+from golden_gen.config import ATTN_IMPLEMENTATION, MODEL_DTYPE
 from golden_gen.generate import run_all
 from golden_gen.manifest import build_expected_fixtures, build_manifest, write_manifest
 from golden_gen.oracles.fake import FakeOracle
 from golden_gen.prompts import discover_fixtures, load_prompts
-from golden_gen.schema import ComparisonPolicy, PromptCategory, ToleranceCalibration
+from golden_gen.schema import BaselineCalibration, Manifest, PromptCategory, TolerancePolicy
 
 
 def _resolve_prompts_dir() -> Path:
@@ -63,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cal = subparsers.add_parser(
         "calibrate",
-        help="Load canonical fixtures and calibrate tolerance",
+        help="Record baseline observations and a reviewed tolerance policy",
     )
     cal.add_argument(
         "--manifest-dir",
@@ -72,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to directory containing manifest.json + .safetensors fixtures",
     )
     cal.add_argument(
-        "--comparison-policy-version",
+        "--tolerance-policy-version",
         choices=["same-prefix-v1"],
         required=True,
         help="Versioned comparison semantics to record in the manifest",
@@ -88,6 +89,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         required=True,
         help="Reviewed absolute tolerance for same-prefix L2 comparison",
+    )
+    cal.add_argument(
+        "--tolerance-policy-rationale",
+        required=True,
+        help="Reviewed rationale for selecting the acceptance thresholds",
+    )
+    cal.add_argument(
+        "--tolerance-policy-evidence",
+        action="append",
+        required=True,
+        help="Evidence identifier or URI; repeat for every reviewed source",
     )
 
     return parser
@@ -151,16 +163,16 @@ def _run_generate(args: argparse.Namespace) -> int:
     all_fixtures: list[Any] = []
 
     existing_manifest_path = output_dir / "manifest.json"
-    existing_tolerance: ToleranceCalibration | None = None
-    existing_policy: ComparisonPolicy | None = None
+    existing_calibration: BaselineCalibration | None = None
+    existing_policy: TolerancePolicy | None = None
     if existing_manifest_path.exists():
         from golden_gen.manifest import read_manifest
 
         existing = read_manifest(existing_manifest_path)
         all_fixtures = list(existing.fixtures)
-        if existing.tolerance.atol > 0.0:
-            existing_tolerance = existing.tolerance
-            existing_policy = existing.comparison_policy
+        if existing.baseline_calibration.candidate_atol > 0.0:
+            existing_calibration = existing.baseline_calibration
+            existing_policy = existing.tolerance_policy
 
     failed_oracles: list[str] = []
     generated_this_run: set[str] = set()
@@ -228,27 +240,34 @@ def _run_generate(args: argparse.Namespace) -> int:
 
     print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
 
-    if existing_tolerance is not None:
-        tolerance = existing_tolerance
+    if existing_calibration is not None:
+        baseline_calibration = existing_calibration
         assert existing_policy is not None
-        comparison_policy = existing_policy
-        print(f"Reusing existing calibrated tolerance: atol={tolerance.atol:.6f}")
+        tolerance_policy = existing_policy
+        print(
+            "Reusing existing baseline calibration: "
+            f"candidate_atol={baseline_calibration.candidate_atol:.6f}"
+        )
     else:
-        tolerance = ToleranceCalibration(
-            atol=0.0,
+        baseline_calibration = BaselineCalibration(
+            candidate_atol=0.0,
             observed_max_abs_diff=0.0,
             calibration_factor=2.0,
             method="pending -- run `golden-gen calibrate` to compute",
         )
-        comparison_policy = ComparisonPolicy(
+        tolerance_policy = TolerancePolicy(
             version="same-prefix-v1",
+            dtype=MODEL_DTYPE,
+            kernel=ATTN_IMPLEMENTATION,
             l1_near_tie_max_abs_logit_gap=0.0,
             l2_atol=0.0,
+            rationale="pending reviewed policy selection",
+            evidence=[],
         )
     manifest = build_manifest(
         fixtures=all_fixtures,
-        tolerance=tolerance,
-        comparison_policy=comparison_policy,
+        baseline_calibration=baseline_calibration,
+        tolerance_policy=tolerance_policy,
         expected_fixtures=expected_fixtures,
     )
     manifest_path = output_dir / "manifest.json"
@@ -267,10 +286,10 @@ def _run_generate(args: argparse.Namespace) -> int:
         f"expected={expected} discovered={expected} generated={generated} "
         f"compared=0 skipped={skipped} failed=0"
     )
-    if existing_tolerance is None:
+    if existing_calibration is None:
         print(
-            "NOTE: tolerance is not yet calibrated. Run "
-            "`golden-gen calibrate --manifest-dir <dir>` to fill it in."
+            "NOTE: baseline calibration and tolerance policy are pending. Run "
+            "`golden-gen calibrate --help` for the required reviewed inputs."
         )
 
     return 0
@@ -288,19 +307,25 @@ def _run_calibrate(args: argparse.Namespace) -> int:
 
     manifest = read_manifest(manifest_path)
     calibrated_fixtures = validate_calibration_coverage(manifest_dir, manifest)
-    tolerance = calibrate_from_fixtures(manifest_dir)
+    calibration = calibrate_from_fixtures(manifest_dir)
     print(
-        f"Baseline calibration observed: candidate_atol={tolerance.atol:.6f}, "
-        f"observed_max_abs_diff={tolerance.observed_max_abs_diff:.6f}"
+        "Baseline calibration observed: "
+        f"candidate_atol={calibration.candidate_atol:.6f}, "
+        f"observed_max_abs_diff={calibration.observed_max_abs_diff:.6f}"
     )
 
-    manifest.tolerance = tolerance
-    manifest.comparison_policy = ComparisonPolicy(
-        version=args.comparison_policy_version,
+    manifest.baseline_calibration = calibration
+    manifest.tolerance_policy = TolerancePolicy(
+        version=args.tolerance_policy_version,
+        dtype=manifest.model.dtype,
+        kernel=manifest.generation.attn_implementation,
         l1_near_tie_max_abs_logit_gap=args.l1_near_tie_max_abs_logit_gap,
         l2_atol=args.l2_atol,
+        rationale=args.tolerance_policy_rationale,
+        evidence=args.tolerance_policy_evidence,
     )
     manifest.calibrated_fixtures = calibrated_fixtures
+    manifest = Manifest.model_validate(manifest.model_dump())
     write_manifest(manifest, manifest_path)
     print(f"Updated manifest written to {manifest_path}")
 

@@ -248,7 +248,7 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 
 | Layer | What | How |
 |-------|------|-----|
-| **L1** | Greedy token-sequence reference match | Accepts the reference token or an explicit near-tie classification from the same-prefix expected/actual candidate logits under the versioned manifest policy. |
+| **L1** | Greedy token-sequence reference match | Accepts the reference token or an explicit near-tie classification from the same-prefix expected/actual candidate logits under the versioned Tolerance policy. |
 | **L2** | Same-prefix logits tensor comparison | Compares raw pre-sampling logits under the versioned absolute tolerance through the first divergent token, then excludes every later row because its causal prefix differs. |
 | **L3** | Per-layer activations (debug) | Skeleton in v0.1. |
 
@@ -257,7 +257,7 @@ Golden fixtures are produced by `tools/golden-gen/` (Python), which runs two ora
 - **Reference oracle**: transformers (BF16, `output_logits=True`, `attn_implementation=sdpa`)
 - **Baseline oracle**: vLLM (BF16, records calibration observations only)
 
-The schema-v3 manifest records the versioned L1/L2 acceptance policy separately
+The schema-v3 manifest records the versioned Tolerance policy separately
 from baseline calibration observations. Baseline evidence cannot override a
 reference-oracle failure.
 

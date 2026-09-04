@@ -31,16 +31,38 @@ fn validate_manifest_contract(manifest: &Manifest) -> Result<()> {
             manifest.schema_version
         );
     }
-    let policy = &manifest.comparison_policy;
+    let policy = &manifest.tolerance_policy;
     if policy.version != "same-prefix-v1" {
-        anyhow::bail!("unsupported comparison policy version: {}", policy.version);
+        anyhow::bail!("unsupported tolerance policy version: {}", policy.version);
     }
     if !policy.l1_near_tie_max_abs_logit_gap.is_finite()
         || policy.l1_near_tie_max_abs_logit_gap < 0.0
         || !policy.l2_atol.is_finite()
         || policy.l2_atol < 0.0
     {
-        anyhow::bail!("comparison policy thresholds must be finite and non-negative");
+        anyhow::bail!("tolerance policy thresholds must be finite and non-negative");
+    }
+    if policy.dtype != manifest.model.dtype
+        || policy.kernel != manifest.generation.attn_implementation
+    {
+        anyhow::bail!("tolerance policy scope does not match model dtype and kernel");
+    }
+    if policy.rationale.trim().is_empty()
+        || policy.evidence.is_empty()
+        || policy.evidence.iter().any(|item| item.trim().is_empty())
+    {
+        anyhow::bail!("tolerance policy requires non-empty rationale and evidence");
+    }
+    let calibration = &manifest.baseline_calibration;
+    if !calibration.candidate_atol.is_finite()
+        || calibration.candidate_atol < 0.0
+        || !calibration.observed_max_abs_diff.is_finite()
+        || calibration.observed_max_abs_diff < 0.0
+        || !calibration.calibration_factor.is_finite()
+        || calibration.calibration_factor <= 0.0
+        || calibration.method.trim().is_empty()
+    {
+        anyhow::bail!("baseline calibration observations are invalid");
     }
     if manifest.expected_fixtures.is_empty() {
         anyhow::bail!("manifest expected_fixtures is empty");
@@ -382,16 +404,20 @@ mod tests {
                 "temperature": 0.0,
                 "attn_implementation": "sdpa"
             },
-            "tolerance": {
-                "atol": 0.01,
+            "baseline_calibration": {
+                "candidate_atol": 0.01,
                 "observed_max_abs_diff": 0.005,
                 "calibration_factor": 2.0,
                 "method": "test"
             },
-            "comparison_policy": {
+            "tolerance_policy": {
                 "version": "same-prefix-v1",
+                "dtype": "bfloat16",
+                "kernel": "sdpa",
                 "l1_near_tie_max_abs_logit_gap": 0.02,
-                "l2_atol": 0.01
+                "l2_atol": 0.01,
+                "rationale": "Reviewed synthetic policy",
+                "evidence": ["synthetic:manifest"]
             },
             "expected_fixtures": [
                 {
@@ -423,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_exposes_explicit_versioned_comparison_policy() {
+    fn manifest_exposes_explicit_versioned_tolerance_policy() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("manifest.json");
         let manifest = valid_manifest_json();
@@ -431,9 +457,10 @@ mod tests {
 
         let parsed = parse_manifest(&path).unwrap();
 
-        assert_eq!(parsed.comparison_policy.version, "same-prefix-v1");
-        assert_eq!(parsed.comparison_policy.l1_near_tie_max_abs_logit_gap, 0.02);
-        assert_eq!(parsed.comparison_policy.l2_atol, 0.01);
+        assert_eq!(parsed.tolerance_policy.version, "same-prefix-v1");
+        assert_eq!(parsed.tolerance_policy.l1_near_tie_max_abs_logit_gap, 0.02);
+        assert_eq!(parsed.tolerance_policy.l2_atol, 0.01);
+        assert_eq!(parsed.tolerance_policy.evidence, ["synthetic:manifest"]);
     }
 
     #[test]
@@ -453,19 +480,45 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_comparison_policy_version_is_rejected() {
+    fn unsupported_tolerance_policy_version_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("manifest.json");
         let mut manifest = valid_manifest_json();
-        manifest["comparison_policy"]["version"] = json!("latest");
+        manifest["tolerance_policy"]["version"] = json!("latest");
         std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
         let error = parse_manifest(&path).unwrap_err().to_string();
 
         assert!(
-            error.contains("unsupported comparison policy version"),
+            error.contains("unsupported tolerance policy version"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn tolerance_policy_without_provenance_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let mut manifest = valid_manifest_json();
+        manifest["tolerance_policy"]["evidence"] = json!([]);
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let error = parse_manifest(&path).unwrap_err().to_string();
+
+        assert!(error.contains("rationale and evidence"), "{error}");
+    }
+
+    #[test]
+    fn tolerance_policy_scope_must_match_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let mut manifest = valid_manifest_json();
+        manifest["tolerance_policy"]["kernel"] = json!("flash_attention_2");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let error = parse_manifest(&path).unwrap_err().to_string();
+
+        assert!(error.contains("scope does not match"), "{error}");
     }
 
     #[test]
