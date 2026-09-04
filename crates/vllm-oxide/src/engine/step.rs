@@ -87,8 +87,10 @@ pub(crate) struct SequenceStepPlan {
     pub(crate) request_id: usize,
     pub(crate) sequence_id: usize,
     pub(crate) phase: SequencePhase,
-    /// Exact newly scheduled model-input range. Cached prompt tokens are not
-    /// repeated here; their range is captured by `cache.cached_token_range`.
+    /// Exact newly scheduled model-input range. Cached logical-prefix tokens
+    /// are not repeated here; their range is captured by
+    /// `cache.cached_token_range`. Recovery prefill may extend through prior
+    /// completion tokens.
     pub(crate) token_range: Range<usize>,
     /// Causal positions corresponding one-for-one with `token_range`.
     pub(crate) logical_positions: Range<usize>,

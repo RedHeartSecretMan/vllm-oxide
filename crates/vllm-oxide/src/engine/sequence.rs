@@ -22,8 +22,10 @@ pub const BLOCK_SIZE: usize = 256;
 
 /// Sequence lifecycle status, mirroring `nanovllm.engine.sequence.SequenceStatus`.
 ///
-/// Transitions: `Waiting → Running → Finished`. The engine loop (T2) drives
-/// these transitions via the Scheduler's internal `StepPlan` / `StepResult` seam.
+/// Transitions: `Waiting → Running → Finished`, with
+/// `Running → Waiting` when recompute-only preemption releases physical KV.
+/// The engine loop drives these transitions via the Scheduler's internal
+/// `StepPlan` / `StepResult` seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SequenceStatus {
     Waiting,
@@ -53,6 +55,9 @@ pub struct Sequence {
     pub(crate) num_prompt_tokens: usize,
     pub(crate) num_cached_tokens: usize,
     pub(crate) num_scheduled_tokens: usize,
+    /// Frozen logical history length that physical KV must rebuild after
+    /// recompute-only preemption. `None` means ordinary prompt prefill.
+    pub(crate) recompute_target_tokens: Option<usize>,
     pub(crate) is_prefill: bool,
     pub(crate) block_table: Vec<usize>,
     sampling_params: SamplingParams,
@@ -83,6 +88,7 @@ impl Sequence {
             num_prompt_tokens: num_tokens,
             num_cached_tokens: 0,
             num_scheduled_tokens: 0,
+            recompute_target_tokens: None,
             is_prefill: true,
             block_table: Vec::new(),
             sampling_params: params.clone(),
@@ -146,6 +152,13 @@ impl Sequence {
     /// The complete validated sampling policy owned by this request.
     pub(crate) fn sampling_params(&self) -> &SamplingParams {
         &self.sampling_params
+    }
+
+    /// Logical endpoint that prompt or recovery prefill must physically cache
+    /// before another completion token may be sampled.
+    pub(crate) fn prefill_target_tokens(&self) -> usize {
+        self.recompute_target_tokens
+            .unwrap_or(self.num_prompt_tokens)
     }
 
     /// Number of completion tokens generated so far (total − prompt).

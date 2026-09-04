@@ -981,6 +981,20 @@ mod tests {
         max_num_seqs: usize,
         prefix_cache_enabled: bool,
     ) -> (LLM, CausalFingerprintControls) {
+        causal_fingerprint_test_harness_with_capacity(
+            max_num_batched_tokens,
+            max_num_seqs,
+            32,
+            prefix_cache_enabled,
+        )
+    }
+
+    fn causal_fingerprint_test_harness_with_capacity(
+        max_num_batched_tokens: usize,
+        max_num_seqs: usize,
+        num_blocks: usize,
+        prefix_cache_enabled: bool,
+    ) -> (LLM, CausalFingerprintControls) {
         let device = Device::Cpu;
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
@@ -995,7 +1009,7 @@ mod tests {
         };
         let scheduler = Scheduler::new(max_num_batched_tokens, max_num_seqs, 0.9);
         let kv_cache_manager = KvCacheManager::new_with_prefix_cache(
-            32,
+            num_blocks,
             BLOCK_SIZE,
             paged_kv.clone(),
             prefix_cache_enabled,
@@ -1167,6 +1181,50 @@ mod tests {
                 );
                 assert_eq!(mixed_outputs[input_position].text, isolated_output[0].text);
             }
+        }
+    }
+
+    mod recompute_preemption {
+        use super::*;
+
+        #[test]
+        fn low_capacity_generation_matches_unpreempted_output_and_completes_waiters() {
+            let block_size = u32::try_from(BLOCK_SIZE).unwrap();
+            let recovery_len = u32::try_from(BLOCK_SIZE + 1).unwrap();
+            let prompts = [
+                Prompt::TokenIds((0..block_size).collect()),
+                Prompt::TokenIds((1_000..1_000 + block_size).collect()),
+                Prompt::TokenIds(vec![7, 11, 13]),
+            ];
+            let params = [
+                deterministic_causal_params(3),
+                deterministic_causal_params(3),
+                deterministic_causal_params(2),
+            ];
+            let (mut preempted, controls) =
+                causal_fingerprint_test_harness_with_capacity(BLOCK_SIZE + 1, 2, 3, false);
+            let (mut unpreempted, _) =
+                causal_fingerprint_test_harness_with_capacity(BLOCK_SIZE + 1, 2, 4, false);
+
+            let preempted_outputs = preempted.generate(&prompts, &params).unwrap();
+            let unpreempted_outputs = unpreempted.generate(&prompts, &params).unwrap();
+
+            assert_eq!(preempted_outputs.len(), prompts.len());
+            for (input_position, (actual, expected)) in preempted_outputs
+                .iter()
+                .zip(&unpreempted_outputs)
+                .enumerate()
+            {
+                assert_eq!(actual.request_id, input_position);
+                assert_eq!(actual.request_id, expected.request_id);
+                assert_eq!(actual.token_ids, expected.token_ids);
+                assert_eq!(actual.text, expected.text);
+                assert_eq!(actual.finished, expected.finished);
+            }
+            assert!(controls
+                .take_metadata()
+                .iter()
+                .any(|metadata| metadata.cu_seqlens_q == vec![0, recovery_len]));
         }
     }
 

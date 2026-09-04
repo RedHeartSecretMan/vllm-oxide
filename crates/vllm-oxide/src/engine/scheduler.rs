@@ -269,11 +269,12 @@ impl Scheduler {
             let (token_range, sampling_allowed) = match sequence_phase {
                 SequencePhase::Prefill => {
                     let start = sequence.num_cached_tokens;
+                    let prefill_target = sequence.prefill_target_tokens();
                     let end = start
                         .checked_add(sequence.num_scheduled_tokens)
                         .ok_or_else(|| StepPlanError::invalid("scheduled token range overflow"))?
-                        .min(sequence.num_prompt_tokens);
-                    (start..end, end == sequence.num_prompt_tokens)
+                        .min(prefill_target);
+                    (start..end, end == prefill_target)
                 }
                 SequencePhase::Decode => {
                     let start = sequence
@@ -447,6 +448,7 @@ impl Scheduler {
 
         let mut outputs = Vec::new();
         let mut finished_sequence_ids = Vec::new();
+        let mut recovered_sequence_ids = Vec::new();
         for (planned, executed) in plan.sequences.iter().zip(&result.sequences) {
             // Membership was validated above, so the planned sequence must exist.
             #[allow(clippy::unwrap_used)]
@@ -463,6 +465,12 @@ impl Scheduler {
             sequence.num_cached_tokens =
                 (sequence.num_cached_tokens + planned.token_budget).min(sequence.num_tokens);
             sequence.num_scheduled_tokens = 0;
+            if planned.phase == SequencePhase::Prefill
+                && planned.sampling_allowed
+                && sequence.recompute_target_tokens == Some(sequence.num_cached_tokens)
+            {
+                recovered_sequence_ids.push(sequence.seq_id);
+            }
 
             if let Some(token_id) = executed.sampled_token {
                 sequence.append_token(token_id);
@@ -506,6 +514,12 @@ impl Scheduler {
             })?;
             self.running
                 .retain(|sequence| !finished_ids.contains(&sequence.seq_id));
+        }
+
+        for sequence in &mut self.running {
+            if recovered_sequence_ids.contains(&sequence.seq_id) {
+                sequence.recompute_target_tokens = None;
+            }
         }
 
         self.in_flight = None;
@@ -575,7 +589,7 @@ impl Scheduler {
     }
 
     fn sequence_phase(sequence: &Sequence) -> SequencePhase {
-        if sequence.num_cached_tokens < sequence.num_prompt_tokens {
+        if sequence.num_cached_tokens < sequence.prefill_target_tokens() {
             SequencePhase::Prefill
         } else {
             SequencePhase::Decode
@@ -628,14 +642,14 @@ impl Scheduler {
             }
             let num_tokens = match Self::sequence_phase(sequence) {
                 SequencePhase::Prefill => sequence
-                    .num_prompt_tokens
+                    .prefill_target_tokens()
                     .saturating_sub(sequence.num_cached_tokens)
                     .min(budget),
                 SequencePhase::Decode => 1,
             };
             sequence.num_scheduled_tokens = num_tokens;
-            sequence.is_prefill =
-                sequence.num_cached_tokens.saturating_add(num_tokens) < sequence.num_prompt_tokens;
+            sequence.is_prefill = sequence.num_cached_tokens.saturating_add(num_tokens)
+                < sequence.prefill_target_tokens();
             scheduled_tokens += num_tokens;
         }
     }
@@ -643,7 +657,7 @@ impl Scheduler {
     fn reset_scheduled_work(&mut self) {
         for sequence in &mut self.running {
             sequence.num_scheduled_tokens = 0;
-            sequence.is_prefill = sequence.num_cached_tokens < sequence.num_prompt_tokens;
+            sequence.is_prefill = sequence.num_cached_tokens < sequence.prefill_target_tokens();
         }
     }
 
@@ -654,7 +668,7 @@ impl Scheduler {
             .enumerate()
             .filter(|(_, sequence)| {
                 sequence.num_scheduled_tokens > 0
-                    && sequence.num_cached_tokens >= sequence.num_prompt_tokens
+                    && Self::sequence_phase(sequence) == SequencePhase::Decode
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
@@ -729,7 +743,9 @@ impl Scheduler {
     ///
     /// If the next budget-bounded decode batch cannot reserve all required
     /// append blocks, preempt the last running sequence (lowest priority).
-    /// Recompute-only: deallocate blocks, requeue at the front of waiting.
+    /// Recompute-only: transactionally deallocate blocks, freeze the complete
+    /// logical history length as the recovery target, and requeue at the front
+    /// of `waiting` without changing request identity, tokens, or parameters.
     fn preempt_if_needed(&mut self, kv_mgr: &mut KvCacheManager) -> Result<(), StepPlanError> {
         if self.running.iter().any(|sequence| sequence.is_prefill) {
             return Ok(());
@@ -758,6 +774,13 @@ impl Scheduler {
             }
             victim.status = SequenceStatus::Waiting;
             victim.num_scheduled_tokens = 0;
+            victim.recompute_target_tokens = Some(
+                victim
+                    .recompute_target_tokens
+                    .unwrap_or_default()
+                    .max(victim.num_tokens),
+            );
+            victim.is_prefill = true;
             self.waiting.push_front(victim);
         }
     }
@@ -790,7 +813,7 @@ impl Scheduler {
 
         for i in 0..self.waiting.len().min(max_running) {
             let remaining_before_allocation = self.waiting[i]
-                .num_prompt_tokens
+                .prefill_target_tokens()
                 .saturating_sub(self.waiting[i].num_cached_tokens);
             if remaining_before_allocation == 0 {
                 continue;
@@ -827,7 +850,7 @@ impl Scheduler {
                     }
 
                     let remaining = self.waiting[i]
-                        .num_prompt_tokens
+                        .prefill_target_tokens()
                         .saturating_sub(self.waiting[i].num_cached_tokens);
                     let n_tokens = remaining.min(budget);
                     if n_tokens == 0 {
@@ -859,7 +882,7 @@ impl Scheduler {
 
         for (mut seq, n_tokens) in selected.into_iter().rev() {
             seq.num_scheduled_tokens = n_tokens;
-            let fully_prefilled = seq.num_cached_tokens + n_tokens >= seq.num_prompt_tokens;
+            let fully_prefilled = seq.num_cached_tokens + n_tokens >= seq.prefill_target_tokens();
             seq.is_prefill = !fully_prefilled;
             seq.status = SequenceStatus::Running;
             self.running.push_back(seq);
@@ -921,6 +944,17 @@ mod tests {
             max_tokens,
             ..SamplingParams::default()
         }
+    }
+
+    fn assert_sampling_params(actual: &SamplingParams, expected: &SamplingParams) {
+        assert_eq!(actual.temperature, expected.temperature);
+        assert_eq!(actual.top_k, expected.top_k);
+        assert_eq!(actual.top_p, expected.top_p);
+        assert_eq!(actual.max_tokens, expected.max_tokens);
+        assert_eq!(actual.ignore_eos, expected.ignore_eos);
+        assert_eq!(actual.presence_penalty, expected.presence_penalty);
+        assert_eq!(actual.frequency_penalty, expected.frequency_penalty);
+        assert_eq!(actual.repetition_penalty, expected.repetition_penalty);
     }
 
     fn make_scheduler() -> Scheduler {
@@ -2095,6 +2129,489 @@ mod tests {
 
     mod preemption {
         use super::*;
+
+        #[test]
+        fn recovery_plan_replays_prompt_and_completion_before_sampling() {
+            let mut scheduler = Scheduler::new(BLOCK_SIZE + 1, 512, 0.9);
+            let mut kv = make_kv_mgr(3);
+            let survivor_params = make_params(2);
+            let victim_params = SamplingParams {
+                temperature: 0.25,
+                top_k: Some(7),
+                top_p: Some(0.85),
+                max_tokens: 3,
+                ignore_eos: true,
+                presence_penalty: 0.5,
+                frequency_penalty: -0.25,
+                repetition_penalty: 1.1,
+            };
+            for sequence_id in 0..2 {
+                let params = if sequence_id == 0 {
+                    &survivor_params
+                } else {
+                    &victim_params
+                };
+                let mut sequence = Sequence::new(
+                    sequence_id,
+                    sequence_id,
+                    (0..BLOCK_SIZE as u32).collect(),
+                    params,
+                );
+                kv.allocate(&mut sequence, 0).unwrap();
+                sequence.num_cached_tokens = BLOCK_SIZE;
+                sequence.append_token(90 + sequence_id as u32);
+                sequence.status = SequenceStatus::Running;
+                sequence.is_prefill = false;
+                scheduler.running.push_back(sequence);
+            }
+
+            let survivor = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(survivor.sequences.len(), 1);
+            assert_eq!(survivor.sequences[0].request_id, 0);
+            scheduler
+                .apply_step_result(&result_for_plan(&survivor, 42), &mut kv)
+                .unwrap();
+
+            let recovery = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let sequence = &recovery.sequences[0];
+            let expected_history = (0..BLOCK_SIZE as u32)
+                .chain(std::iter::once(91))
+                .collect::<Vec<_>>();
+            assert_eq!(sequence.request_id, 1);
+            assert_eq!(sequence.phase, SequencePhase::Prefill);
+            assert_eq!(sequence.token_range, 0..BLOCK_SIZE + 1);
+            assert_eq!(sequence.logical_positions, 0..BLOCK_SIZE + 1);
+            assert_eq!(sequence.input_token_ids, expected_history);
+            assert!(sequence.sampling_allowed);
+            assert_sampling_params(&sequence.sampling_params, &victim_params);
+        }
+
+        #[test]
+        fn recovery_reuses_an_exact_cached_prefix_but_replays_its_completion() {
+            let mut scheduler = Scheduler::new(BLOCK_SIZE + 1, 512, 0.9);
+            let mut kv = make_kv_mgr(3);
+            let mut victim_block = None;
+            for sequence_id in 0..2 {
+                let mut sequence = Sequence::new(
+                    sequence_id,
+                    sequence_id,
+                    (sequence_id as u32 * 1_000..sequence_id as u32 * 1_000 + BLOCK_SIZE as u32)
+                        .collect(),
+                    &make_params(if sequence_id == 0 { 2 } else { 3 }),
+                );
+                kv.allocate(&mut sequence, 0).unwrap();
+                sequence.num_scheduled_tokens = BLOCK_SIZE;
+                kv.hash_blocks(&mut sequence);
+                sequence.num_cached_tokens = BLOCK_SIZE;
+                sequence.num_scheduled_tokens = 0;
+                sequence.append_token(90 + sequence_id as u32);
+                sequence.status = SequenceStatus::Running;
+                sequence.is_prefill = false;
+                if sequence_id == 1 {
+                    victim_block = sequence.block_table.first().copied();
+                }
+                scheduler.running.push_back(sequence);
+            }
+            let victim_block = victim_block.unwrap();
+
+            let survivor = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let released = kv.ownership_snapshot();
+            assert!(released.free_block_ids.contains(&victim_block));
+            assert!(!released.used_block_ids.contains(&victim_block));
+            assert_eq!(released.ref_counts[victim_block], 0);
+            assert!(scheduler.waiting[0].block_table.is_empty());
+            scheduler
+                .apply_step_result(&result_for_plan(&survivor, 42), &mut kv)
+                .unwrap();
+
+            let recovery = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let sequence = &recovery.sequences[0];
+            assert_eq!(sequence.cache.cached_token_range, 0..BLOCK_SIZE);
+            assert_eq!(sequence.cache.block_table[0], victim_block);
+            assert_eq!(sequence.token_range, BLOCK_SIZE..BLOCK_SIZE + 1);
+            assert_eq!(sequence.logical_positions, BLOCK_SIZE..BLOCK_SIZE + 1);
+            assert_eq!(sequence.input_token_ids, vec![91]);
+            assert_eq!(sequence.cache.kv_length, BLOCK_SIZE + 1);
+            assert!(sequence.sampling_allowed);
+            assert_eq!(recovery.attention.cu_seqlens_q, vec![0, 1]);
+            assert_eq!(
+                recovery.attention.cu_seqlens_k,
+                vec![0, (BLOCK_SIZE + 1) as u32]
+            );
+
+            scheduler
+                .apply_step_result(&result_for_plan(&recovery, 42), &mut kv)
+                .unwrap();
+            assert_eq!(scheduler.running[0].completion_token_ids(), &[91, 42]);
+            assert_eq!(scheduler.running[0].recompute_target_tokens, None);
+        }
+
+        #[test]
+        fn chunked_recovery_samples_once_only_after_the_last_history_token() {
+            let mut scheduler = Scheduler::new(BLOCK_SIZE / 2, 512, 0.9);
+            let mut kv = KvCacheManager::new_with_prefix_cache(3, BLOCK_SIZE, fake_cache(), false);
+            for sequence_id in 0..2 {
+                let mut sequence = Sequence::new(
+                    sequence_id,
+                    sequence_id,
+                    (0..BLOCK_SIZE as u32).collect(),
+                    &make_params(if sequence_id == 0 { 2 } else { 3 }),
+                );
+                kv.allocate(&mut sequence, 0).unwrap();
+                sequence.num_cached_tokens = BLOCK_SIZE;
+                sequence.append_token(90 + sequence_id as u32);
+                sequence.status = SequenceStatus::Running;
+                sequence.is_prefill = false;
+                scheduler.running.push_back(sequence);
+            }
+
+            let survivor = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            scheduler
+                .apply_step_result(&result_for_plan(&survivor, 42), &mut kv)
+                .unwrap();
+
+            for expected_range in [0..BLOCK_SIZE / 2, BLOCK_SIZE / 2..BLOCK_SIZE] {
+                let chunk = scheduler.plan_step(&mut kv).unwrap().unwrap();
+                let sequence = &chunk.sequences[0];
+                assert_eq!(sequence.phase, SequencePhase::Prefill);
+                assert_eq!(sequence.token_range, expected_range);
+                assert!(!sequence.sampling_allowed);
+                scheduler
+                    .apply_step_result(&result_for_plan(&chunk, 99), &mut kv)
+                    .unwrap();
+                assert_eq!(scheduler.running[0].completion_token_ids(), &[91]);
+                assert_eq!(
+                    scheduler.running[0].recompute_target_tokens,
+                    Some(BLOCK_SIZE + 1)
+                );
+            }
+
+            let final_chunk = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let planned = &final_chunk.sequences[0];
+            assert_eq!(planned.phase, SequencePhase::Prefill);
+            assert_eq!(planned.token_range, BLOCK_SIZE..BLOCK_SIZE + 1);
+            assert_eq!(planned.input_token_ids, vec![91]);
+            assert_eq!(planned.token_history.len(), BLOCK_SIZE + 1);
+            assert!(planned.sampling_allowed);
+
+            let rejected = StepResult {
+                plan_id: final_chunk.id,
+                sequences: vec![crate::engine::SequenceStepResult {
+                    request_id: planned.request_id,
+                    sequence_id: planned.sequence_id,
+                    sampled_token: None,
+                }],
+            };
+            assert!(matches!(
+                scheduler.apply_step_result(&rejected, &mut kv),
+                Err(StepPlanError::ResultMismatch { .. })
+            ));
+            assert_eq!(scheduler.running[0].num_cached_tokens, BLOCK_SIZE);
+            assert_eq!(scheduler.running[0].completion_token_ids(), &[91]);
+            assert_eq!(
+                scheduler.running[0].recompute_target_tokens,
+                Some(BLOCK_SIZE + 1)
+            );
+
+            scheduler
+                .apply_step_result(&result_for_plan(&final_chunk, 42), &mut kv)
+                .unwrap();
+            assert_eq!(scheduler.running[0].num_cached_tokens, BLOCK_SIZE + 1);
+            assert_eq!(scheduler.running[0].completion_token_ids(), &[91, 42]);
+            assert_eq!(scheduler.running[0].recompute_target_tokens, None);
+
+            let decode = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(decode.sequences[0].phase, SequencePhase::Decode);
+            assert_eq!(decode.sequences[0].input_token_ids, vec![42]);
+            let completed = scheduler
+                .apply_step_result(&result_for_plan(&decode, 43), &mut kv)
+                .unwrap();
+            assert_eq!(completed.len(), 1);
+            assert_eq!(completed[0].request_id, 1);
+            assert_eq!(completed[0].token_ids, vec![91, 42, 43]);
+            assert_eq!(kv.num_free_blocks(), 3);
+        }
+
+        #[test]
+        fn blocked_recovery_stays_waiting_without_claiming_progress() {
+            let mut scheduler = Scheduler::new(64, 512, 0.9);
+            let mut kv = KvCacheManager::new_with_prefix_cache(1, BLOCK_SIZE, fake_cache(), false);
+            let params = make_params(3);
+            let mut recovery = Sequence::new(44, 7, (0..BLOCK_SIZE as u32).collect(), &params);
+            recovery.append_token(91);
+            recovery.recompute_target_tokens = Some(BLOCK_SIZE + 1);
+            scheduler.waiting.push_back(recovery);
+            let ownership_before = kv.ownership_snapshot();
+
+            let error = scheduler.plan_step(&mut kv).unwrap_err();
+
+            assert!(matches!(
+                error,
+                StepPlanError::NoProgress {
+                    waiting_sequences: 1,
+                    running_sequences: 0,
+                    token_budget: 64,
+                    free_blocks: 1,
+                    blocked_admission: Some(BlockedAdmission {
+                        request_id: 44,
+                        reason: AdmissionBlockedReason::KvCache,
+                    }),
+                }
+            ));
+            assert_eq!(kv.ownership_snapshot(), ownership_before);
+            assert!(scheduler.in_flight.is_none());
+            assert_eq!(scheduler.num_waiting(), 1);
+            let waiting = &scheduler.waiting[0];
+            assert_eq!(waiting.status, SequenceStatus::Waiting);
+            assert_eq!(waiting.request_id, 44);
+            assert_eq!(waiting.seq_id, 7);
+            assert_eq!(waiting.num_cached_tokens, 0);
+            assert_eq!(waiting.num_scheduled_tokens, 0);
+            assert!(waiting.block_table.is_empty());
+            assert_eq!(waiting.completion_token_ids(), &[91]);
+            assert_eq!(waiting.recompute_target_tokens, Some(BLOCK_SIZE + 1));
+            assert_sampling_params(waiting.sampling_params(), &params);
+        }
+
+        #[test]
+        fn failed_victim_release_is_transactional_and_keeps_running_order() {
+            let mut scheduler = Scheduler::new(2, 512, 0.9);
+            let mut kv = KvCacheManager::new_with_prefix_cache(2, BLOCK_SIZE, fake_cache(), false);
+            for sequence_id in 0..2 {
+                let mut sequence = Sequence::new(
+                    sequence_id,
+                    sequence_id,
+                    (0..BLOCK_SIZE as u32).collect(),
+                    &make_params(3),
+                );
+                kv.allocate(&mut sequence, 0).unwrap();
+                sequence.num_cached_tokens = BLOCK_SIZE;
+                sequence.append_token(90 + sequence_id as u32);
+                sequence.status = SequenceStatus::Running;
+                sequence.is_prefill = false;
+                scheduler.running.push_back(sequence);
+            }
+            let victim_block = scheduler.running[1].block_table[0];
+            scheduler.running[1].block_table.push(victim_block);
+            let ownership_before = kv.ownership_snapshot();
+
+            let error = scheduler.plan_step(&mut kv).unwrap_err();
+
+            assert!(matches!(
+                error,
+                StepPlanError::Cache {
+                    operation: CacheOperation::Deallocation,
+                    sequence_id: 1,
+                    ..
+                }
+            ));
+            assert_eq!(kv.ownership_snapshot(), ownership_before);
+            assert_eq!(
+                scheduler
+                    .running
+                    .iter()
+                    .map(|sequence| sequence.request_id)
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
+            );
+            let victim = &scheduler.running[1];
+            assert_eq!(victim.status, SequenceStatus::Running);
+            assert_eq!(victim.block_table, vec![victim_block, victim_block]);
+            assert_eq!(victim.num_cached_tokens, BLOCK_SIZE);
+            assert_eq!(victim.num_scheduled_tokens, 0);
+            assert_eq!(victim.completion_token_ids(), &[91]);
+            assert_eq!(victim.recompute_target_tokens, None);
+            assert!(scheduler.waiting.is_empty());
+            assert!(scheduler.in_flight.is_none());
+        }
+
+        #[test]
+        fn repeated_preemption_advances_the_same_history_without_leaks_or_duplicates() {
+            let mut scheduler = Scheduler::new(2 * BLOCK_SIZE + 2, 512, 0.9);
+            let mut kv = KvCacheManager::new_with_prefix_cache(5, BLOCK_SIZE, fake_cache(), false);
+            for sequence_id in 0..2 {
+                let prompt_start = sequence_id as u32 * 1_000;
+                let mut sequence = Sequence::new(
+                    sequence_id,
+                    sequence_id,
+                    (prompt_start..prompt_start + (2 * BLOCK_SIZE - 1) as u32).collect(),
+                    &make_params(if sequence_id == 0 { 3 } else { 5 }),
+                );
+                kv.allocate(&mut sequence, 0).unwrap();
+                sequence.num_cached_tokens = sequence.num_prompt_tokens;
+                sequence.append_token(700 + sequence_id as u32);
+                sequence.status = SequenceStatus::Running;
+                sequence.is_prefill = false;
+                scheduler.running.push_back(sequence);
+            }
+
+            let shared_decode = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(shared_decode.token_budget, 2);
+            scheduler
+                .apply_step_result(&result_for_plan(&shared_decode, 88), &mut kv)
+                .unwrap();
+
+            let first_preemption = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(first_preemption.sequences[0].request_id, 0);
+            let first_target = scheduler.waiting[0].recompute_target_tokens.unwrap();
+            assert_eq!(first_target, 2 * BLOCK_SIZE + 1);
+            assert_eq!(scheduler.waiting[0].completion_token_ids(), &[701, 88]);
+            assert!(scheduler.waiting[0].block_table.is_empty());
+            scheduler
+                .apply_step_result(&result_for_plan(&first_preemption, 88), &mut kv)
+                .unwrap();
+
+            let first_recovery = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(first_recovery.token_budget, first_target);
+            assert_eq!(first_recovery.sequences[0].token_range, 0..first_target);
+            assert!(first_recovery.sequences[0].sampling_allowed);
+            scheduler
+                .apply_step_result(&result_for_plan(&first_recovery, 88), &mut kv)
+                .unwrap();
+            assert_eq!(scheduler.running[0].request_id, 1);
+            assert_eq!(scheduler.running[0].completion_token_ids(), &[701, 88, 88]);
+            assert_eq!(scheduler.running[0].recompute_target_tokens, None);
+
+            let mut competitor = Sequence::new(
+                2,
+                2,
+                (2_000..2_000 + (2 * BLOCK_SIZE) as u32).collect(),
+                &make_params(2),
+            );
+            kv.allocate(&mut competitor, 0).unwrap();
+            competitor.num_cached_tokens = competitor.num_prompt_tokens;
+            competitor.append_token(702);
+            competitor.status = SequenceStatus::Running;
+            competitor.is_prefill = false;
+            scheduler.running.push_front(competitor);
+
+            let second_preemption = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(second_preemption.sequences[0].request_id, 2);
+            let second_target = scheduler.waiting[0].recompute_target_tokens.unwrap();
+            assert_eq!(second_target, 2 * BLOCK_SIZE + 2);
+            assert!(second_target > first_target);
+            assert_eq!(scheduler.waiting[0].request_id, 1);
+            assert_eq!(scheduler.waiting[0].completion_token_ids(), &[701, 88, 88]);
+            assert!(scheduler.waiting[0].block_table.is_empty());
+            scheduler
+                .apply_step_result(&result_for_plan(&second_preemption, 88), &mut kv)
+                .unwrap();
+
+            let second_recovery = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(second_recovery.token_budget, second_target);
+            assert_eq!(second_recovery.sequences[0].token_range, 0..second_target);
+            scheduler
+                .apply_step_result(&result_for_plan(&second_recovery, 88), &mut kv)
+                .unwrap();
+            assert_eq!(
+                scheduler.running[0].completion_token_ids(),
+                &[701, 88, 88, 88]
+            );
+            assert_eq!(scheduler.running[0].recompute_target_tokens, None);
+
+            let final_decode = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let completed = scheduler
+                .apply_step_result(&result_for_plan(&final_decode, 88), &mut kv)
+                .unwrap();
+            assert_eq!(completed.len(), 1);
+            assert_eq!(completed[0].request_id, 1);
+            assert_eq!(completed[0].token_ids, vec![701, 88, 88, 88, 88]);
+            assert!(!scheduler.is_running());
+            assert_eq!(kv.num_free_blocks(), 5);
+            assert_eq!(
+                kv.ownership_snapshot().ref_counts,
+                vec![0; 5],
+                "every physical block must be released after repeated recovery"
+            );
+        }
+
+        #[test]
+        fn recovery_shares_the_global_budget_without_starving_fifo_waiters() {
+            let mut scheduler = Scheduler::new(3, 3, 0.9);
+            let mut kv = KvCacheManager::new_with_prefix_cache(3, BLOCK_SIZE, fake_cache(), false);
+
+            let mut decoder = Sequence::new(10, 10, vec![1], &make_params(4));
+            kv.allocate(&mut decoder, 0).unwrap();
+            decoder.num_cached_tokens = decoder.num_prompt_tokens;
+            decoder.append_token(10);
+            decoder.status = SequenceStatus::Running;
+            decoder.is_prefill = false;
+            scheduler.running.push_back(decoder);
+
+            let mut recovery = Sequence::new(11, 11, vec![2, 3, 4, 5], &make_params(2));
+            recovery.append_token(9);
+            recovery.recompute_target_tokens = Some(5);
+            scheduler.waiting.push_back(recovery);
+            scheduler
+                .waiting
+                .push_back(Sequence::new(12, 12, vec![6], &make_params(1)));
+
+            let first = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(first.token_budget, 3);
+            assert_eq!(
+                first
+                    .sequences
+                    .iter()
+                    .map(|sequence| (sequence.request_id, sequence.token_budget))
+                    .collect::<Vec<_>>(),
+                vec![(10, 1), (11, 2)]
+            );
+            assert_eq!(
+                first.blocked_admission,
+                Some(BlockedAdmission {
+                    request_id: 12,
+                    reason: AdmissionBlockedReason::TokenBudget,
+                })
+            );
+            scheduler
+                .apply_step_result(&result_for_plan(&first, 42), &mut kv)
+                .unwrap();
+            assert_eq!(scheduler.running[1].completion_token_ids(), &[9]);
+            assert_eq!(scheduler.running[1].recompute_target_tokens, Some(5));
+
+            let second = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(second.token_budget, 3);
+            assert_eq!(
+                second
+                    .sequences
+                    .iter()
+                    .map(|sequence| (sequence.request_id, sequence.token_budget))
+                    .collect::<Vec<_>>(),
+                vec![(10, 1), (11, 1), (12, 1)]
+            );
+            assert!(!second.sequences[1].sampling_allowed);
+            let second_outputs = scheduler
+                .apply_step_result(&result_for_plan(&second, 42), &mut kv)
+                .unwrap();
+            assert_eq!(second_outputs.len(), 1);
+            assert_eq!(second_outputs[0].request_id, 12);
+
+            let final_step = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(final_step.token_budget, 3);
+            assert_eq!(
+                final_step
+                    .sequences
+                    .iter()
+                    .map(|sequence| (sequence.request_id, sequence.token_budget))
+                    .collect::<Vec<_>>(),
+                vec![(10, 1), (11, 2)]
+            );
+            assert_eq!(final_step.sequences[1].token_range, 3..5);
+            assert_eq!(final_step.sequences[1].input_token_ids, vec![5, 9]);
+            assert!(final_step.sequences[1].sampling_allowed);
+            let final_outputs = scheduler
+                .apply_step_result(&result_for_plan(&final_step, 42), &mut kv)
+                .unwrap();
+            assert_eq!(
+                final_outputs
+                    .iter()
+                    .map(|output| output.request_id)
+                    .collect::<Vec<_>>(),
+                vec![10, 11]
+            );
+            assert!(!scheduler.is_running());
+            assert_eq!(kv.num_free_blocks(), 3);
+        }
 
         #[test]
         fn preempts_when_no_free_blocks_for_decode() {
