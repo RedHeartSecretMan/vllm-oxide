@@ -5,18 +5,10 @@
 //! holds `Arc<Mutex<PagedKVCache>>` and builds `AttnMetadata` from its own
 //! scheduler state; `attention/` never imports `engine/`.
 //!
-//! # Current status
-//!
-//! - **T2/#20 (landed)**: `Sequence`, `SequenceStatus`,
-//!   `Block`, `BlockPool`, `KVCacheManager` — the full data-model leaf below
-//!   the scheduler.
-//! - **T2/#21 (this)**: `EngineCore`, `Scheduler`, `RequestOutput` — the
-//!   control loop that wires data model → attention → model → sampler.
-//!
-//! `EngineCore` itself collapses V1/nano-vllm `ModelRunner` — `step()`
-//! performs scheduler → tensor prep → `model.forward()` → sampler → KV
-//! update in one method. No `model_runner` sub-module at v0.1. Split trigger
-//! (ADR-0004 R5): `step()` exceeds ~300 LOC or CUDA graph capture lands.
+//! Scheduler-owned state is captured in one immutable `StepPlan`.
+//! `EngineCore` executes only that plan and returns a corresponding
+//! `StepResult`; the Scheduler applies the result exactly once. This keeps
+//! scheduling and lifecycle decisions out of model execution (ADR-0004).
 
 #![allow(dead_code)]
 
@@ -24,10 +16,11 @@ pub mod block_pool;
 pub mod kv_cache_manager;
 pub mod scheduler;
 pub mod sequence;
+mod step;
 
 use candle_core::{DType, Device, Result, Tensor};
 
-use crate::attention::{build_decode_metadata, build_prefill_metadata, AttentionContext};
+use crate::attention::AttentionContext;
 use crate::causal_lm::CausalLM;
 use crate::Sampler;
 use crate::SamplingParams;
@@ -37,12 +30,15 @@ pub use kv_cache_manager::KvCacheManager;
 pub use scheduler::{RequestOutput, ScheduleMode, ScheduleOutput, Scheduler};
 pub use sequence::{Sequence, SequenceStatus};
 
+pub(crate) use step::{
+    SequenceCachePlan, SequenceStepPlan, SequenceStepResult, StepPlan, StepPlanError, StepResult,
+};
+
 /// In-process engine core — collapses V1/nano-vllm's `ModelRunner` (ADR-0004).
 ///
-/// `step()` performs scheduler → tensor prep → `model.forward()` →
-/// sampler → KV update in one method. Holds the shared attention state
-/// (`AttentionContext`) so attention layers can read it during the forward
-/// pass; each step writes fresh `AttnMetadata` into the shared `Mutex`.
+/// Holds the model-execution side of the internal `StepPlan` / `StepResult`
+/// seam and the shared attention state (`AttentionContext`). Scheduling,
+/// lifecycle, and result application remain owned by [`Scheduler`].
 pub struct EngineCore {
     pub scheduler: Scheduler,
     pub kv_cache_manager: KvCacheManager,
@@ -92,189 +88,111 @@ impl EngineCore {
     ///
     /// When no work remains, returns `Ok((Vec::new(), Tensor::zeros(...)))`.
     pub fn step_with_logits(&mut self) -> Result<(Vec<RequestOutput>, Tensor)> {
-        let output = self.scheduler.schedule(&mut self.kv_cache_manager);
-
-        if self.scheduler.num_running() == 0 {
+        let Some(plan) = self
+            .scheduler
+            .plan_step(&mut self.kv_cache_manager)
+            .map_err(candle_core::Error::msg)?
+        else {
             let empty = Tensor::zeros((0, 0), DType::F32, &self.device)?;
             return Ok((Vec::new(), empty));
-        }
-
-        let logits = match output.mode {
-            ScheduleMode::Prefill => self.forward_prefill()?,
-            ScheduleMode::Decode => self.forward_decode()?,
         };
 
-        let (outputs, logits_clone) = self.sample_and_postprocess_with_logits(&logits)?;
-        Ok((outputs, logits_clone))
+        let (result, logits) = self.execute_plan(&plan)?;
+        let outputs = self
+            .scheduler
+            .apply_step_result(&result, &mut self.kv_cache_manager)
+            .map_err(candle_core::Error::msg)?;
+        Ok((outputs, logits))
+    }
+
+    /// Execute exactly the immutable work captured in `plan`.
+    fn execute_plan(&mut self, plan: &StepPlan) -> Result<(StepResult, Tensor)> {
+        if plan.sequences.is_empty() || plan.token_budget == 0 {
+            candle_core::bail!("cannot execute an empty step plan")
+        }
+
+        let input_token_ids = plan
+            .sequences
+            .iter()
+            .flat_map(|sequence| sequence.input_token_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let logical_positions = plan
+            .sequences
+            .iter()
+            .flat_map(|sequence| sequence.logical_positions.clone())
+            .map(|position| {
+                u32::try_from(position).map_err(|_| {
+                    candle_core::Error::Msg("logical position does not fit u32".to_string())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if input_token_ids.len() != plan.token_budget
+            || logical_positions.len() != plan.token_budget
+        {
+            candle_core::bail!("step plan token budget does not match its inputs")
+        }
+
+        let input_ids = Tensor::from_vec(input_token_ids, plan.token_budget, &self.device)?;
+        let positions = Tensor::from_vec(logical_positions, plan.token_budget, &self.device)?;
+        {
+            // Engine execution is single-threaded; this mutex is never poisoned.
+            #[allow(clippy::unwrap_used)]
+            let mut attention = self.attn_ctx.attn_meta.lock().unwrap();
+            *attention = plan.attention.clone();
+        }
+
+        let hidden = self.model.forward(&input_ids, &positions)?;
+        let mut offset = 0usize;
+        let mut sample_hiddens = Vec::new();
+        let mut sampling_params = Vec::new();
+        let mut token_histories = Vec::new();
+        for sequence in &plan.sequences {
+            if sequence.sampling_allowed {
+                sample_hiddens.push(hidden.get(offset + sequence.token_budget - 1)?);
+                sampling_params.push(sequence.sampling_params.clone());
+                token_histories.push(sequence.token_history.clone());
+            }
+            offset += sequence.token_budget;
+        }
+
+        let (sampled_tokens, logits) = if sample_hiddens.is_empty() {
+            (Vec::new(), Tensor::zeros((0, 0), DType::F32, &self.device)?)
+        } else {
+            let refs = sample_hiddens.iter().collect::<Vec<_>>();
+            let logits = self.model.compute_logits(&Tensor::stack(&refs, 0)?)?;
+            let sampled = self
+                .sampler
+                .forward(&logits, &sampling_params, &token_histories)?
+                .to_vec1::<u32>()?;
+            (sampled, logits.to_dtype(DType::F32)?)
+        };
+
+        let mut sampled_tokens = sampled_tokens.into_iter();
+        let sequences = plan
+            .sequences
+            .iter()
+            .map(|sequence| SequenceStepResult {
+                request_id: sequence.request_id,
+                sequence_id: sequence.sequence_id,
+                sampled_token: sequence
+                    .sampling_allowed
+                    .then(|| sampled_tokens.next())
+                    .flatten(),
+            })
+            .collect();
+
+        Ok((
+            StepResult {
+                plan_id: plan.id,
+                sequences,
+            },
+            logits,
+        ))
     }
 
     /// Whether there are any pending or running sequences.
     pub fn is_running(&self) -> bool {
         self.scheduler.is_running()
-    }
-
-    /// Sample from logits, postprocess sequences, and return both the
-    /// finished outputs and a clone of the pre-sampling logits (FP32,
-    /// shape `[batch, vocab_size]`).
-    fn sample_and_postprocess_with_logits(
-        &mut self,
-        logits: &Tensor,
-    ) -> Result<(Vec<RequestOutput>, Tensor)> {
-        let params: Vec<SamplingParams> = self
-            .scheduler
-            .running_seqs()
-            .map(|s| SamplingParams {
-                temperature: s.temperature,
-                max_tokens: s.max_tokens,
-                ignore_eos: s.ignore_eos,
-                ..SamplingParams::default()
-            })
-            .collect();
-
-        let token_histories: Vec<Vec<u32>> = self
-            .scheduler
-            .running_seqs()
-            .map(|s| s.token_ids.clone())
-            .collect();
-
-        let sampled = self.sampler.forward(logits, &params, &token_histories)?;
-        let sampled_ids = sampled.to_vec1::<u32>()?;
-
-        let outputs = self
-            .scheduler
-            .postprocess(&sampled_ids, &mut self.kv_cache_manager);
-
-        // Convert to FP32 for numerical comparison (matches oracle format).
-        let logits_fp32 = logits.to_dtype(DType::F32)?;
-
-        Ok((outputs, logits_fp32))
-    }
-
-    /// Run the prefill forward pass and return pre-sampling logits
-    /// (shape `[batch, vocab_size]`). Does NOT sample — the caller
-    /// is responsible for calling `sample_and_postprocess_with_logits`.
-    fn forward_prefill(&mut self) -> Result<Tensor> {
-        let batch = self.scheduler.num_running();
-        if batch == 0 {
-            return Tensor::zeros((0, 0), DType::F32, &self.device);
-        }
-
-        let mut all_input_ids: Vec<u32> = Vec::new();
-        let mut all_positions: Vec<u32> = Vec::new();
-        let mut seq_starts: Vec<usize> = Vec::new();
-        let mut seq_lens: Vec<usize> = Vec::new();
-        let mut slot_mapping: Vec<i64> = Vec::new();
-        let mut kv_lengths: Vec<u32> = Vec::new();
-
-        let mut cumsum = 0usize;
-        for seq in self.scheduler.running_seqs() {
-            let n = seq.num_scheduled_tokens;
-            let start = seq.num_cached_tokens.saturating_sub(n);
-
-            let tokens = &seq.token_ids[start..start + n];
-            all_input_ids.extend_from_slice(tokens);
-
-            // num_cached_tokens ≤ max_model_len ≤ 2^31, fits u32
-            #[allow(clippy::cast_possible_truncation)]
-            let pos_base = seq.num_cached_tokens.saturating_sub(n) as u32;
-            for k in 0..n {
-                // k < n ≤ max_num_batched_tokens (16384) ≪ u32::MAX
-                #[allow(clippy::cast_possible_truncation)]
-                all_positions.push(pos_base + k as u32);
-            }
-
-            seq_starts.push(cumsum);
-            cumsum += n;
-            seq_lens.push(n);
-
-            let sm = self.kv_cache_manager.compute_slot_mapping(seq, start, n);
-            slot_mapping.extend(sm);
-
-            // kv_lengths ≤ max_model_len whose default is 4096 ≪ u32::MAX
-            #[allow(clippy::cast_possible_truncation)]
-            kv_lengths.push((seq.num_cached_tokens.saturating_sub(n) + n) as u32);
-        }
-
-        let total_tokens = all_input_ids.len();
-
-        let input_ids = Tensor::from_vec(all_input_ids, total_tokens, &self.device)?;
-        let positions = Tensor::from_vec(all_positions, total_tokens, &self.device)?;
-
-        // seq_lens entries ≤ max_num_batched_tokens (16384) ≪ u32::MAX
-        #[allow(clippy::cast_possible_truncation)]
-        let scheduled_tokens: Vec<u32> = seq_lens.iter().map(|&l| l as u32).collect();
-
-        let meta = build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping);
-        {
-            // Engine is single-threaded (v0.1); Mutex is never poisoned.
-            #[allow(clippy::unwrap_used)]
-            let mut lock = self.attn_ctx.attn_meta.lock().unwrap();
-            *lock = meta;
-        }
-
-        let hidden = self.model.forward(&input_ids, &positions)?;
-
-        let mut last_hiddens = Vec::new();
-        for (i, &start) in seq_starts.iter().enumerate() {
-            let len = seq_lens[i];
-            let last_idx = start + len - 1;
-            let h = hidden.get(last_idx)?;
-            last_hiddens.push(h);
-        }
-
-        let logits_hidden = Tensor::stack(&last_hiddens.iter().collect::<Vec<&Tensor>>(), 0)?;
-        self.model.compute_logits(&logits_hidden)
-    }
-
-    /// Run the decode forward pass and return pre-sampling logits
-    /// (shape `[batch, vocab_size]`). Does NOT sample — the caller
-    /// is responsible for calling `sample_and_postprocess_with_logits`.
-    fn forward_decode(&mut self) -> Result<Tensor> {
-        let batch = self.scheduler.num_running();
-        if batch == 0 {
-            return Tensor::zeros((0, 0), DType::F32, &self.device);
-        }
-
-        let mut last_tokens: Vec<u32> = Vec::new();
-        let mut positions: Vec<u32> = Vec::new();
-        let mut context_lens: Vec<u32> = Vec::new();
-        let mut slot_mapping: Vec<i64> = Vec::new();
-        let mut block_tables: Vec<Vec<i32>> = Vec::new();
-
-        for seq in self.scheduler.running_seqs() {
-            last_tokens.push(seq.last_token);
-            // decode position ≤ max_model_len ≪ u32::MAX
-            #[allow(clippy::cast_possible_truncation)]
-            let pos = seq.num_tokens.saturating_sub(1) as u32;
-            positions.push(pos);
-            // context_lens ≤ max_model_len ≪ u32::MAX
-            #[allow(clippy::cast_possible_truncation)]
-            context_lens.push(seq.num_tokens as u32);
-
-            let sm = self
-                .kv_cache_manager
-                .compute_slot_mapping(seq, pos as usize, 1);
-            slot_mapping.extend(sm);
-
-            // block_table ids ≤ num_gpu_blocks, typically hundreds ≪ i32::MAX
-            #[allow(clippy::cast_possible_truncation)]
-            let bt: Vec<i32> = seq.block_table.iter().map(|&id| id as i32).collect();
-            block_tables.push(bt);
-        }
-
-        let input_ids = Tensor::from_vec(last_tokens, batch, &self.device)?;
-        let pos_tensor = Tensor::from_vec(positions, batch, &self.device)?;
-
-        let meta = build_decode_metadata(&context_lens, &block_tables, &slot_mapping);
-        {
-            // Engine is single-threaded (v0.1); Mutex is never poisoned.
-            #[allow(clippy::unwrap_used)]
-            let mut lock = self.attn_ctx.attn_meta.lock().unwrap();
-            *lock = meta;
-        }
-
-        let hidden = self.model.forward(&input_ids, &pos_tensor)?;
-        self.model.compute_logits(&hidden)
     }
 }
 
@@ -284,7 +202,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::attention::{AttnMetadata, PagedKVCache};
+    use crate::attention::{build_prefill_metadata, AttnMetadata, PagedKVCache};
     use crate::engine::sequence::BLOCK_SIZE;
     use crate::Sampler;
     use candle_core::DType;
@@ -297,6 +215,38 @@ mod tests {
         vocab_size: usize,
         target_token: u32,
         device: Device,
+    }
+
+    struct RecordingModel {
+        seen_input_ids: Arc<Mutex<Vec<Vec<u32>>>>,
+        device: Device,
+    }
+
+    impl CausalLM for RecordingModel {
+        fn forward(&mut self, input_ids: &Tensor, _positions: &Tensor) -> Result<Tensor> {
+            self.seen_input_ids
+                .lock()
+                .unwrap()
+                .push(input_ids.to_vec1::<u32>()?);
+            Tensor::zeros((input_ids.dim(0)?, 64), DType::F32, &self.device)
+        }
+
+        fn compute_logits(&self, hidden_states: &Tensor) -> Result<Tensor> {
+            let rows = hidden_states.dim(0)?;
+            let mut logits = vec![-100.0_f32; rows * 100];
+            for row in 0..rows {
+                logits[row * 100 + 42] = 100.0;
+            }
+            Tensor::from_vec(logits, (rows, 100), &self.device)
+        }
+
+        fn vocab_size(&self) -> usize {
+            100
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
     }
 
     impl MockModel {
@@ -440,5 +390,98 @@ mod tests {
         scheduler.add_request(vec![1, 2, 3], SamplingParams::default());
         let engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
         assert!(engine.is_running());
+    }
+
+    #[test]
+    fn execute_plan_uses_only_plan_membership() {
+        let device = Device::Cpu;
+        let source_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let mut source_scheduler = Scheduler::with_defaults();
+        let mut source_kv = KvCacheManager::new(100, BLOCK_SIZE, source_ctx.paged_kv.clone());
+        source_scheduler.add_request(vec![11, 12, 13], SamplingParams::default());
+        let plan = source_scheduler.plan_step(&mut source_kv).unwrap().unwrap();
+
+        let engine_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let mut decoy_scheduler = Scheduler::with_defaults();
+        decoy_scheduler.add_request(vec![99], SamplingParams::default());
+        let engine_kv = KvCacheManager::new(100, BLOCK_SIZE, engine_ctx.paged_kv.clone());
+        let seen_input_ids = Arc::new(Mutex::new(Vec::new()));
+        let model = Box::new(RecordingModel {
+            seen_input_ids: seen_input_ids.clone(),
+            device: device.clone(),
+        });
+        let mut engine = EngineCore::new(
+            decoy_scheduler,
+            engine_kv,
+            model,
+            Sampler::new_with_seed(0),
+            engine_ctx,
+            device,
+        );
+
+        let (result, _logits) = engine.execute_plan(&plan).unwrap();
+
+        assert_eq!(*seen_input_ids.lock().unwrap(), vec![vec![11, 12, 13]]);
+        assert_eq!(result.plan_id, plan.id);
+        assert_eq!(result.sequences.len(), 1);
+        assert_eq!(result.sequences[0].request_id, 0);
+        assert_eq!(result.sequences[0].sequence_id, 0);
+        assert_eq!(result.sequences[0].sampled_token, Some(42));
+    }
+
+    #[test]
+    fn engine_step_obeys_plan_sampling_permission() {
+        let device = Device::Cpu;
+        let mut scheduler = Scheduler::new(2, 512, 0.9);
+        let attn_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        scheduler.add_request(vec![11, 12, 13], SamplingParams::default());
+        let mut engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
+
+        let outputs = engine.step().unwrap();
+
+        assert!(outputs.is_empty());
+        let sequence = engine.scheduler.running_seqs().next().unwrap();
+        assert_eq!(sequence.num_cached_tokens, 2);
+        assert_eq!(sequence.num_completion_tokens(), 0);
+    }
+
+    #[test]
+    fn batched_greedy_generation_remains_deterministic_through_step_plans() {
+        let device = Device::Cpu;
+        let mut scheduler = Scheduler::with_defaults();
+        let attn_ctx = AttentionContext {
+            paged_kv: make_fake_cache(),
+            attn_meta: make_fake_meta(),
+        };
+        let kv_mgr = KvCacheManager::new(100, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        let params = SamplingParams {
+            max_tokens: 2,
+            ..SamplingParams::default()
+        };
+        scheduler.add_request(vec![11, 12, 13], params.clone());
+        scheduler.add_request(vec![21], params);
+        let mut engine = make_engine(scheduler, kv_mgr, attn_ctx, &device);
+        let mut outputs = Vec::new();
+
+        while engine.is_running() {
+            outputs.extend(engine.step().unwrap());
+        }
+        outputs.sort_by_key(|output| output.seq_id);
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].seq_id, 0);
+        assert_eq!(outputs[0].token_ids, vec![42, 42]);
+        assert_eq!(outputs[1].seq_id, 1);
+        assert_eq!(outputs[1].token_ids, vec![42, 42]);
     }
 }
