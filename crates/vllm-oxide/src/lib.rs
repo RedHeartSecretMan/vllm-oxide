@@ -39,9 +39,9 @@ pub use config::{
 pub use loader::{load_weights, load_weights_vb};
 
 pub use causal_lm::CausalLM;
-pub use models::registry::{build as build_model, BuiltModel, ModelEntry};
+pub use models::registry::{BuiltModel, ModelEntry};
 
-pub use llm::{EngineOptions, Prompt, LLM};
+pub use llm::{build_model, EngineOptions, Prompt, LLM};
 
 // Module stubs — working code lands in downstream tickets (T2 engine,
 // T3 layers/loader, T4 attention, T5 model). Dependency DAG per ADR-0004:
@@ -55,6 +55,5 @@ pub(crate) mod engine;
 pub(crate) mod layers;
 pub(crate) mod llm;
 pub(crate) mod loader;
-pub(crate) mod model_identity;
 pub(crate) mod models;
 pub(crate) mod sampler;

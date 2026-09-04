@@ -53,7 +53,9 @@ use candle_nn::var_builder::{
 use serde::Deserialize;
 
 use crate::config::{is_hf_hub_offline, Source};
-use crate::model_identity::ResolvedModel;
+
+mod model_identity;
+pub(crate) use model_identity::ResolvedModel;
 
 /// Mmap one or more `*.safetensors` files and return a candle
 /// [`ShardedVarBuilder`] over them.
@@ -147,6 +149,16 @@ pub(crate) fn load_resolved_weights_vb(
     ))
 }
 
+pub(crate) fn validate_model_dtype(dtype: DType, origin: &str) -> Result<DType> {
+    if matches!(dtype, DType::BF16 | DType::F16) {
+        Ok(dtype)
+    } else {
+        Err(anyhow!(
+            "{origin} {dtype:?} is unsupported; supported model and KV-cache dtypes: BF16, F16"
+        ))
+    }
+}
+
 /// Local-dir fallback chain: `model.safetensors.index.json` → single
 /// `model.safetensors` → glob `*.safetensors`. Errors with a "looked in"
 /// diagnostic when nothing resolves.
@@ -191,6 +203,22 @@ struct SafetensorsIndex {
 /// referenced by `weight_map`, and return absolute paths rooted at `dir`.
 /// Errors if `weight_map` is empty or any referenced shard is missing.
 fn parse_index_shards(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
+    let unique = parse_index_shard_names(index_path)?;
+    let paths: Vec<PathBuf> = unique.into_iter().map(|name| dir.join(name)).collect();
+    for p in &paths {
+        if !p.is_file() {
+            return Err(anyhow!(
+                "shard {} is referenced by {} but is not present on disk \
+                 (partial download?)",
+                p.display(),
+                index_path.display()
+            ));
+        }
+    }
+    Ok(paths)
+}
+
+fn parse_index_shard_names(index_path: &Path) -> Result<Vec<String>> {
     let bytes =
         std::fs::read(index_path).with_context(|| format!("reading {}", index_path.display()))?;
     let parsed: SafetensorsIndex = serde_json::from_slice(&bytes)
@@ -206,19 +234,20 @@ fn parse_index_shards(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
             index_path.display()
         ));
     }
-
-    let paths: Vec<PathBuf> = unique.into_iter().map(|name| dir.join(name)).collect();
-    for p in &paths {
-        if !p.is_file() {
+    for name in &unique {
+        let path = Path::new(name);
+        if name.is_empty()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
             return Err(anyhow!(
-                "shard {} is referenced by {} but is not present on disk \
-                 (partial download?)",
-                p.display(),
+                "safetensors shard `{name}` from {} points outside resolved model identity",
                 index_path.display()
             ));
         }
     }
-    Ok(paths)
+    Ok(unique)
 }
 
 /// Hub-path shard resolution. Honours `HF_HUB_OFFLINE` (online path will hang
@@ -563,11 +592,9 @@ mod tests {
             )
             .unwrap();
             std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
-            let resolved = crate::model_identity::ResolvedModel::resolve(
-                Source::Local(tmp.path().to_path_buf()),
-                Some(DType::F16),
-            )
-            .unwrap();
+            let resolved =
+                ResolvedModel::resolve(Source::Local(tmp.path().to_path_buf()), Some(DType::F16))
+                    .unwrap();
 
             let vb = load_resolved_weights_vb(&resolved, &Device::Cpu).unwrap();
             let tensor = vb.get((2,), "w").unwrap();

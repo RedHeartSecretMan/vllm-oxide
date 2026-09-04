@@ -19,8 +19,8 @@ use crate::engine::{
     },
     EngineCore, KvCacheManager, RequestOutput, Scheduler,
 };
-use crate::model_identity::ResolvedModel;
-use crate::models::registry::{build_resolved as build_model, BuiltModel};
+use crate::loader::ResolvedModel;
+use crate::models::registry::{resolved_factory, BuiltModel};
 use crate::sampler::{Sampler, SamplingParams};
 
 /// Construction-time configuration for `LLM::new`.
@@ -73,6 +73,21 @@ pub struct LLM {
     device: Device,
 }
 
+/// Build a registered model from one resolved source identity.
+pub fn build_model(source: Source, device: &Device, max_model_len: usize) -> Result<BuiltModel> {
+    let resolved_model = ResolvedModel::resolve(source, None)?;
+    build_resolved_model(&resolved_model, device, max_model_len)
+}
+
+fn build_resolved_model(
+    resolved_model: &ResolvedModel,
+    device: &Device,
+    max_model_len: usize,
+) -> Result<BuiltModel> {
+    let model_factory = resolved_factory(resolved_model.config_json())?;
+    model_factory(resolved_model, device, max_model_len)
+}
+
 impl LLM {
     /// Build the full inference stack — model, tokenizer, engine — from a
     /// model source (`Local` directory or `Hub` repo) and `EngineOptions`.
@@ -122,7 +137,7 @@ impl LLM {
         );
 
         let BuiltModel { model, attn_ctx } =
-            build_model(&resolved_model, &device, options.max_model_len)?;
+            build_resolved_model(&resolved_model, &device, options.max_model_len)?;
 
         #[cfg(feature = "cuda")]
         let num_gpu_blocks =

@@ -104,7 +104,7 @@ impl PagedKVCache {
     }
 
     /// Storage dtype shared by every layer in this cache.
-    pub fn dtype(&self) -> DType {
+    pub(crate) fn dtype(&self) -> DType {
         self.buffer.dtype()
     }
 

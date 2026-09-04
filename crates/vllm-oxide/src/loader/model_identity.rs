@@ -1,4 +1,5 @@
-//! Resolve one model source into an immutable identity and artifact set.
+//! Resolve one model source into an immutable identity and artifact set owned
+//! by the Weight loader.
 //!
 //! [`ResolvedModel`] is the construction seam: configuration bytes, tokenizer,
 //! special-token metadata, weight shards, and dtype all flow through this one
@@ -6,7 +7,7 @@
 //! artifact is fetched by that exact commit. Offline mode resolves the cached
 //! ref to one `snapshots/<commit>` directory before reading artifact contents.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -301,7 +302,7 @@ impl ResolvedModel {
                         resolved.commit
                     )
                 })?;
-            let shard_names = parse_index_shard_names(&index_path)?;
+            let shard_names = super::parse_index_shard_names(&index_path)?;
             let mut paths = Vec::with_capacity(shard_names.len());
             for shard in shard_names {
                 if !resolved.files.contains(&shard) {
@@ -375,7 +376,8 @@ impl ResolvedModel {
             bail!("tokenizer.json not found at {}", tokenizer_path.display());
         }
         let generation_config_json = read_optional_file(&root.join("generation_config.json"))?;
-        let weight_paths = resolve_local_weight_paths(&root)?;
+        let weight_paths = super::resolve_local_shards(&root)
+            .with_context(|| format!("resolving weights for local model {}", root.display()))?;
         let dtype = select_dtype(&config_json, requested_dtype)
             .with_context(|| format!("resolving dtype for local model {}", root.display()))?;
 
@@ -529,77 +531,6 @@ struct SpecialTokenConfig {
     pad_token_id: Option<u32>,
 }
 
-#[derive(Deserialize)]
-struct SafetensorsIndex {
-    weight_map: HashMap<String, String>,
-}
-
-fn parse_index_shard_names(index_path: &Path) -> Result<Vec<String>> {
-    let bytes = std::fs::read(index_path)
-        .with_context(|| format!("reading safetensors index {}", index_path.display()))?;
-    let parsed: SafetensorsIndex = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing safetensors index {}", index_path.display()))?;
-    let names: BTreeSet<String> = parsed.weight_map.into_values().collect();
-    if names.is_empty() {
-        bail!(
-            "safetensors index {} has an empty `weight_map`",
-            index_path.display()
-        );
-    }
-    for name in &names {
-        let path = Path::new(name);
-        if name.is_empty()
-            || path
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            bail!(
-                "safetensors shard `{name}` from {} points outside resolved model identity",
-                index_path.display()
-            );
-        }
-    }
-    Ok(names.into_iter().collect())
-}
-
-fn resolve_local_weight_paths(root: &Path) -> Result<Vec<PathBuf>> {
-    let index_path = root.join("model.safetensors.index.json");
-    if index_path.is_file() {
-        let names = parse_index_shard_names(&index_path)?;
-        let paths: Vec<PathBuf> = names.into_iter().map(|name| root.join(name)).collect();
-        for path in &paths {
-            if !path.is_file() {
-                bail!(
-                    "shard {} is referenced by {} but is not present",
-                    path.display(),
-                    index_path.display()
-                );
-            }
-        }
-        return Ok(paths);
-    }
-
-    let single = root.join("model.safetensors");
-    if single.is_file() {
-        return Ok(vec![single]);
-    }
-
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(root)
-        .with_context(|| format!("reading local model root {}", root.display()))?
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("safetensors"))
-        .collect();
-    paths.sort();
-    if paths.is_empty() {
-        bail!(
-            "no safetensors weights under local model root {}",
-            root.display()
-        );
-    }
-    Ok(paths)
-}
-
 fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
     if path.is_file() {
         Ok(Some(
@@ -616,24 +547,14 @@ fn select_dtype(config_json: &[u8], requested: Option<DType>) -> Result<DType> {
     }
     let dtype = default_dtype_from_config_json(config_json)
         .context("reading model config `torch_dtype`")?;
-    validate_supported_dtype(dtype, "model config dtype")
+    super::validate_model_dtype(dtype, "model config dtype")
 }
 
 fn validate_requested_dtype(requested: Option<DType>) -> Result<()> {
     requested
-        .map(|dtype| validate_supported_dtype(dtype, "requested dtype"))
+        .map(|dtype| super::validate_model_dtype(dtype, "requested dtype"))
         .transpose()
         .map(|_| ())
-}
-
-fn validate_supported_dtype(dtype: DType, origin: &str) -> Result<DType> {
-    if matches!(dtype, DType::BF16 | DType::F16 | DType::F32) {
-        Ok(dtype)
-    } else {
-        bail!(
-            "{origin} {dtype:?} is unsupported; supported model and KV-cache dtypes: BF16, F16, F32"
-        )
-    }
 }
 
 fn collect_snapshot_files(root: &Path) -> Result<BTreeSet<String>> {
@@ -947,7 +868,7 @@ mod tests {
         let message = format!("{error:#}");
 
         assert!(message.contains("requested dtype F64"), "got: {message}");
-        assert!(message.contains("BF16, F16, F32"), "got: {message}");
+        assert!(message.contains("BF16, F16"), "got: {message}");
     }
 
     #[test]
@@ -1082,12 +1003,12 @@ mod tests {
                 repo: "org/model".to_string(),
                 revision: None,
             },
-            Some(DType::F64),
+            Some(DType::F32),
             &mut hub,
         )
         .unwrap_err();
 
-        assert!(format!("{error:#}").contains("requested dtype F64"));
+        assert!(format!("{error:#}").contains("requested dtype F32"));
         assert!(
             hub.get_calls.is_empty(),
             "unsupported dtype downloaded artifacts"

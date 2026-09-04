@@ -89,7 +89,7 @@ impl Scheduler {
     }
 
     /// Create a scheduler whose stop condition uses model-resolved EOS ids.
-    pub fn new_with_eos_token_ids(
+    pub(crate) fn new_with_eos_token_ids(
         max_num_batched_tokens: usize,
         max_num_seqs: usize,
         gpu_memory_utilization: f32,

@@ -4,54 +4,75 @@ use serde::Deserialize;
 
 use crate::attention::AttentionContext;
 use crate::config::Source;
-use crate::model_identity::ResolvedModel;
+use crate::loader::ResolvedModel;
 
 use crate::causal_lm::CausalLM;
 
-pub(crate) type ModelFactory =
-    fn(resolved: &ResolvedModel, device: &Device, max_model_len: usize) -> Result<BuiltModel>;
+pub type ModelFactory = fn(
+    config_json: &[u8],
+    source: Source,
+    device: &Device,
+    max_model_len: usize,
+) -> Result<BuiltModel>;
 
 pub struct ModelEntry {
     pub arch: &'static str,
-    pub(crate) factory: ModelFactory,
+    pub factory: ModelFactory,
 }
 
 inventory::collect!(ModelEntry);
+
+pub(crate) type ResolvedModelFactory =
+    fn(resolved: &ResolvedModel, device: &Device, max_model_len: usize) -> Result<BuiltModel>;
+
+pub(crate) struct ResolvedModelEntry {
+    pub(crate) arch: &'static str,
+    pub(crate) factory: ResolvedModelFactory,
+}
+
+inventory::collect!(ResolvedModelEntry);
 
 pub struct BuiltModel {
     pub model: Box<dyn CausalLM>,
     pub attn_ctx: AttentionContext,
 }
 
-pub fn build(source: Source, device: &Device, max_model_len: usize) -> Result<BuiltModel> {
-    let resolved = ResolvedModel::resolve(source, None)?;
-    build_resolved(&resolved, device, max_model_len)
+/// Query the factory for an already-resolved model without performing I/O.
+pub(crate) fn resolved_factory(config_json: &[u8]) -> Result<ResolvedModelFactory> {
+    let arch = read_architecture(config_json)?;
+    inventory::iter::<ResolvedModelEntry>()
+        .find(|entry| entry.arch == arch)
+        .map(|entry| entry.factory)
+        .ok_or_else(|| {
+            unknown_architecture(
+                &arch,
+                inventory::iter::<ResolvedModelEntry>().map(|entry| entry.arch),
+            )
+        })
 }
 
-pub(crate) fn build_resolved(
-    resolved: &ResolvedModel,
-    device: &Device,
-    max_model_len: usize,
-) -> Result<BuiltModel> {
-    let config_bytes = resolved.config_json();
+fn read_architecture(config_json: &[u8]) -> Result<String> {
     #[derive(Deserialize)]
     struct ArchCheck {
         architectures: Vec<String>,
     }
-    let parsed: ArchCheck = serde_json::from_slice(config_bytes)
-        .map_err(|e| anyhow!("parsing config.json architectures: {e}"))?;
-    let arch = parsed
+
+    let parsed: ArchCheck = serde_json::from_slice(config_json)
+        .map_err(|error| anyhow!("parsing config.json architectures: {error}"))?;
+    parsed
         .architectures
-        .first()
-        .ok_or_else(|| anyhow!("config.json has no `architectures` field"))?;
-    let entry = inventory::iter::<ModelEntry>()
-        .find(|e| e.arch == arch)
-        .ok_or_else(|| {
-            let supported: Vec<&str> = inventory::iter::<ModelEntry>().map(|e| e.arch).collect();
-            anyhow!(
-                "unknown architecture `{arch}`; supported: [{}]",
-                supported.join(", ")
-            )
-        })?;
-    (entry.factory)(resolved, device, max_model_len)
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("config.json has no `architectures` field"))
+}
+
+fn unknown_architecture<'a>(
+    architecture: &str,
+    supported: impl Iterator<Item = &'a str>,
+) -> anyhow::Error {
+    let supported: Vec<&str> = supported.collect();
+    anyhow!(
+        "unknown architecture `{architecture}`; supported: [{}]",
+        supported.join(", ")
+    )
 }
