@@ -7,7 +7,9 @@ use candle_core::{Device, IndexOp, Result as CandleResult, Tensor};
 use candle_nn::{Module, VarBuilder};
 use serde::Deserialize;
 
-use crate::attention::{build_prefill_metadata, AttentionContext, PagedKVCache};
+use crate::attention::{
+    build_prefill_metadata, AttentionContext, PagedKVCache, PagedKVCacheGeometry,
+};
 use crate::layers::activation::silu_and_mul;
 use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
@@ -353,16 +355,14 @@ impl Qwen3ForCausalLM {
                 config.max_position_embeddings
             );
         }
-        let paged_kv = Arc::new(Mutex::new(PagedKVCache::new(
-            config.num_hidden_layers,
-            100,
-            256,
-            config.num_key_value_heads,
-            config.head_dim(),
+        let paged_kv = Arc::new(Mutex::new(PagedKVCache::deferred(PagedKVCacheGeometry {
+            num_layers: config.num_hidden_layers,
+            block_size: 256,
+            num_kv_heads: config.num_key_value_heads,
+            head_dim: config.head_dim(),
             dtype,
-            device,
-        )?));
-        let attn_meta = Arc::new(Mutex::new(build_prefill_metadata(&[1], &[1], &[0])));
+        })));
+        let attn_meta = Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[])));
         let attn_ctx = AttentionContext {
             paged_kv,
             attn_meta,
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_dtype_reaches_model_and_initial_cache_construction() {
+    fn resolved_dtype_reaches_model_without_allocating_a_cache_buffer() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("config.json"),
@@ -493,5 +493,16 @@ mod tests {
         let cache = built.attn_ctx.paged_kv.lock().unwrap();
 
         assert_eq!(cache.dtype(), candle_core::DType::F16);
+        assert_eq!(cache.num_blocks(), 0);
+        assert!(cache
+            .k_cache(0)
+            .unwrap_err()
+            .to_string()
+            .contains("not allocated"));
+        drop(cache);
+        assert_eq!(
+            *built.attn_ctx.attn_meta.lock().unwrap(),
+            build_prefill_metadata(&[], &[], &[])
+        );
     }
 }

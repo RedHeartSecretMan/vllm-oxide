@@ -4,6 +4,8 @@
 //! `loader`, `sampler`, and `attention`. Port of nano-vllm `llm.py` /
 //! `llm_engine.py`.
 
+mod initialization;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -23,6 +25,8 @@ use crate::engine::{
 use crate::loader::model_identity::ResolvedModel;
 use crate::models::registry::{resolved_factory, BuiltModel};
 use crate::sampler::{Sampler, SamplingParams};
+
+use initialization::{allocate_kv_cache, warmup_model};
 
 /// Construction-time configuration for `LLM::new`.
 /// Mirrors nano-vllm's `Config` with v0.1 scope.
@@ -77,7 +81,14 @@ pub struct LLM {
 /// Build a registered model from one `ResolvedModel`.
 pub fn build_model(source: Source, device: &Device, max_model_len: usize) -> Result<BuiltModel> {
     let resolved_model = ResolvedModel::resolve(source, None)?;
-    build_resolved_model(&resolved_model, device, max_model_len)
+    let built = build_resolved_model(&resolved_model, device, max_model_len)?;
+    built
+        .attn_ctx
+        .paged_kv
+        .lock()
+        .map_err(|error| anyhow!("paged_kv lock: {error}"))?
+        .allocate(100, device)?;
+    Ok(built)
 }
 
 fn build_resolved_model(
@@ -93,10 +104,11 @@ impl LLM {
     /// Build the full inference stack — model, tokenizer, engine — from a
     /// model source (`Local` directory or `Hub` repo) and `EngineOptions`.
     ///
-    /// Side effects: resolves architecture via registry, loads weights, runs
-    /// a warmup prefill at `max_num_batched_tokens` to account for peak
-    /// activation memory, sizes the KV cache pool from remaining free GPU
-    /// memory, validates the CUDA device compute capability (≥ sm_89).
+    /// Side effects: resolves architecture via registry, loads weights, sizes
+    /// and allocates one KV cache from resolved geometry and remaining free GPU
+    /// memory, runs a representative prefill + logits warmup, and validates the
+    /// CUDA device compute capability (≥ sm_89). No request is admitted until
+    /// all initialization work succeeds.
     pub fn new(model: impl Into<Source>, options: EngineOptions) -> Result<Self> {
         let source: Source = model.into();
 
@@ -137,37 +149,31 @@ impl LLM {
             "validated resolved model artifact contract"
         );
 
-        let BuiltModel { model, attn_ctx } =
-            build_resolved_model(&resolved_model, &device, options.max_model_len)?;
+        let BuiltModel {
+            mut model,
+            attn_ctx,
+        } = build_resolved_model(&resolved_model, &device, options.max_model_len)?;
 
-        #[cfg(feature = "cuda")]
-        let num_gpu_blocks =
-            warmup_and_size_kv_pool(&device, &dtype, &options, &attn_ctx.paged_kv)?;
-        #[cfg(not(feature = "cuda"))]
-        let num_gpu_blocks = warmup_and_size_kv_pool(&device, &dtype, &options, &attn_ctx.paged_kv);
+        let cache_allocation = allocate_kv_cache(
+            &attn_ctx.paged_kv,
+            &device,
+            options.gpu_memory_utilization,
+            options.max_model_len,
+        )?;
+        let num_gpu_blocks = cache_allocation.num_blocks;
 
-        tracing::info!(num_gpu_blocks, "sized KV cache pool after warmup");
+        tracing::info!(
+            free_mb = cache_allocation.free_bytes / (1024 * 1024),
+            total_mb = cache_allocation.total_bytes / (1024 * 1024),
+            kv_pool_mb = cache_allocation.pool_bytes / (1024 * 1024),
+            bytes_per_block = cache_allocation.bytes_per_block,
+            num_gpu_blocks,
+            "allocated KV cache pool"
+        );
 
-        {
-            let mut lock = attn_ctx
-                .paged_kv
-                .lock()
-                .map_err(|e| anyhow!("paged_kv lock: {e}"))?;
-            let old_shape = lock.buffer_shape();
-            let num_layers = old_shape[1];
-            let block_size = old_shape[3];
-            let num_kv_heads = old_shape[4];
-            let head_dim = old_shape[5];
-            *lock = PagedKVCache::new(
-                num_layers,
-                num_gpu_blocks,
-                block_size,
-                num_kv_heads,
-                head_dim,
-                dtype,
-                &device,
-            )?;
-        }
+        let warmup_tokens = options.max_num_batched_tokens.min(options.max_model_len);
+        tracing::info!(warmup_tokens, "running representative model warmup");
+        warmup_model(model.as_mut(), &attn_ctx, &device, warmup_tokens)?;
 
         let scheduler = Scheduler::new_with_eos_token_ids(
             options.max_num_batched_tokens,
@@ -448,94 +454,6 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
 #[allow(dead_code)]
 fn validate_sm_version(_device: &Device) {}
 
-/// Run a dummy prefill at `max_num_batched_tokens` to allocate peak activation
-/// memory, then measure free GPU memory to compute the KV cache pool size in
-/// blocks. Returns the number of blocks to allocate.
-///
-/// Matches nano-vllm's warmup logic: the warmup forward pass ensures peak
-/// activation memory is included in the memory budget before sizing the KV pool.
-#[cfg(feature = "cuda")]
-fn warmup_and_size_kv_pool(
-    device: &Device,
-    dtype: &DType,
-    options: &EngineOptions,
-    paged_kv: &Arc<Mutex<PagedKVCache>>,
-) -> Result<usize> {
-    let warmup_tokens = options.max_num_batched_tokens.min(16384);
-    tracing::info!(warmup_tokens, "running warmup prefill");
-
-    device.synchronize().ok();
-    let (free_bytes, total_bytes) = cuda_mem_info()?;
-
-    let kv_pool_bytes = (free_bytes as f64 * options.gpu_memory_utilization as f64) as usize;
-
-    let dtype_bytes = match dtype {
-        DType::BF16 | DType::F16 => 2usize,
-        DType::F32 => 4usize,
-        DType::F64 => 8usize,
-        _ => 2usize,
-    };
-
-    let lock = paged_kv.lock().map_err(|e| anyhow!("paged_kv lock: {e}"))?;
-    let shape = lock.buffer_shape();
-    let num_layers = shape[1];
-    let block_size = shape[3];
-    let num_kv_heads = shape[4];
-    let head_dim = shape[5];
-    drop(lock);
-
-    let bytes_per_block = 2 * num_layers * block_size * num_kv_heads * head_dim * dtype_bytes;
-    let num_blocks = kv_pool_bytes / bytes_per_block;
-
-    tracing::info!(
-        free_mb = free_bytes / (1024 * 1024),
-        total_mb = total_bytes / (1024 * 1024),
-        kv_pool_mb = kv_pool_bytes / (1024 * 1024),
-        bytes_per_block,
-        num_blocks,
-        "KV pool sizing"
-    );
-
-    if num_blocks < 1 {
-        bail!(
-            "Insufficient GPU memory for KV cache pool. Free: {} MB, \
-             estimated bytes per block: {} (total needed for 1 block). \
-             Try reducing `max_model_len` or `gpu_memory_utilization`.",
-            free_bytes / (1024 * 1024),
-            bytes_per_block,
-        );
-    }
-
-    Ok(num_blocks)
-}
-
-/// CPU-only stub: no GPU memory measurement possible; allocates a minimal
-/// KV cache pool (100 blocks) so the engine can initialize and tests pass.
-#[cfg(not(feature = "cuda"))]
-fn warmup_and_size_kv_pool(
-    _device: &Device,
-    _dtype: &DType,
-    _options: &EngineOptions,
-    _paged_kv: &Arc<Mutex<PagedKVCache>>,
-) -> usize {
-    tracing::warn!("CPU-only mode: allocating minimal KV cache pool (100 blocks)");
-    100
-}
-
-/// Query CUDA free and total memory (in bytes) via the CUDA driver API.
-#[cfg(feature = "cuda")]
-#[allow(unsafe_code)]
-fn cuda_mem_info() -> Result<(usize, usize)> {
-    use candle_core::cuda::cudarc::driver::sys;
-    let mut free: usize = 0;
-    let mut total: usize = 0;
-    let result = unsafe { sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize) };
-    if result != sys::CUresult::CUDA_SUCCESS {
-        bail!("cuMemGetInfo_v2 failed with error code {}", result as i32);
-    }
-    Ok((free, total))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -583,7 +501,7 @@ mod tests {
         }
     }
 
-    fn test_llm_with_forward_failure(fail_forward: bool) -> LLM {
+    fn test_llm_with_configuration(fail_forward: bool, warmup_before_engine: bool) -> LLM {
         let device = Device::Cpu;
         let paged_kv = Arc::new(Mutex::new(
             PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
@@ -594,13 +512,17 @@ mod tests {
         };
         let scheduler = Scheduler::new(16, 16, 0.9);
         let kv_cache_manager = KvCacheManager::new(32, BLOCK_SIZE, attn_ctx.paged_kv.clone());
+        let mut model: Box<dyn CausalLM> = Box::new(MockModel {
+            device: device.clone(),
+            fail_forward,
+        });
+        if warmup_before_engine {
+            warmup_model(model.as_mut(), &attn_ctx, &device, 4).unwrap();
+        }
         let engine = EngineCore::new(
             scheduler,
             kv_cache_manager,
-            Box::new(MockModel {
-                device: device.clone(),
-                fail_forward,
-            }),
+            model,
             Sampler::new_with_seed(0),
             attn_ctx,
             device.clone(),
@@ -637,8 +559,16 @@ mod tests {
         }
     }
 
+    fn test_llm_with_forward_failure(fail_forward: bool) -> LLM {
+        test_llm_with_configuration(fail_forward, false)
+    }
+
     fn test_llm() -> LLM {
         test_llm_with_forward_failure(false)
+    }
+
+    fn test_llm_after_warmup() -> LLM {
+        test_llm_with_configuration(false, true)
     }
 
     mod engine_options {
@@ -670,6 +600,32 @@ mod tests {
             assert_eq!(opts.max_model_len, 2048);
             assert_eq!(opts.gpu_memory_utilization, 0.5);
             assert_eq!(opts.dtype, Some(DType::F16));
+        }
+    }
+
+    mod model_warmup {
+        use super::*;
+
+        #[test]
+        fn first_generation_matches_the_non_mutating_reference_scenario() {
+            let mut warmed = test_llm_after_warmup();
+            let mut reference = test_llm();
+            let prompts = [Prompt::TokenIds(vec![1, 2, 3])];
+            let params = [SamplingParams {
+                temperature: 0.0,
+                max_tokens: 3,
+                ignore_eos: true,
+                ..SamplingParams::default()
+            }];
+
+            let warmed_output = warmed.generate(&prompts, &params).unwrap();
+            let reference_output = reference.generate(&prompts, &params).unwrap();
+
+            assert_eq!(warmed_output.len(), 1);
+            assert_eq!(warmed_output[0].request_id, reference_output[0].request_id);
+            assert_eq!(warmed_output[0].token_ids, reference_output[0].token_ids);
+            assert_eq!(warmed_output[0].text, reference_output[0].text);
+            assert_eq!(warmed_output[0].finished, reference_output[0].finished);
         }
     }
 

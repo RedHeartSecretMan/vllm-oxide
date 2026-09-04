@@ -24,32 +24,43 @@ pub use metadata::{build_decode_metadata, build_prefill_metadata, AttnMetadata};
 
 /// Shared attention state crossing the `engine ↔ model` seam.
 ///
-/// `paged_kv` and `attn_meta` are always created together in a model's `build`
-/// factory and consumed together by every attention layer and by `EngineCore`.
-/// Bundling them names the seam and replaces an always-adjacent parameter pair
-/// (the direct cause of the `too_many_arguments` lints in the model's `from_vb`
-/// chain). Cloning is cheap (bumps `Arc` refcounts); all clones share the same
-/// underlying `Mutex`es, so resizing the `PagedKVCache` in place is visible to
-/// every holder.
+/// `paged_kv` and `attn_meta` are created together in a model's `build` factory
+/// and consumed together by every attention layer and by `EngineCore`. The
+/// cache initially carries only immutable geometry; the composition root binds
+/// its backing tensor exactly once after device-memory sizing. Bundling both
+/// values names the seam and replaces an always-adjacent parameter pair (the
+/// direct cause of the `too_many_arguments` lints in the model's `from_vb`
+/// chain). Cloning is cheap and every clone observes the same one-time
+/// allocation and per-step metadata.
 #[derive(Clone)]
 pub struct AttentionContext {
     pub paged_kv: Arc<Mutex<PagedKVCache>>,
     pub attn_meta: Arc<Mutex<AttnMetadata>>,
 }
 
-/// Physical GPU buffer for the paged KV cache.
+/// Immutable dimensions and dtype needed to size a paged KV cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PagedKVCacheGeometry {
+    pub(crate) num_layers: usize,
+    pub(crate) block_size: usize,
+    pub(crate) num_kv_heads: usize,
+    pub(crate) head_dim: usize,
+    pub(crate) dtype: DType,
+}
+
+/// Model-owned paged KV-cache geometry and its one-time physical GPU buffer.
 ///
 /// Shaped `[2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]`
 /// (nano-vllm parity layout). The leading `2` is the K/V stack: dim 0 = keys,
 /// dim 1 = values.
 ///
-/// Shared across decoder layers via `Arc<Mutex<PagedKVCache>>` (constructed by
-/// `EngineCore`, cloned into each `Qwen3Attention`).
+/// The model factory creates the deferred owner without allocating a tensor.
+/// `LLM` allocates the final backing buffer once, then shares it across decoder
+/// layers and `EngineCore` through `Arc<Mutex<PagedKVCache>>`.
 pub struct PagedKVCache {
-    buffer: Tensor,
-    num_layers: usize,
+    buffer: Option<Tensor>,
+    geometry: PagedKVCacheGeometry,
     num_blocks: usize,
-    block_size: usize,
 }
 
 impl PagedKVCache {
@@ -63,25 +74,62 @@ impl PagedKVCache {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
-        let shape =
-            kv_cache_layout_shape(num_layers, num_blocks, block_size, num_kv_heads, head_dim);
-        let buffer = Tensor::zeros(&shape, dtype, device)?;
-        Ok(Self {
-            buffer,
+        let mut cache = Self::deferred(PagedKVCacheGeometry {
             num_layers,
-            num_blocks,
             block_size,
+            num_kv_heads,
+            head_dim,
+            dtype,
+        });
+        cache.allocate(num_blocks, device)?;
+        Ok(cache)
+    }
+
+    pub(crate) fn deferred(geometry: PagedKVCacheGeometry) -> Self {
+        Self {
+            buffer: None,
+            geometry,
+            num_blocks: 0,
+        }
+    }
+
+    pub(crate) fn allocate(&mut self, num_blocks: usize, device: &Device) -> Result<()> {
+        if self.buffer.is_some() {
+            candle_core::bail!(
+                "PagedKVCache backing buffer is already allocated with {} blocks",
+                self.num_blocks
+            );
+        }
+        if num_blocks == 0 {
+            candle_core::bail!("PagedKVCache allocation requires at least one block");
+        }
+        let shape = kv_cache_layout_shape(
+            self.geometry.num_layers,
+            num_blocks,
+            self.geometry.block_size,
+            self.geometry.num_kv_heads,
+            self.geometry.head_dim,
+        );
+        let buffer = Tensor::zeros(&shape, self.geometry.dtype, device)?;
+        self.buffer = Some(buffer);
+        self.num_blocks = num_blocks;
+        Ok(())
+    }
+
+    fn buffer(&self) -> Result<&Tensor> {
+        self.buffer.as_ref().ok_or_else(|| {
+            candle_core::Error::Msg("PagedKVCache backing buffer is not allocated".to_string())
         })
     }
 
     /// Per-layer K cache view: `[num_blocks, block_size, num_kv_heads, head_dim]`.
     pub fn k_cache(&self, layer_id: usize) -> Result<Tensor> {
-        self.buffer.i((0, layer_id))
+        self.buffer()?.i((0, layer_id))
     }
 
     /// Per-layer V cache view: `[num_blocks, block_size, num_kv_heads, head_dim]`.
     pub fn v_cache(&self, layer_id: usize) -> Result<Tensor> {
-        self.buffer.i((1, layer_id))
+        self.buffer()?.i((1, layer_id))
     }
 
     /// Write per-step K/V into the paged cache via the custom CUDA kernel.
@@ -100,19 +148,35 @@ impl PagedKVCache {
 
     /// Return the full buffer shape `[2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]`.
     pub fn buffer_shape(&self) -> Vec<usize> {
-        self.buffer.shape().dims().to_vec()
+        kv_cache_layout_shape(
+            self.geometry.num_layers,
+            self.num_blocks,
+            self.geometry.block_size,
+            self.geometry.num_kv_heads,
+            self.geometry.head_dim,
+        )
+        .to_vec()
     }
 
     /// Storage dtype shared by every layer in this cache.
     pub(crate) fn dtype(&self) -> DType {
-        self.buffer.dtype()
+        self.geometry.dtype
     }
 
     pub fn num_blocks(&self) -> usize {
         self.num_blocks
     }
     pub fn block_size(&self) -> usize {
-        self.block_size
+        self.geometry.block_size
+    }
+
+    pub(crate) fn geometry(&self) -> PagedKVCacheGeometry {
+        self.geometry
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocation_count(&self) -> usize {
+        usize::from(self.buffer.is_some())
     }
 }
 
@@ -127,7 +191,7 @@ mod tests {
     fn allocates_correct_shape() {
         let dev = Device::Cpu;
         let cache = PagedKVCache::new(28, 100, 256, 4, 128, DType::BF16, &dev).unwrap();
-        assert_eq!(cache.buffer.shape().dims(), &[2, 28, 100, 256, 4, 128]);
+        assert_eq!(cache.buffer_shape(), vec![2, 28, 100, 256, 4, 128]);
     }
 
     #[test]
@@ -152,6 +216,28 @@ mod tests {
         let cache = PagedKVCache::new(1, 42, 256, 1, 1, DType::F32, &dev).unwrap();
         assert_eq!(cache.block_size(), 256);
         assert_eq!(cache.num_blocks(), 42);
+    }
+
+    #[test]
+    fn deferred_cache_allocates_its_backing_buffer_once() {
+        let dev = Device::Cpu;
+        let mut cache = PagedKVCache::deferred(PagedKVCacheGeometry {
+            num_layers: 2,
+            block_size: 4,
+            num_kv_heads: 2,
+            head_dim: 8,
+            dtype: DType::F16,
+        });
+
+        assert_eq!(cache.allocation_count(), 0);
+        cache.allocate(4, &dev).unwrap();
+        assert_eq!(cache.allocation_count(), 1);
+        assert_eq!(cache.buffer_shape(), vec![2, 2, 4, 4, 2, 8]);
+
+        let error = cache.allocate(8, &dev).unwrap_err();
+        assert!(error.to_string().contains("already allocated"));
+        assert_eq!(cache.allocation_count(), 1);
+        assert_eq!(cache.num_blocks(), 4);
     }
 }
 
