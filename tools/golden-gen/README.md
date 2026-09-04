@@ -4,16 +4,16 @@
 > release to produce golden fixtures. It is NOT run in continuous integration and
 > is NOT a dependency of the vllm-oxide Rust crates. See issue #14.
 
-This harness generates **golden fixture files** for the vllm-oxide project by running
-two independent oracle LLM engines — **HuggingFace Transformers** (reference in FP32)
-and **vLLM** (BF16 baseline) — on a fixed set of prompts. Cross-validation between
-the two oracles calibrates numerical tolerances so the Rust port can verify correctness
-against known-good outputs without needing a GPU for every test.
+This harness generates **golden fixture files** for the vllm-oxide project with
+**HuggingFace Transformers** BF16 SDPA as the authoritative Reference oracle and
+**vLLM** BF16 as the Baseline oracle. Transformers supplies expected correctness;
+vLLM supplies same-prefix calibration observations and can never override a
+reference failure or select acceptance thresholds automatically.
 
 ## Prerequisites
 
 - Linux with an NVIDIA GPU (sm_89+; a single A10 is sufficient)
-- Python 3.11
+- Python 3.12
 - `uv` package manager (see [docs.astral.sh/uv](https://docs.astral.sh/uv/))
 - ~6 GB free disk space for model weights and oracle caches
 
@@ -178,16 +178,11 @@ the lm_head output directly (not log-softmax). When `logprobs=-1`, each step ret
 the full vocabulary. The `logprob` field on the `Logprob` object actually holds the raw
 logit value when in raw_logits mode.
 
-### Prompt canonical_05 (batch)
+### Batch prompts
 
-The single PromptSpec with `\n---\n`-separated sub-prompts is treated differently by
-each oracle:
-- **vLLM**: Natively handles 4 separate prompts in a single continuous-batching step.
-- **HF Transformers**: Processes all text as one concatenated sequence — the output is
-  one long sequence covering all 4 segments.
-
-Cross-validation on canonical_05 will show deviations between HF and vLLM. The tolerance
-calibration accounts for this.
+Batch prompt specifications are expanded into concrete fixture cases and run through
+both oracle adapters. Any vLLM deviation is retained only as Baseline oracle
+calibration evidence; the Transformers output remains the Reference oracle target.
 
 ## Upload Release Asset
 
