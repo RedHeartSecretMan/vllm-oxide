@@ -11,6 +11,51 @@ from golden_gen.oracles.base import Oracle, OracleResult
 from golden_gen.schema import FixtureMetadata, OracleName, PromptCategory, PromptSpec
 
 
+def _validate_oracle_result(
+    result: OracleResult,
+    category: PromptCategory,
+    *,
+    oracle_name: OracleName,
+    prompt_id: str,
+) -> None:
+    """Reject internally inconsistent oracle output before writing any fixture."""
+    token_ids = result.token_ids
+    valid_tokens = (
+        token_ids.ndim == 1
+        and token_ids.dtype == np.int64
+        and len(token_ids) > 0
+        and bool(np.all((token_ids >= 0) & (token_ids < VOCAB_SIZE)))
+        and result.n_prompt_tokens > 0
+    )
+    if not valid_tokens:
+        raise ValueError(f"invalid {category} oracle result for {prompt_id}.{oracle_name}: tokens")
+
+    n_tokens = len(token_ids)
+    if category == "canonical":
+        valid_shape = (
+            result.logits_per_step.shape == (n_tokens, VOCAB_SIZE)
+            and result.logits_per_step.dtype == np.float32
+            and result.top5_indices.shape == (0, 5)
+            and result.top5_indices.dtype == np.int64
+            and result.top5_logits.shape == (0, 5)
+            and result.top5_logits.dtype == np.float32
+        )
+    else:
+        valid_shape = (
+            result.logits_per_step.shape == (0, 0)
+            and result.logits_per_step.dtype == np.float32
+            and result.top5_indices.shape == (n_tokens, 5)
+            and result.top5_indices.dtype == np.int64
+            and result.top5_logits.shape == (n_tokens, 5)
+            and result.top5_logits.dtype == np.float32
+            and bool(np.all((result.top5_indices >= 0) & (result.top5_indices < VOCAB_SIZE)))
+        )
+    if not valid_shape:
+        raise ValueError(
+            f"invalid {category} oracle result for {prompt_id}.{oracle_name}: tensor shape"
+        )
+
+
 def _save_fixture(
     result: OracleResult,
     prompt_id: str,
@@ -103,6 +148,13 @@ def run_all(
                 raise ValueError(
                     f"oracle {oname} returned {len(results)} results for {prompt.id}; "
                     f"expected {expected_results}"
+                )
+            for result in results:
+                _validate_oracle_result(
+                    result,
+                    prompt.category,
+                    oracle_name=oname,
+                    prompt_id=prompt.id,
                 )
 
             if prompt.is_batch:

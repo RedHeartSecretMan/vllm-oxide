@@ -23,9 +23,7 @@ from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
 
 
-def _extract_full_logits(
-    completion: Any, n: int, vocab_size: int
-) -> NDArray[np.float32]:
+def _extract_full_logits(completion: Any, n: int, vocab_size: int) -> NDArray[np.float32]:
     """Extract full logits from a vLLM completion's logprobs.
 
     Args:
@@ -36,6 +34,12 @@ def _extract_full_logits(
     Returns:
         Array of shape ``(n, vocab_size)`` in float32.
     """
+    if completion.logprobs is None or len(completion.logprobs) != n:
+        actual = 0 if completion.logprobs is None else len(completion.logprobs)
+        raise RuntimeError(
+            f"vLLM returned {actual} logprob rows for {n} generated tokens; "
+            "aborting to prevent zero-padded golden logits"
+        )
     logits = np.zeros((n, vocab_size), dtype=np.float32)
     for t, step_dict in enumerate(completion.logprobs):
         if len(step_dict) != vocab_size:
@@ -108,7 +112,15 @@ class VllmOracle:
             n = len(token_ids)
             top5_indices = np.zeros((n, TOP_K_REGRESSION), dtype=np.int64)
             top5_logits = np.zeros((n, TOP_K_REGRESSION), dtype=np.float32)
+            if completion.logprobs is None or len(completion.logprobs) != n:
+                actual = 0 if completion.logprobs is None else len(completion.logprobs)
+                raise RuntimeError(f"vLLM returned {actual} logprob rows for {n} generated tokens")
             for t, step_dict in enumerate(completion.logprobs):
+                if len(step_dict) < TOP_K_REGRESSION:
+                    raise RuntimeError(
+                        f"vLLM returned only {len(step_dict)} regression logits at step {t}; "
+                        f"expected at least {TOP_K_REGRESSION}"
+                    )
                 topk = sorted(step_dict.items(), key=lambda x: x[1].logprob, reverse=True)[
                     :TOP_K_REGRESSION
                 ]

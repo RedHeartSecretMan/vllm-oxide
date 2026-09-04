@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import golden_gen.cli as cli
+from golden_gen.config import VOCAB_SIZE
 from golden_gen.oracles.base import OracleResult
 
 
@@ -286,7 +287,7 @@ class TestCLI:
             if prompt.category == "canonical":
                 result = OracleResult.for_canonical(
                     token_ids=np.array([1], dtype=np.int64),
-                    logits_per_step=np.zeros((1, 1), dtype=np.float32),
+                    logits_per_step=np.zeros((1, VOCAB_SIZE), dtype=np.float32),
                     n_prompt_tokens=1,
                 )
             else:
@@ -321,7 +322,7 @@ class TestCLI:
             if prompt.category == "canonical":
                 result = OracleResult.for_canonical(
                     token_ids=np.array([1], dtype=np.int64),
-                    logits_per_step=np.zeros((1, 1), dtype=np.float32),
+                    logits_per_step=np.zeros((1, VOCAB_SIZE), dtype=np.float32),
                     n_prompt_tokens=1,
                 )
             else:

@@ -17,7 +17,7 @@ use vllm_oxide::{EngineOptions, Prompt, Source, LLM};
 use crate::l1::{compare_l1, compare_l1_regression};
 use crate::l2::compare_l2;
 use crate::l3::compare_l3;
-use crate::lifecycle::{preflight, ReferenceCase};
+use crate::lifecycle::{preflight, LifecyclePreflight, ReferenceCase};
 use crate::prompts::PromptEntry;
 use crate::report::ComparisonReport;
 use crate::types::{Manifest, PromptCategory, RequiredComparison};
@@ -47,6 +47,19 @@ pub fn run_comparison(
     opts: &DriverOptions,
 ) -> Result<ComparisonReport> {
     let prepared = preflight(manifest, fixture_dir, prompts);
+    Ok(run_prepared_comparisons(prepared, opts, |case| {
+        compare_reference_case(case, manifest, fixture_dir, model_path, opts)
+    }))
+}
+
+pub(crate) fn run_prepared_comparisons<F>(
+    prepared: LifecyclePreflight,
+    opts: &DriverOptions,
+    mut compare: F,
+) -> ComparisonReport
+where
+    F: FnMut(&ReferenceCase) -> Result<CaseComparison>,
+{
     let mut tracker = prepared.tracker;
     let mut report = ComparisonReport {
         failures: prepared.errors,
@@ -61,7 +74,7 @@ pub fn run_comparison(
             tracker.record_skipped(&fixture_id);
             continue;
         }
-        match compare_reference_case(&case, manifest, fixture_dir, model_path, opts) {
+        match compare(&case) {
             Ok(comparison) => {
                 let passed = comparison.l1.as_ref().map_or(true, |result| result.passed)
                     && comparison.l2.as_ref().map_or(true, |result| result.passed);
@@ -89,13 +102,13 @@ pub fn run_comparison(
     }
 
     report.lifecycle = tracker.totals();
-    Ok(report)
+    report
 }
 
-struct CaseComparison {
-    l1: Option<crate::l1::L1Result>,
-    l2: Option<crate::l2::L2Result>,
-    l3: Option<crate::l3::L3Result>,
+pub(crate) struct CaseComparison {
+    pub(crate) l1: Option<crate::l1::L1Result>,
+    pub(crate) l2: Option<crate::l2::L2Result>,
+    pub(crate) l3: Option<crate::l3::L3Result>,
 }
 
 fn required_layers_enabled(required: &RequiredComparison, opts: &DriverOptions) -> bool {

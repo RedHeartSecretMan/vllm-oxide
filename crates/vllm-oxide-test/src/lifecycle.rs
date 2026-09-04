@@ -338,10 +338,14 @@ mod tests {
     use serde_json::json;
 
     use super::preflight;
+    use crate::driver::{run_prepared_comparisons, CaseComparison, DriverOptions};
+    use crate::l1::L1Result;
+    use crate::l2::L2Result;
     use crate::manifest::sha256_hex;
     use crate::prompts::PromptEntry;
     use crate::types::{
-        FixtureFamily, FixtureMetadata, LogitsDtype, Manifest, OracleName, PromptCategory,
+        ExpectedFixture, FixtureFamily, FixtureMetadata, LogitsDtype, Manifest, OracleName,
+        OracleRole, PromptCategory, RequiredComparison,
     };
 
     fn test_manifest() -> Manifest {
@@ -437,9 +441,14 @@ mod tests {
         sha256_hex(&std::fs::read(path).unwrap())
     }
 
-    fn metadata(oracle: OracleName, filename: &str, sha256: String) -> FixtureMetadata {
+    fn canonical_metadata(
+        prompt_id: &str,
+        oracle: OracleName,
+        filename: &str,
+        sha256: String,
+    ) -> FixtureMetadata {
         FixtureMetadata {
-            prompt_id: "canonical_01".to_string(),
+            prompt_id: prompt_id.to_string(),
             category: PromptCategory::Canonical,
             oracle,
             num_tokens: 1,
@@ -447,6 +456,106 @@ mod tests {
             logits_shape: (1, 3),
             sha256,
             filename: filename.to_string(),
+        }
+    }
+
+    fn write_regression_fixture(path: &std::path::Path) -> String {
+        let token_bytes = 1_i64.to_ne_bytes();
+        let prompt_bytes = 1_i64.to_ne_bytes();
+        let indices_bytes: Vec<u8> = [0_i64, 1, 2, 0, 1]
+            .into_iter()
+            .flat_map(i64::to_ne_bytes)
+            .collect();
+        let logits_bytes: Vec<u8> = [1.0_f32, 0.8, 0.6, 0.4, 0.2]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect();
+        let tensors = vec![
+            (
+                "token_ids".to_string(),
+                safetensors::tensor::TensorView::new(
+                    safetensors::Dtype::I64,
+                    vec![1],
+                    &token_bytes,
+                )
+                .unwrap(),
+            ),
+            (
+                "n_prompt_tokens".to_string(),
+                safetensors::tensor::TensorView::new(
+                    safetensors::Dtype::I64,
+                    vec![],
+                    &prompt_bytes,
+                )
+                .unwrap(),
+            ),
+            (
+                "top5_indices".to_string(),
+                safetensors::tensor::TensorView::new(
+                    safetensors::Dtype::I64,
+                    vec![1, 5],
+                    &indices_bytes,
+                )
+                .unwrap(),
+            ),
+            (
+                "top5_logits".to_string(),
+                safetensors::tensor::TensorView::new(
+                    safetensors::Dtype::F32,
+                    vec![1, 5],
+                    &logits_bytes,
+                )
+                .unwrap(),
+            ),
+        ];
+        safetensors::tensor::serialize_to_file(tensors, &None, path).unwrap();
+        sha256_hex(&std::fs::read(path).unwrap())
+    }
+
+    fn regression_metadata(oracle: OracleName, filename: &str, sha256: String) -> FixtureMetadata {
+        FixtureMetadata {
+            prompt_id: "regression_01".to_string(),
+            category: PromptCategory::Regression,
+            oracle,
+            num_tokens: 1,
+            logits_dtype: LogitsDtype::Float32,
+            logits_shape: (0, 0),
+            sha256,
+            filename: filename.to_string(),
+        }
+    }
+
+    fn add_expected_pair(manifest: &mut Manifest, prompt_id: &str, family: FixtureFamily) {
+        for (oracle, oracle_name, role, comparison) in [
+            (
+                OracleName::Transformers,
+                "transformers",
+                OracleRole::Reference,
+                if family == FixtureFamily::Regression {
+                    RequiredComparison::L1
+                } else {
+                    RequiredComparison::L1L2
+                },
+            ),
+            (
+                OracleName::Vllm,
+                "vllm",
+                OracleRole::Baseline,
+                RequiredComparison::Calibration,
+            ),
+        ] {
+            let fixture_id = format!("{prompt_id}.{oracle_name}");
+            manifest.expected_fixtures.push(ExpectedFixture {
+                fixture_id: fixture_id.clone(),
+                prompt_id: prompt_id.to_string(),
+                family: family.clone(),
+                model_revision: "rev".to_string(),
+                dtype: "bfloat16".to_string(),
+                oracle,
+                oracle_role: role,
+                required_comparison: comparison,
+                filename: format!("{fixture_id}.safetensors"),
+            });
         }
     }
 
@@ -467,34 +576,108 @@ mod tests {
     }
 
     #[test]
-    fn preflight_and_reference_result_complete_successful_lifecycle() {
+    fn successful_lifecycle_dispatches_all_families_through_fake_adapter() {
         let fixtures = tempfile::tempdir().unwrap();
-        let reference_filename = "canonical_01.transformers.safetensors";
-        let baseline_filename = "canonical_01.vllm.safetensors";
-        let reference_sha = write_canonical_fixture(&fixtures.path().join(reference_filename));
-        let baseline_sha = write_canonical_fixture(&fixtures.path().join(baseline_filename));
         let mut manifest = test_manifest();
-        manifest.fixtures = vec![
-            metadata(OracleName::Transformers, reference_filename, reference_sha),
-            metadata(OracleName::Vllm, baseline_filename, baseline_sha),
-        ];
-        manifest.calibrated_fixtures = vec!["canonical_01.vllm".to_string()];
+        add_expected_pair(&mut manifest, "batch_01a", FixtureFamily::Batch);
+        add_expected_pair(&mut manifest, "regression_01", FixtureFamily::Regression);
+        let mut prompts = test_prompts();
+        prompts.insert(
+            "batch_01a".to_string(),
+            PromptEntry {
+                id: "batch_01a".to_string(),
+                family: FixtureFamily::Batch,
+                prompt: "batch".to_string(),
+            },
+        );
+        prompts.insert(
+            "regression_01".to_string(),
+            PromptEntry {
+                id: "regression_01".to_string(),
+                family: FixtureFamily::Regression,
+                prompt: "regression".to_string(),
+            },
+        );
 
-        let mut result = preflight(&manifest, fixtures.path(), &test_prompts());
-        let preflight_totals = result.tracker.totals();
+        for (prompt_id, family) in [
+            ("canonical_01", FixtureFamily::Canonical),
+            ("batch_01a", FixtureFamily::Batch),
+            ("regression_01", FixtureFamily::Regression),
+        ] {
+            for (oracle, oracle_name) in [
+                (OracleName::Transformers, "transformers"),
+                (OracleName::Vllm, "vllm"),
+            ] {
+                let filename = format!("{prompt_id}.{oracle_name}.safetensors");
+                let path = fixtures.path().join(&filename);
+                let sha256 = if family == FixtureFamily::Regression {
+                    write_regression_fixture(&path)
+                } else {
+                    write_canonical_fixture(&path)
+                };
+                let is_baseline = oracle == OracleName::Vllm;
+                let metadata = if family == FixtureFamily::Regression {
+                    regression_metadata(oracle, &filename, sha256)
+                } else {
+                    canonical_metadata(prompt_id, oracle, &filename, sha256)
+                };
+                manifest.fixtures.push(metadata);
+                if is_baseline {
+                    manifest
+                        .calibrated_fixtures
+                        .push(format!("{prompt_id}.vllm"));
+                }
+            }
+        }
 
-        assert_eq!(preflight_totals.expected, 2);
-        assert_eq!(preflight_totals.discovered, 2);
-        assert_eq!(preflight_totals.generated, 2);
-        assert_eq!(preflight_totals.compared, 1);
-        assert_eq!(preflight_totals.missing, 0);
-        assert_eq!(preflight_totals.failed, 0);
-        assert_eq!(result.reference_cases.len(), 1);
+        let prepared = preflight(&manifest, fixtures.path(), &prompts);
+        assert!(prepared.errors.is_empty(), "{:?}", prepared.errors);
+        assert_eq!(prepared.reference_cases.len(), 3);
+        let options = DriverOptions {
+            l1_only: false,
+            l2_only: false,
+            debug: false,
+            epsilon: None,
+        };
+        let report = run_prepared_comparisons(prepared, &options, |case| {
+            let l1 = L1Result {
+                prompt_id: case.expected.prompt_id.clone(),
+                passed: true,
+                total_positions: 1,
+                exact_matches: 1,
+                near_tie_skips: 0,
+                regression_skips: 0,
+                mismatches: 0,
+                first_mismatch: None,
+                epsilon: 0.0,
+                details: Vec::new(),
+            };
+            let l2 =
+                (case.expected.required_comparison == RequiredComparison::L1L2).then(|| L2Result {
+                    prompt_id: case.expected.prompt_id.clone(),
+                    passed: true,
+                    same_token_steps: 1,
+                    diff_token_steps: 0,
+                    total_elements: 3,
+                    max_abs_diff: 0.0,
+                    elements_exceeding_tol: 0,
+                });
+            Ok(CaseComparison {
+                l1: Some(l1),
+                l2,
+                l3: None,
+            })
+        });
 
-        result.tracker.record_compared("canonical_01.transformers");
-        let final_totals = result.tracker.totals();
-        assert_eq!(final_totals.compared, 2);
-        assert!(final_totals.release_passed());
+        assert_eq!(report.lifecycle.expected, 6);
+        assert_eq!(report.lifecycle.discovered, 6);
+        assert_eq!(report.lifecycle.generated, 6);
+        assert_eq!(report.lifecycle.compared, 6);
+        assert_eq!(report.lifecycle.skipped, 0);
+        assert_eq!(report.lifecycle.failed, 0);
+        assert_eq!(report.l1_results.len(), 3);
+        assert_eq!(report.l2_results.len(), 2);
+        assert!(report.overall_passed());
     }
 
     #[test]
@@ -507,12 +690,18 @@ mod tests {
         write_canonical_fixture(&fixtures.path().join("unexpected.safetensors"));
         let mut manifest = test_manifest();
         manifest.fixtures = vec![
-            metadata(
+            canonical_metadata(
+                "canonical_01",
                 OracleName::Transformers,
                 reference_filename,
                 "wrong-checksum".to_string(),
             ),
-            metadata(OracleName::Vllm, baseline_filename, baseline_sha),
+            canonical_metadata(
+                "canonical_01",
+                OracleName::Vllm,
+                baseline_filename,
+                baseline_sha,
+            ),
         ];
         manifest.calibrated_fixtures = vec!["canonical_01.vllm".to_string()];
 
