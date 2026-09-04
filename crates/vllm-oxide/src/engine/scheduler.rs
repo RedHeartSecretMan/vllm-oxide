@@ -1,6 +1,6 @@
 //! Token-level scheduler — `Scheduler` (V1 parity, nano-vllm algorithm).
 //!
-//! One `schedule()` step is either **pure-prefill** or **pure-decode**
+//! One `plan_step()` is either **pure-prefill** or **pure-decode**
 //! (nano-vllm parity — simplifies attention metadata). Chunked prefill
 //! applies **only to the first sequence** in a step when the token budget
 //! is tight. Preemption is **recompute-only**: deallocate the sequence's
@@ -18,7 +18,9 @@ use std::collections::VecDeque;
 use crate::attention::{build_decode_metadata, build_prefill_metadata};
 use crate::engine::kv_cache_manager::KvCacheManager;
 use crate::engine::sequence::{Sequence, SequenceStatus};
-use crate::engine::{SequenceCachePlan, SequenceStepPlan, StepPlan, StepPlanError, StepResult};
+use crate::engine::{
+    SequenceCachePlan, SequenceStepPlan, StepPhase, StepPlan, StepPlanError, StepResult,
+};
 use crate::SamplingParams;
 
 /// Default `max_num_batched_tokens` — the maximum number of tokens the engine
@@ -37,24 +39,10 @@ fn usize_to_u32(value: usize, name: &str) -> Result<u32, StepPlanError> {
     u32::try_from(value).map_err(|_| StepPlanError::invalid(format!("{name} does not fit u32")))
 }
 
-/// Output of a scheduling step — the scheduler tells the engine core
-/// whether this step is prefill or decode. The actual scheduling state
-/// is stored in the sequences themselves (`num_scheduled_tokens`,
-/// `is_prefill`, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScheduleMode {
-    /// All scheduled sequences are being prefilled (chunked or full).
-    Prefill,
-    /// All scheduled sequences are decoding (one token each).
-    Decode,
-}
-
-#[derive(Debug, Clone)]
-pub struct ScheduleOutput {
-    pub mode: ScheduleMode,
-    /// Number of prefix-cache blocks hit during allocation (prefill only).
-    /// Set to 0 for decode steps.
-    pub num_cached_blocks: usize,
+struct WorkSelection {
+    phase: StepPhase,
+    num_cached_blocks: usize,
 }
 
 /// Token-level scheduler — the algorithmic heart of the engine.
@@ -128,9 +116,8 @@ impl Scheduler {
         self.waiting.push_back(seq);
     }
 
-    /// The primary scheduling step. Returns a `ScheduleOutput` indicating
-    /// the step mode and cache-hit count. Mutates the internal sequence
-    /// state in-place.
+    /// Select runnable work and capture its phase and cache-hit count before
+    /// `plan_step()` snapshots the immutable execution inputs.
     ///
     /// # Algorithm (nano-vllm parity)
     ///
@@ -142,7 +129,7 @@ impl Scheduler {
     ///    step — schedule 1 token per running sequence.
     /// 4. If `running` is empty and `waiting` is non-empty: **prefill**
     ///    step — schedule waiting sequences with chunking for the first.
-    fn select_work(&mut self, kv_mgr: &mut KvCacheManager) -> ScheduleOutput {
+    fn select_work(&mut self, kv_mgr: &mut KvCacheManager) -> WorkSelection {
         self.preempt_if_needed(kv_mgr);
 
         // Chunked prefill continuation: running sequences that still need
@@ -174,21 +161,21 @@ impl Scheduler {
             if sequence.num_scheduled_tokens == 0 {
                 continue;
             }
-            let token_range = match output.mode {
-                ScheduleMode::Prefill => {
+            let (token_range, sampling_allowed) = match output.phase {
+                StepPhase::Prefill => {
                     let start = sequence.num_cached_tokens;
                     let end = start
                         .checked_add(sequence.num_scheduled_tokens)
                         .ok_or_else(|| StepPlanError::invalid("scheduled token range overflow"))?
                         .min(sequence.num_prompt_tokens);
-                    start..end
+                    (start..end, end == sequence.num_prompt_tokens)
                 }
-                ScheduleMode::Decode => {
+                StepPhase::Decode => {
                     let start = sequence
                         .num_tokens
                         .checked_sub(1)
                         .ok_or_else(|| StepPlanError::invalid("decode sequence has no tokens"))?;
-                    start..sequence.num_tokens
+                    (start..sequence.num_tokens, true)
                 }
             };
 
@@ -209,11 +196,6 @@ impl Scheduler {
                 block_table: sequence.block_table.clone(),
                 slot_mapping,
             };
-            let sampling_allowed = match output.mode {
-                ScheduleMode::Prefill => token_range.end == sequence.num_prompt_tokens,
-                ScheduleMode::Decode => true,
-            };
-
             sequences.push(SequenceStepPlan {
                 request_id: sequence.request_id,
                 sequence_id: sequence.seq_id,
@@ -238,8 +220,12 @@ impl Scheduler {
         }
 
         let token_budget = sequences.iter().map(|sequence| sequence.token_budget).sum();
-        let attention = match output.mode {
-            ScheduleMode::Prefill => {
+        let slot_mapping = sequences
+            .iter()
+            .flat_map(|sequence| sequence.cache.slot_mapping.iter().copied())
+            .collect::<Vec<_>>();
+        let attention = match output.phase {
+            StepPhase::Prefill => {
                 let scheduled_tokens = sequences
                     .iter()
                     .map(|sequence| usize_to_u32(sequence.token_budget, "scheduled token count"))
@@ -248,13 +234,9 @@ impl Scheduler {
                     .iter()
                     .map(|sequence| usize_to_u32(sequence.cache.kv_length, "KV length"))
                     .collect::<Result<Vec<_>, _>>()?;
-                let slot_mapping = sequences
-                    .iter()
-                    .flat_map(|sequence| sequence.cache.slot_mapping.iter().copied())
-                    .collect::<Vec<_>>();
                 build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping)
             }
-            ScheduleMode::Decode => {
+            StepPhase::Decode => {
                 let context_lengths = sequences
                     .iter()
                     .map(|sequence| usize_to_u32(sequence.cache.kv_length, "context length"))
@@ -274,19 +256,16 @@ impl Scheduler {
                             .collect::<Result<Vec<_>, _>>()
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let slot_mapping = sequences
-                    .iter()
-                    .flat_map(|sequence| sequence.cache.slot_mapping.iter().copied())
-                    .collect::<Vec<_>>();
                 build_decode_metadata(&context_lengths, &block_tables, &slot_mapping)
             }
         };
 
         let plan = StepPlan {
             id: self.next_plan_id,
-            phase: output.mode,
+            phase: output.phase,
             sequences,
             token_budget,
+            num_cached_blocks: output.num_cached_blocks,
             attention,
         };
         self.next_plan_id += 1;
@@ -426,8 +405,7 @@ impl Scheduler {
         !self.waiting.is_empty() || !self.running.is_empty()
     }
 
-    /// Iterator over running sequences (read-only). Used by EngineCore
-    /// to build tensors for the forward pass.
+    /// Iterator over running sequences (read-only) for diagnostics.
     pub fn running_seqs(&self) -> impl Iterator<Item = &Sequence> {
         self.running.iter()
     }
@@ -470,7 +448,7 @@ impl Scheduler {
     }
 
     /// Schedule a decode step: one token per running sequence.
-    fn schedule_decode(&mut self, kv_mgr: &mut KvCacheManager) -> ScheduleOutput {
+    fn schedule_decode(&mut self, kv_mgr: &mut KvCacheManager) -> WorkSelection {
         for seq in self.running.iter_mut() {
             if !kv_mgr.can_append(seq) {
                 seq.num_scheduled_tokens = 0;
@@ -496,15 +474,15 @@ impl Scheduler {
             }
         }
 
-        ScheduleOutput {
-            mode: ScheduleMode::Decode,
+        WorkSelection {
+            phase: StepPhase::Decode,
             num_cached_blocks: 0,
         }
     }
 
     /// Continue a chunked prefill: schedule more prompt tokens for
     /// running sequences that still have `is_prefill` set.
-    fn schedule_prefill_continue(&mut self) -> ScheduleOutput {
+    fn schedule_prefill_continue(&mut self) -> WorkSelection {
         let mut total_tokens = 0;
         for seq in self.running.iter_mut() {
             if !seq.is_prefill {
@@ -529,8 +507,8 @@ impl Scheduler {
                 seq.is_prefill = false;
             }
         }
-        ScheduleOutput {
-            mode: ScheduleMode::Prefill,
+        WorkSelection {
+            phase: StepPhase::Prefill,
             num_cached_blocks: 0,
         }
     }
@@ -538,10 +516,10 @@ impl Scheduler {
     /// Schedule a prefill step: pick sequences from `waiting`, chunk
     /// the first if the token budget is tight, allocate blocks, and
     /// move to `running`.
-    fn schedule_prefill(&mut self, kv_mgr: &mut KvCacheManager) -> ScheduleOutput {
+    fn schedule_prefill(&mut self, kv_mgr: &mut KvCacheManager) -> WorkSelection {
         if self.waiting.is_empty() {
-            return ScheduleOutput {
-                mode: ScheduleMode::Prefill,
+            return WorkSelection {
+                phase: StepPhase::Prefill,
                 num_cached_blocks: 0,
             };
         }
@@ -608,8 +586,8 @@ impl Scheduler {
             }
         }
 
-        ScheduleOutput {
-            mode: ScheduleMode::Prefill,
+        WorkSelection {
+            phase: StepPhase::Prefill,
             num_cached_blocks: total_cached_blocks,
         }
     }
@@ -730,7 +708,7 @@ mod tests {
             let mut kv = make_kv_mgr(100);
             s.add_request((0..BLOCK_SIZE as u32 + 10).collect(), make_params(16));
             let output = s.select_work(&mut kv);
-            assert_eq!(output.mode, ScheduleMode::Prefill);
+            assert_eq!(output.phase, StepPhase::Prefill);
             assert_eq!(s.num_running(), 1);
             assert_eq!(s.num_waiting(), 0);
 
@@ -749,7 +727,7 @@ mod tests {
             let mut kv = make_kv_mgr(100);
             s.add_request((0..500u32).collect(), make_params(16));
             let output = s.select_work(&mut kv);
-            assert_eq!(output.mode, ScheduleMode::Prefill);
+            assert_eq!(output.phase, StepPhase::Prefill);
             let seq = &s.running[0];
             assert!(seq.is_prefill);
             // Should be chunked: budget is 100, so only 100 scheduled.
@@ -762,7 +740,7 @@ mod tests {
             let mut s = make_scheduler();
             let mut kv = make_kv_mgr(10);
             let output = s.select_work(&mut kv);
-            assert_eq!(output.mode, ScheduleMode::Prefill);
+            assert_eq!(output.phase, StepPhase::Prefill);
             assert_eq!(output.num_cached_blocks, 0);
             assert_eq!(s.num_running(), 0);
         }
@@ -781,7 +759,7 @@ mod tests {
             // should be decode (not prefill).
             s.add_request(vec![4, 5, 6], make_params(16));
             let output = s.select_work(&mut kv);
-            assert_eq!(output.mode, ScheduleMode::Decode);
+            assert_eq!(output.phase, StepPhase::Decode);
             // waiting should still have the new request.
             assert_eq!(s.num_waiting(), 1);
         }
@@ -798,8 +776,9 @@ mod tests {
 
             let plan = scheduler.plan_step(&mut kv).unwrap().unwrap();
 
-            assert_eq!(plan.phase, ScheduleMode::Prefill);
+            assert_eq!(plan.phase, StepPhase::Prefill);
             assert_eq!(plan.token_budget, 3);
+            assert_eq!(plan.num_cached_blocks, 0);
             assert_eq!(plan.sequences.len(), 1);
 
             let sequence = &plan.sequences[0];
@@ -923,7 +902,7 @@ mod tests {
 
             let decode = scheduler.plan_step(&mut kv).unwrap().unwrap();
 
-            assert_eq!(decode.phase, ScheduleMode::Decode);
+            assert_eq!(decode.phase, StepPhase::Decode);
             assert_eq!(decode.token_budget, 1);
             assert_eq!(decode.sequences.len(), 1);
             let sequence = &decode.sequences[0];
@@ -987,7 +966,7 @@ mod tests {
 
             // Next step should be decode.
             let output = s.select_work(&mut kv);
-            assert_eq!(output.mode, ScheduleMode::Decode);
+            assert_eq!(output.phase, StepPhase::Decode);
             let seq = &s.running[0];
             assert!(!seq.is_prefill, "decode must set is_prefill=false");
             assert_eq!(seq.num_scheduled_tokens, 1);
@@ -1002,7 +981,7 @@ mod tests {
             s.add_request(vec![4, 5, 6], make_params(16)); // stays waiting
 
             let output = s.select_work(&mut kv); // decode
-            assert_eq!(output.mode, ScheduleMode::Decode);
+            assert_eq!(output.phase, StepPhase::Decode);
             assert_eq!(s.num_running(), 1);
             assert_eq!(s.num_waiting(), 1);
         }

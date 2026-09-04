@@ -26,8 +26,7 @@ pub use attention::{
 // The scheduler imports only KvCacheManager (and Sequence) — never BlockPool
 // or PagedKVCache directly (ADR-0004 seam contract).
 pub use engine::{
-    BlockPoolError, EngineCore, KvCacheManager, RequestOutput, ScheduleMode, ScheduleOutput,
-    Scheduler, Sequence, SequenceStatus,
+    BlockPoolError, EngineCore, KvCacheManager, RequestOutput, Scheduler, Sequence, SequenceStatus,
 };
 
 // T15 — weight loader + config (ADR-0002). Loader is model-agnostic: returns

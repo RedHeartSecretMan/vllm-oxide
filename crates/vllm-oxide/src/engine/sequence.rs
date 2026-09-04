@@ -22,7 +22,7 @@ pub const BLOCK_SIZE: usize = 256;
 /// Sequence lifecycle status, mirroring `nanovllm.engine.sequence.SequenceStatus`.
 ///
 /// Transitions: `Waiting → Running → Finished`. The engine loop (T2) drives
-/// these transitions via `Scheduler::schedule()`.
+/// these transitions via the Scheduler's internal `StepPlan` / `StepResult` seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SequenceStatus {
     Waiting,

@@ -3,15 +3,21 @@ use std::ops::Range;
 use crate::attention::AttnMetadata;
 use crate::SamplingParams;
 
-use super::scheduler::ScheduleMode;
+/// Execution phase for one immutable engine step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepPhase {
+    Prefill,
+    Decode,
+}
 
 /// Immutable description of one scheduler-selected engine step.
 #[derive(Debug, Clone)]
 pub(crate) struct StepPlan {
     pub(crate) id: u64,
-    pub(crate) phase: ScheduleMode,
+    pub(crate) phase: StepPhase,
     pub(crate) sequences: Vec<SequenceStepPlan>,
     pub(crate) token_budget: usize,
+    pub(crate) num_cached_blocks: usize,
     pub(crate) attention: AttnMetadata,
 }
 

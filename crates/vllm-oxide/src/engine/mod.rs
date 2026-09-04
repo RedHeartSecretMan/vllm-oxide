@@ -27,11 +27,12 @@ use crate::SamplingParams;
 
 pub use block_pool::BlockPoolError;
 pub use kv_cache_manager::KvCacheManager;
-pub use scheduler::{RequestOutput, ScheduleMode, ScheduleOutput, Scheduler};
+pub use scheduler::{RequestOutput, Scheduler};
 pub use sequence::{Sequence, SequenceStatus};
 
 pub(crate) use step::{
-    SequenceCachePlan, SequenceStepPlan, SequenceStepResult, StepPlan, StepPlanError, StepResult,
+    SequenceCachePlan, SequenceStepPlan, SequenceStepResult, StepPhase, StepPlan, StepPlanError,
+    StepResult,
 };
 
 /// In-process engine core — collapses V1/nano-vllm's `ModelRunner` (ADR-0004).
