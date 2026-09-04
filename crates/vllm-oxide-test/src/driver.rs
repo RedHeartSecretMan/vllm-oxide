@@ -23,6 +23,7 @@ use crate::report::ComparisonReport;
 use crate::types::{Manifest, PromptCategory, RequiredComparison};
 
 /// Flags that control which comparison layers run.
+#[derive(Debug, Clone, Copy)]
 pub struct DriverOptions {
     pub l1_only: bool,
     pub l2_only: bool,
@@ -54,7 +55,9 @@ pub fn run_comparison(
 
     for case in prepared.reference_cases {
         let fixture_id = case.expected.fixture_id.clone();
-        if tracker.was_skipped(&fixture_id) || !required_layers_enabled(&case, opts) {
+        if tracker.was_skipped(&fixture_id)
+            || !required_layers_enabled(&case.expected.required_comparison, opts)
+        {
             tracker.record_skipped(&fixture_id);
             continue;
         }
@@ -95,8 +98,8 @@ struct CaseComparison {
     l3: Option<crate::l3::L3Result>,
 }
 
-fn required_layers_enabled(case: &ReferenceCase, opts: &DriverOptions) -> bool {
-    match case.expected.required_comparison {
+fn required_layers_enabled(required: &RequiredComparison, opts: &DriverOptions) -> bool {
+    match required {
         RequiredComparison::L1 => !opts.l2_only,
         RequiredComparison::L1L2 => !opts.l1_only && !opts.l2_only,
         RequiredComparison::Calibration => false,
@@ -128,11 +131,7 @@ fn compare_reference_case(
     let logits = llm.generate_logits(&prompt, max_tokens)?;
     let logits_f32 = logits.to_dtype(DType::F32)?;
     let logits_vals = logits_f32.flatten_all()?.to_vec1::<f32>()?;
-    let vocab_size = case.fixture.model_vocab_size(&logits_vals);
-    if vocab_size == 0 {
-        anyhow::bail!("generated logits have zero vocabulary width");
-    }
-    let n_steps = logits.dims()[0];
+    let (n_steps, vocab_size) = generated_logits_geometry(logits.dims(), logits_vals.len())?;
     let generated_tokens = extract_greedy_tokens(&logits_vals, n_steps, vocab_size);
 
     let (l1, l2) = match case.metadata.category {
@@ -166,6 +165,21 @@ fn compare_reference_case(
         None
     };
     Ok(CaseComparison { l1, l2, l3 })
+}
+
+fn generated_logits_geometry(dims: &[usize], value_count: usize) -> Result<(usize, usize)> {
+    let [n_steps, vocab_size] = dims else {
+        anyhow::bail!("generated logits must have shape [steps, vocab], got {dims:?}");
+    };
+    if *n_steps == 0 || *vocab_size == 0 {
+        anyhow::bail!("generated logits must have non-zero steps and vocabulary width");
+    }
+    if n_steps.checked_mul(*vocab_size) != Some(value_count) {
+        anyhow::bail!(
+            "generated logits shape {dims:?} does not match flattened value count {value_count}"
+        );
+    }
+    Ok((*n_steps, *vocab_size))
 }
 
 /// Extract greedy tokens from flat F32 logits via per-step argmax.
@@ -211,5 +225,43 @@ mod tests {
         let logits: Vec<f32> = vec![0.1, 0.8, 0.3];
         let tokens = extract_greedy_tokens(&logits, 1, 3);
         assert_eq!(tokens, vec![1]);
+    }
+
+    #[test]
+    fn runtime_shape_supplies_vocab_width_for_regression_fixture() {
+        let (n_steps, vocab_size) = generated_logits_geometry(&[2, 3], 6).unwrap();
+
+        assert_eq!(n_steps, 2);
+        assert_eq!(vocab_size, 3);
+    }
+
+    #[test]
+    fn batch_and_regression_declared_layers_control_release_comparison() {
+        let all_layers = DriverOptions {
+            l1_only: false,
+            l2_only: false,
+            debug: false,
+            epsilon: None,
+        };
+        let l1_only = DriverOptions {
+            l1_only: true,
+            ..all_layers
+        };
+        let l2_only = DriverOptions {
+            l1_only: false,
+            l2_only: true,
+            ..all_layers
+        };
+
+        assert!(required_layers_enabled(
+            &RequiredComparison::L1L2,
+            &all_layers
+        ));
+        assert!(!required_layers_enabled(
+            &RequiredComparison::L1L2,
+            &l1_only
+        ));
+        assert!(required_layers_enabled(&RequiredComparison::L1, &l1_only));
+        assert!(!required_layers_enabled(&RequiredComparison::L1, &l2_only));
     }
 }

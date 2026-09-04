@@ -553,4 +553,46 @@ mod tests {
             .iter()
             .any(|error| error.contains("not valid UTF-8")));
     }
+
+    #[test]
+    fn preflight_rejects_legacy_regression_skip_map() {
+        let mut manifest = test_manifest();
+        for expected in &mut manifest.expected_fixtures {
+            expected.prompt_id = "regression_01".to_string();
+            expected.family = FixtureFamily::Regression;
+            let oracle = match expected.oracle {
+                OracleName::Transformers => "transformers",
+                OracleName::Vllm => "vllm",
+                OracleName::Fake => "fake",
+            };
+            expected.fixture_id = format!("regression_01.{oracle}");
+            expected.filename = format!("{}.safetensors", expected.fixture_id);
+            if expected.oracle == OracleName::Transformers {
+                expected.required_comparison = crate::types::RequiredComparison::L1;
+            }
+        }
+        manifest
+            .regression_skip_map
+            .insert("regression_01".to_string(), vec![0]);
+        let prompts = HashMap::from([(
+            "regression_01".to_string(),
+            PromptEntry {
+                id: "regression_01".to_string(),
+                family: FixtureFamily::Regression,
+                prompt: "regression".to_string(),
+            },
+        )]);
+        let fixtures = tempfile::tempdir().unwrap();
+
+        let result = preflight(&manifest, fixtures.path(), &prompts);
+        let totals = result.tracker.totals();
+
+        assert_eq!(totals.skipped, 1);
+        assert_eq!(totals.failed, 1);
+        assert!(!totals.release_passed());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("legacy regression skip map")));
+    }
 }
