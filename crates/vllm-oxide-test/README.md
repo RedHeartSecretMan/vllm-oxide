@@ -89,7 +89,7 @@ empty comparison sets exit non-zero. `--l1-only` or `--l2-only` is exploratory
 when it omits a declared comparison and therefore cannot satisfy the release
 gate.
 
-### L1: Token-sequence exact match
+### L1: Reference-token match or explicit near tie
 
 Drives the engine via `LLM::generate` (greedy, temperature=0). Compares
 generated token IDs against golden token IDs position-by-position.

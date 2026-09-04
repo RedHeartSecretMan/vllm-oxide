@@ -238,7 +238,7 @@ Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation,
 The release gate validates the Rust engine's numerical output against golden fixtures. It requires a GPU (sm_89+), model weights, and a golden fixture archive.
 
 ```bash
-# L1 token-sequence exact match + L2 logits comparison
+# L1 reference-token / near-tie classification + L2 logits comparison
 cargo run --release -p vllm_oxide_test --features cuda -- \
     --model-path /path/to/Qwen3-0.6B \
     --release-tag goldens-v0.1

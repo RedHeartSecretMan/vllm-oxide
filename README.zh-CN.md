@@ -237,7 +237,7 @@ cargo test
 发布门禁验证 Rust 引擎的数值输出是否与黄金夹具匹配。需要 GPU（sm_89+）、模型权重和黄金夹具存档。
 
 ```bash
-# L1 token 序列精确匹配 + L2 logits 比较
+# L1 参考 token / near-tie 分类 + L2 logits 比较
 cargo run --release -p vllm_oxide_test --features cuda -- \
     --model-path /path/to/Qwen3-0.6B \
     --release-tag goldens-v0.1
