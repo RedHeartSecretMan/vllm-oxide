@@ -75,13 +75,25 @@ pub fn preflight(
 
     match std::fs::read_dir(fixture_dir) {
         Ok(entries) => {
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        tracker.record_all_failed();
+                        errors.push(format!("reading fixture directory entry: {error}"));
+                        continue;
+                    }
+                };
                 let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str()) != Some("safetensors")
-                {
+                if path.extension() != Some(std::ffi::OsStr::new("safetensors")) {
                     continue;
                 }
                 let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+                    tracker.record_all_failed();
+                    errors.push(format!(
+                        "fixture path is not valid UTF-8: {}",
+                        path.to_string_lossy()
+                    ));
                     continue;
                 };
                 if !expected_filenames.contains(filename) {
@@ -182,7 +194,12 @@ pub fn preflight(
 
     for (prompt_id, positions) in &manifest.regression_skip_map {
         if !positions.is_empty() {
-            tracker.record_skipped(&format!("{prompt_id}.transformers"));
+            let fixture_id = format!("{prompt_id}.transformers");
+            tracker.record_skipped(&fixture_id);
+            tracker.record_failed(&fixture_id);
+            errors.push(format!(
+                "legacy regression skip map is unsupported in release validation: {prompt_id}"
+            ));
         }
     }
 
@@ -293,6 +310,10 @@ impl LifecycleTracker {
 
     pub fn was_skipped(&self, fixture_id: &str) -> bool {
         self.skipped.contains(fixture_id)
+    }
+
+    fn record_all_failed(&mut self) {
+        self.failed.extend(self.expected.iter().cloned());
     }
 
     fn record_stage(
@@ -446,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_records_generated_and_calibrated_fixture_coverage() {
+    fn preflight_and_reference_result_complete_successful_lifecycle() {
         let fixtures = tempfile::tempdir().unwrap();
         let reference_filename = "canonical_01.transformers.safetensors";
         let baseline_filename = "canonical_01.vllm.safetensors";
@@ -459,16 +480,21 @@ mod tests {
         ];
         manifest.calibrated_fixtures = vec!["canonical_01.vllm".to_string()];
 
-        let result = preflight(&manifest, fixtures.path(), &test_prompts());
-        let totals = result.tracker.totals();
+        let mut result = preflight(&manifest, fixtures.path(), &test_prompts());
+        let preflight_totals = result.tracker.totals();
 
-        assert_eq!(totals.expected, 2);
-        assert_eq!(totals.discovered, 2);
-        assert_eq!(totals.generated, 2);
-        assert_eq!(totals.compared, 1);
-        assert_eq!(totals.missing, 0);
-        assert_eq!(totals.failed, 0);
+        assert_eq!(preflight_totals.expected, 2);
+        assert_eq!(preflight_totals.discovered, 2);
+        assert_eq!(preflight_totals.generated, 2);
+        assert_eq!(preflight_totals.compared, 1);
+        assert_eq!(preflight_totals.missing, 0);
+        assert_eq!(preflight_totals.failed, 0);
         assert_eq!(result.reference_cases.len(), 1);
+
+        result.tracker.record_compared("canonical_01.transformers");
+        let final_totals = result.tracker.totals();
+        assert_eq!(final_totals.compared, 2);
+        assert!(final_totals.release_passed());
     }
 
     #[test]
@@ -501,5 +527,30 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("checksum mismatch")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_fails_closed_for_non_utf8_fixture_filename() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let fixtures = tempfile::tempdir().unwrap();
+        let mut filename = vec![0xff];
+        filename.extend_from_slice(b".safetensors");
+        std::fs::write(
+            fixtures.path().join(std::ffi::OsString::from_vec(filename)),
+            b"bad",
+        )
+        .unwrap();
+
+        let result = preflight(&test_manifest(), fixtures.path(), &test_prompts());
+        let totals = result.tracker.totals();
+
+        assert_eq!(totals.failed, 2);
+        assert!(!totals.release_passed());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("not valid UTF-8")));
     }
 }

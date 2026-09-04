@@ -77,7 +77,7 @@ def build_manifest(
     fixtures: list[FixtureMetadata],
     tolerance: ToleranceCalibration,
     *,
-    expected_fixtures: list[ExpectedFixture] | None = None,
+    expected_fixtures: list[ExpectedFixture],
     generated_at: datetime | None = None,
     regression_skip_map: dict[str, list[int]] | None = None,
 ) -> Manifest:
@@ -85,6 +85,7 @@ def build_manifest(
 
     Args:
         fixtures: List of FixtureMetadata for all generated fixtures.
+        expected_fixtures: Independent contracts for all required fixtures.
         tolerance: Calibrated tolerance values.
         generated_at: Timestamp (defaults to now UTC).
         regression_skip_map: Positions to skip per regression prompt.
@@ -113,7 +114,7 @@ def build_manifest(
             attn_implementation=ATTN_IMPLEMENTATION,
         ),
         tolerance=tolerance,
-        expected_fixtures=expected_fixtures or [],
+        expected_fixtures=expected_fixtures,
         fixtures=fixtures,
         regression_skip_map=regression_skip_map or {},
     )

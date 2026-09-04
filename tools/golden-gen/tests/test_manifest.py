@@ -52,7 +52,7 @@ class TestManifest:
         )
 
         with pytest.raises(ValidationError, match="expected_fixtures"):
-            build_manifest(fixtures=[], tolerance=tolerance)
+            build_manifest(fixtures=[], expected_fixtures=[], tolerance=tolerance)
 
     def test_generated_fixture_identifier_must_match_an_expectation(self):
         tolerance = ToleranceCalibration(

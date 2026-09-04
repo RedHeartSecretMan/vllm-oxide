@@ -98,6 +98,12 @@ def run_all(
 
         for oracle, oname in zip(oracles, oracle_names, strict=True):
             results = oracle.generate(prompt)
+            expected_results = len(prompt.sub_prompts or []) if prompt.is_batch else 1
+            if len(results) != expected_results:
+                raise ValueError(
+                    f"oracle {oname} returned {len(results)} results for {prompt.id}; "
+                    f"expected {expected_results}"
+                )
 
             if prompt.is_batch:
                 # Save one fixture per sub-prompt: canonical_05a, canonical_05b, ...

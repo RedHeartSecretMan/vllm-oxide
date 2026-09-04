@@ -266,6 +266,7 @@ class TestCLI:
 
         assert exit_code != 0
         assert not (output_dir / "manifest.json").exists()
+        assert list(output_dir.glob("*.safetensors")) == []
         captured = capsys.readouterr()
         assert (
             "Lifecycle totals: expected=8 discovered=8 generated=0 compared=0 skipped=0 failed=8"
@@ -304,7 +305,39 @@ class TestCLI:
 
         assert exit_code != 0
         assert not (output_dir / "manifest.json").exists()
+        assert list(output_dir.glob("*.safetensors")) == []
         captured = capsys.readouterr()
         assert (
             "Lifecycle totals: expected=8 discovered=8 generated=4 compared=0 skipped=0 failed=4"
         ) in captured.err
+
+    def test_short_batch_oracle_result_fails_without_publishing_manifest(
+        self, tmp_path, monkeypatch
+    ):
+        prompts_dir = write_minimal_prompt_corpora(tmp_path)
+        output_dir = tmp_path / "output"
+
+        def short_batch(self, prompt):
+            if prompt.category == "canonical":
+                result = OracleResult.for_canonical(
+                    token_ids=np.array([1], dtype=np.int64),
+                    logits_per_step=np.zeros((1, 1), dtype=np.float32),
+                    n_prompt_tokens=1,
+                )
+            else:
+                result = OracleResult.for_regression(
+                    token_ids=np.array([1], dtype=np.int64),
+                    top5_indices=np.zeros((1, 5), dtype=np.int64),
+                    top5_logits=np.zeros((1, 5), dtype=np.float32),
+                    n_prompt_tokens=1,
+                )
+            return [result]
+
+        monkeypatch.setattr(cli, "_resolve_prompts_dir", lambda: prompts_dir)
+        monkeypatch.setattr(cli.FakeOracle, "generate", short_batch)
+
+        exit_code = cli.main(["generate", "--dry-run", "--output-dir", str(output_dir)])
+
+        assert exit_code != 0
+        assert not (output_dir / "manifest.json").exists()
+        assert list(output_dir.glob("*.safetensors")) == []

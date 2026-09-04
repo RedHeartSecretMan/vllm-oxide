@@ -56,9 +56,10 @@ uv run python -m golden_gen calibrate --manifest-dir ./output
 ```
 
 Validates every declared reference/baseline pair, computes `atol` from the
-oracle pair, produces the regression skip map, records the baseline artifacts
-consumed as calibration evidence, and updates `manifest.json` in place. A
-missing pair, empty comparison set, or unsupported tensor shape exits non-zero.
+oracle pair, records the baseline artifacts consumed as calibration evidence,
+and updates `manifest.json` in place. Baseline disagreement never authorizes a
+regression skip map. A missing pair, empty comparison set, unmatched oracle
+length, or unsupported tensor shape exits non-zero.
 
 ```bash
 uv run python -m golden_gen --help   # full usage
@@ -109,7 +110,7 @@ All unit tests run on CPU and do not require a GPU.
 | `tolerance.method` | str | Description of calibration method |
 | `expected_fixtures` | list[object] | Independent contract for every required oracle artifact |
 | `calibrated_fixtures` | list[str] | Baseline fixture IDs successfully consumed by calibration |
-| `regression_skip_map` | dict | Prompt → list of token positions to skip during L1 regression |
+| `regression_skip_map` | dict | Legacy field; must remain empty for release validation |
 | `fixtures` | list[object] | List of `FixtureMetadata` records |
 
 Each `expected_fixtures` entry declares the concrete `fixture_id`, `prompt_id`,

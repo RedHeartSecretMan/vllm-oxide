@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from golden_gen.calibrate import (
     calibrate_from_fixtures,
-    compute_regression_skip_map,
     validate_calibration_coverage,
 )
 from golden_gen.generate import run_all
@@ -104,6 +104,9 @@ def _run_generate(args: argparse.Namespace) -> int:
         print("ERROR: No prompts loaded.", file=sys.stderr)
         return 1
 
+    staging = TemporaryDirectory(prefix="golden-gen-", dir=output_dir.parent)
+    staging_dir = Path(staging.name)
+
     oracle_specs: list[tuple[str, type[Any] | type[FakeOracle]]] = []
 
     if args.dry_run:
@@ -141,7 +144,7 @@ def _run_generate(args: argparse.Namespace) -> int:
             fixtures = run_all(
                 [oracle],
                 all_prompts,
-                output_dir,
+                staging_dir,
                 only_category=only_category,
             )
             new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
@@ -167,6 +170,27 @@ def _run_generate(args: argparse.Namespace) -> int:
             f"(failed oracles: {', '.join(failed_oracles)})",
             file=sys.stderr,
         )
+        staging.cleanup()
+        return 1
+
+    generated_ids = {f"{fixture.prompt_id}.{fixture.oracle}" for fixture in all_fixtures}
+    expected_ids = {fixture.fixture_id for fixture in expected_fixtures}
+    if only_category is None and generated_ids != expected_ids:
+        missing = len(expected_ids - generated_ids)
+        unexpected = len(generated_ids - expected_ids)
+        print(
+            "Lifecycle totals: "
+            f"expected={len(expected_ids)} discovered={len(expected_ids)} "
+            f"generated={len(generated_ids & expected_ids)} compared=0 skipped=0 "
+            f"failed={missing + unexpected}",
+            file=sys.stderr,
+        )
+        print(
+            "ERROR: full fixture generation did not match the expected manifest contract; "
+            "manifest was not published",
+            file=sys.stderr,
+        )
+        staging.cleanup()
         return 1
 
     print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
@@ -187,7 +211,12 @@ def _run_generate(args: argparse.Namespace) -> int:
         expected_fixtures=expected_fixtures,
     )
     manifest_path = output_dir / "manifest.json"
-    write_manifest(manifest, manifest_path)
+    staged_manifest_path = staging_dir / "manifest.json"
+    write_manifest(manifest, staged_manifest_path)
+    for fixture_path in staging_dir.glob("*.safetensors"):
+        fixture_path.replace(output_dir / fixture_path.name)
+    staged_manifest_path.replace(manifest_path)
+    staging.cleanup()
     print(f"Manifest written to {manifest_path}")
     generated = len(all_fixtures)
     expected = len(expected_fixtures)
@@ -223,17 +252,11 @@ def _run_calibrate(args: argparse.Namespace) -> int:
         f"observed_max_abs_diff={tolerance.observed_max_abs_diff:.6f}"
     )
 
-    skip_map = compute_regression_skip_map(manifest_dir)
-    if skip_map:
-        print(f"Regression skip map: {len(skip_map)} prompts with skip positions")
-        for pid, positions in sorted(skip_map.items()):
-            print(f"  {pid}: skip {len(positions)} positions")
-    else:
-        print("Regression skip map: empty (all token IDs match between oracles)")
+    print("Regression skip map: disabled (baseline evidence cannot authorize skips)")
 
     manifest.tolerance = tolerance
     manifest.calibrated_fixtures = calibrated_fixtures
-    manifest.regression_skip_map = skip_map
+    manifest.regression_skip_map = {}
     write_manifest(manifest, manifest_path)
     print(f"Updated manifest written to {manifest_path}")
 

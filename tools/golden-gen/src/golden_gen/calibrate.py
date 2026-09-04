@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -45,8 +46,18 @@ def validate_calibration_coverage(manifest_dir: Path, manifest: Manifest) -> lis
         baseline = generated.get((expected.prompt_id, "vllm"))
         if reference is None or baseline is None:
             raise ValueError(f"missing oracle pair for calibration fixture {expected.fixture_id}")
-        _validate_fixture_shape(manifest_dir, manifest, expected, reference)
-        _validate_fixture_shape(manifest_dir, manifest, expected, baseline)
+        if reference.num_tokens != baseline.num_tokens:
+            raise ValueError(
+                f"oracle pair requires identical token lengths for {expected.prompt_id}: "
+                f"{reference.num_tokens} != {baseline.num_tokens}"
+            )
+        reference_data = _validate_fixture_shape(manifest_dir, manifest, expected, reference)
+        baseline_data = _validate_fixture_shape(manifest_dir, manifest, expected, baseline)
+        if expected.family == "regression":
+            count_argmax_mismatches(
+                reference_data["token_ids"].astype(np.int64),
+                baseline_data["token_ids"].astype(np.int64),
+            )
         calibrated.append(expected.fixture_id)
     if not calibrated:
         raise ValueError("empty calibration comparison set")
@@ -58,7 +69,7 @@ def _validate_fixture_shape(
     manifest: Manifest,
     expected: ExpectedFixture,
     metadata: FixtureMetadata,
-) -> None:
+) -> dict[str, NDArray[Any]]:
     path = manifest_dir / metadata.filename
     actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual_sha256 != metadata.sha256:
@@ -100,6 +111,7 @@ def _validate_fixture_shape(
             or metadata.logits_shape != (0, 0)
         ):
             raise ValueError(f"unsupported regression fixture shape for {metadata.filename}")
+    return data
 
 
 def pairwise_max_abs_diff(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
@@ -112,9 +124,10 @@ def pairwise_max_abs_diff(a: NDArray[np.float32], b: NDArray[np.float32]) -> flo
     Returns:
         Maximum |a[i,j] - b[i,j]| across all shared positions.
     """
-    min_len = min(a.shape[0], b.shape[0])
-    a = a[:min_len]
-    b = b[:min_len]
+    if a.shape != b.shape:
+        raise ValueError(
+            f"calibration logits require identical shapes, got {a.shape} and {b.shape}"
+        )
     return float(np.abs(a - b).max())
 
 
@@ -129,23 +142,14 @@ def count_argmax_mismatches(
         token_ids_b: Token ID sequence from oracle B.
 
     Returns:
-        Number of positions where token IDs differ (on shared prefix).
+        Number of positions where token IDs differ.
     """
-    min_len = min(len(token_ids_a), len(token_ids_b))
-    return int((token_ids_a[:min_len] != token_ids_b[:min_len]).sum())
-
-
-def compute_skip_positions(
-    token_ids_a: NDArray[np.int64],
-    token_ids_b: NDArray[np.int64],
-) -> list[int]:
-    """Return list of positions where token IDs disagree.
-
-    Only considers the shared prefix of the two sequences.
-    """
-    min_len = min(len(token_ids_a), len(token_ids_b))
-    mismatches = token_ids_a[:min_len] != token_ids_b[:min_len]
-    return [int(i) for i in range(min_len) if mismatches[i]]
+    if len(token_ids_a) != len(token_ids_b):
+        raise ValueError(
+            "calibration token sequences require identical lengths, "
+            f"got {len(token_ids_a)} and {len(token_ids_b)}"
+        )
+    return int((token_ids_a != token_ids_b).sum())
 
 
 def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
@@ -198,38 +202,3 @@ def calibrate_from_fixtures(manifest_dir: Path) -> ToleranceCalibration:
         calibration_factor=TOLERANCE_CALIBRATION_FACTOR,
         method=method,
     )
-
-
-def compute_regression_skip_map(manifest_dir: Path) -> dict[str, list[int]]:
-    """Compute skip positions for L1 regression where vllm disagrees with transformers.
-
-    For each regression prompt, compares token_ids between transformers and vllm
-    fixtures. Positions where they disagree should be skipped during L1 comparison,
-    since vllm itself disagrees with the reference oracle.
-
-    Args:
-        manifest_dir: Directory containing manifest.json and .safetensors fixtures.
-
-    Returns:
-        Dict mapping prompt_id -> list of position indices to skip.
-    """
-    manifest = read_manifest(manifest_dir / "manifest.json")
-    grouped = _group_fixtures_by_oracle(manifest, "regression")
-
-    skip_map: dict[str, list[int]] = {}
-    for pid in sorted(grouped):
-        oracles = grouped[pid]
-        if "transformers" not in oracles or "vllm" not in oracles:
-            continue
-
-        transformers_data = load_fixture(manifest_dir / oracles["transformers"].filename)
-        vllm_data = load_fixture(manifest_dir / oracles["vllm"].filename)
-
-        skip_positions = compute_skip_positions(
-            transformers_data["token_ids"].astype(np.int64),
-            vllm_data["token_ids"].astype(np.int64),
-        )
-        if skip_positions:
-            skip_map[pid] = skip_positions
-
-    return skip_map
