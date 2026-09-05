@@ -19,6 +19,7 @@ from golden_gen.observation import (
     observation_exit_code,
     observe_calibration,
     observe_case,
+    prepare_definition_observation,
     propose_thresholds,
 )
 from golden_gen.schema import Manifest, TolerancePolicy
@@ -125,7 +126,7 @@ def test_threshold_proposal_never_exceeds_approved_ceilings(
         propose_thresholds([observed])
 
 
-def test_policy_approval_requires_a_tracked_definition_observation(tmp_path):
+def _pending_manifest(tmp_path: Path) -> Path:
     fixture = Path(__file__).parent / "fixtures" / "manifest-v4.json"
     manifest = Manifest.from_json(fixture)
     reference_template, baseline_template = manifest.expected_fixtures
@@ -191,31 +192,32 @@ def test_policy_approval_requires_a_tracked_definition_observation(tmp_path):
     )
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(manifest.model_dump_json(indent=2))
-    manifest_bytes = manifest_path.read_bytes()
+    return manifest_path
 
-    repo = tmp_path / "repo"
-    observation_path = repo / "docs/releases/goldens-v0.2-calibration-observation.json"
-    observation_path.parent.mkdir(parents=True)
-    observation = {
-        "schema_version": 1,
-        "status": "non_accepting_calibration_observation",
-        "accepting": False,
-        "input_l1_threshold": 0.0,
-        "input_l2_threshold": 0.0,
-        "opened_fixture_ids": list(CALIBRATION_IDS),
-        "sealed_holdout_ids": list(HOLDOUT_IDS),
-        "identity": {
-            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
-            "kernel_scope": COMPARISON_KERNEL_SCOPE,
-        },
-        "proposal": {
-            "l1_near_tie_max_abs_logit_gap": 0.015625,
-            "l2_atol": 0.03125,
-        },
-    }
-    observation_path.write_text(json.dumps(observation, sort_keys=True))
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+
+def _commit(repo: Path, message: str, *paths: str) -> None:
+    observation = repo / "docs/releases/goldens-v0.2-calibration-observation.json"
+    if observation.exists():
+        blob = subprocess.run(
+            ["git", "-C", str(repo), "hash-object", str(observation)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        (repo / ".dag").mkdir(exist_ok=True)
+        (repo / ".dag/definition-index.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "inputs": [
+                        {"path": observation.relative_to(repo).as_posix(), "blob_oid": blob}
+                    ],
+                }
+            )
+        )
+        paths = (*paths, ".dag/definition-index.json")
+    if paths:
+        subprocess.run(["git", "-C", str(repo), "add", "--", *paths], check=True)
     subprocess.run(
         [
             "git",
@@ -226,22 +228,128 @@ def test_policy_approval_requires_a_tracked_definition_observation(tmp_path):
             "-c",
             "user.email=test@example.com",
             "commit",
+            "--allow-empty",
             "-qm",
-            "test observation",
+            message,
         ],
         check=True,
     )
 
-    approved = approve_manifest_policy(
-        manifest_path,
-        observation_path,
-        repo,
-        "Reviewed BF16 paged-attention calibration errors.",
+
+def _policy_fixture(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
+    manifest_path = _pending_manifest(tmp_path)
+    manifest_bytes = manifest_path.read_bytes()
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _commit(repo, "measurement candidate")
+    measurement_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    measurement_tree = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    def load_case(_prompt_id: str) -> ObservationInput:
+        return ObservationInput(
+            reference_logits=np.array([[0.0, 1.0], [0.19, 0.20]], dtype=np.float32),
+            candidate_logits=np.array([[0.0, 1.01], [0.20, 0.21]], dtype=np.float32),
+            reference_tokens=np.array([1, 1], dtype=np.int64),
+            candidate_tokens=np.array([1, 0], dtype=np.int64),
+        )
+
+    raw_observation = tmp_path / "raw-observation.json"
+    record = observe_calibration(
+        load_case,
+        ObservationIdentity(
+            measurement_commit=measurement_commit,
+            measurement_tree=measurement_tree,
+            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            candidate_binary_sha256="4" * 64,
+            runtime_sha256=hashlib.sha256(
+                Manifest.from_json(manifest_path).runtime.model_dump_json().encode()
+            ).hexdigest(),
+            kernel_scope=COMPARISON_KERNEL_SCOPE,
+            raw_evidence_sha256="6" * 64,
+        ),
     )
+    raw_observation.write_bytes(canonical_observation_json(record))
+    observation_path = repo / "docs/releases/goldens-v0.2-calibration-observation.json"
+    observation_path.parent.mkdir(parents=True)
+    prepare_definition_observation(
+        raw_observation,
+        observation_path,
+        ["BF16 candidate-kernel rounding at same-prefix rows."],
+    )
+    _commit(
+        repo,
+        "approve observation Definition",
+        "docs/releases/goldens-v0.2-calibration-observation.json",
+    )
+    head_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    head_tree = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return manifest_path, observation_path, repo, head_commit, head_tree
+
+
+def test_policy_approval_recomputes_tracked_definition_observation(tmp_path):
+    manifest_path, observation_path, repo, head_commit, head_tree = _policy_fixture(tmp_path)
+
+    approved = approve_manifest_policy(manifest_path, observation_path, repo)
 
     assert approved.tolerance_policy.l1_near_tie_max_abs_logit_gap == 0.015625
-    assert approved.tolerance_policy.l2_atol == 0.03125
-    assert any(
-        item.startswith("definition-observation-sha256:")
-        for item in approved.tolerance_policy.evidence
+    assert approved.tolerance_policy.l2_atol == 0.015625
+    assert approved.tolerance_policy.rationale == (
+        "BF16 candidate-kernel rounding at same-prefix rows."
     )
+    assert f"measurement-commit:{head_commit}" in approved.tolerance_policy.evidence
+    assert f"measurement-tree:{head_tree}" in approved.tolerance_policy.evidence
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("proposal", "smallest covering ladder"),
+        ("aggregate", "cover every case sample"),
+    ],
+)
+def test_policy_approval_rejects_tampered_statistics_and_proposal(tmp_path, field, message):
+    manifest_path, observation_path, repo, _head_commit, _head_tree = _policy_fixture(tmp_path)
+    observation = json.loads(observation_path.read_bytes())
+    if field == "proposal":
+        observation["proposal"]["l2_atol"] = 0.03125
+    else:
+        observation["aggregate"]["compared_elements"] += 1
+    observation_path.write_text(json.dumps(observation, sort_keys=True, separators=(",", ":")))
+    _commit(
+        repo,
+        "tampered Definition",
+        "docs/releases/goldens-v0.2-calibration-observation.json",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        approve_manifest_policy(manifest_path, observation_path, repo)
+
+
+def test_policy_approval_rejects_executable_change_after_measurement(tmp_path):
+    manifest_path, observation_path, repo, _head_commit, _head_tree = _policy_fixture(tmp_path)
+    (repo / "src.py").write_text("print('changed')\n")
+    _commit(repo, "changed executable", "src.py")
+
+    with pytest.raises(ValueError, match="executable or non-Definition bytes"):
+        approve_manifest_policy(manifest_path, observation_path, repo)

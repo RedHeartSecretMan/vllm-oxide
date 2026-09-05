@@ -14,12 +14,14 @@ from golden_gen.assets import publish_release_bundle
 from golden_gen.calibrate import calibrate_from_fixtures, validate_calibration_coverage
 from golden_gen.dry_run import run_dry_generate
 from golden_gen.environment import collect_release_runtime
+from golden_gen.guard import run_guarded
 from golden_gen.manifest import write_manifest
 from golden_gen.observation import (
     approve_manifest_policy,
     canonical_observation_json,
     observation_exit_code,
     observe_capture_replays,
+    prepare_definition_observation,
     verify_candidate_capture_replay,
 )
 from golden_gen.oracle_run import (
@@ -28,9 +30,10 @@ from golden_gen.oracle_run import (
     verify_fresh_replay,
 )
 from golden_gen.oracles.fake import FakeOracle
+from golden_gen.publication import prepare_publication, verify_publication
 from golden_gen.report import ReleaseReportInput, render_release_report
 from golden_gen.schema import Manifest
-from golden_gen.stages import write_stage_marker
+from golden_gen.stages import verify_stage_marker, write_stage_marker
 
 
 def _resolve_prompts_dir() -> Path:
@@ -46,6 +49,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Generate golden fixtures and validate vllm-oxide release evidence."
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    guard = commands.add_parser("guard", help="Supervise a GPU process with active RAM guards")
+    guard.add_argument("--evidence", type=Path, required=True)
+    guard.add_argument("child_command", nargs=argparse.REMAINDER)
+    publication = commands.add_parser("publication", help="Prepare or verify frozen publication")
+    publication.add_argument("--run-root", type=Path, required=True)
+    publication.add_argument("--repo-root", type=Path, required=True)
+    publication.add_argument("--candidate", required=True)
+    publication.add_argument(
+        "--action", choices=["prepare", "verify", "verify-download"], required=True
+    )
 
     preflight = commands.add_parser("preflight", help="Record the pinned release environment")
     preflight.add_argument("--model-dir", type=Path, required=True)
@@ -94,11 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
     candidate.add_argument("--replay-dir", type=Path, required=True)
     candidate.add_argument("--output", type=Path, required=True)
 
+    prepare_observation = commands.add_parser(
+        "prepare-observation-definition",
+        help="Normalize reviewed error classes into the second Definition candidate",
+    )
+    prepare_observation.add_argument("--raw-observation", type=Path, required=True)
+    prepare_observation.add_argument("--output", type=Path, required=True)
+    prepare_observation.add_argument("--accepted-error-class", action="append", required=True)
+
     approve = commands.add_parser("approve-policy", help="Apply the tracked mechanical proposal")
     approve.add_argument("--manifest", type=Path, required=True)
     approve.add_argument("--observation", type=Path, required=True)
     approve.add_argument("--repo-root", type=Path, required=True)
-    approve.add_argument("--rationale", required=True)
 
     report = commands.add_parser("report", help="Render the evidence-only release report")
     for name in ("manifest", "observation", "comparison", "benchmark"):
@@ -123,12 +143,20 @@ def build_parser() -> argparse.ArgumentParser:
     marker.add_argument("--run-root", type=Path, required=True)
     marker.add_argument("--stage", required=True)
     marker.add_argument("--repo-root", type=Path, required=True)
+    verify_marker = commands.add_parser(
+        "verify-stage-marker", help="Rehash a completed stage before its successor"
+    )
+    verify_marker.add_argument("--run-root", type=Path, required=True)
+    verify_marker.add_argument("--stage", required=True)
+    verify_marker.add_argument("--repo-root", type=Path, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     handlers: dict[str, Callable[[argparse.Namespace], int]] = {
+        "guard": _run_guard,
+        "publication": _run_publication,
         "preflight": _run_preflight,
         "generate": _run_generate,
         "generate-oracle": _run_generate_oracle,
@@ -137,12 +165,40 @@ def main(argv: list[str] | None = None) -> int:
         "calibrate-baseline": _run_calibrate_baseline,
         "observe": _run_observe,
         "verify-candidate-replay": _run_verify_candidate_replay,
+        "prepare-observation-definition": _run_prepare_observation_definition,
         "approve-policy": _run_approve_policy,
         "report": _run_report,
         "bundle": _run_bundle,
         "stage-marker": _run_stage_marker,
+        "verify-stage-marker": _run_verify_stage_marker,
     }
     return handlers[args.command](args)
+
+
+def _run_guard(args: argparse.Namespace) -> int:
+    command = args.child_command
+    if command and command[0] == "--":
+        command = command[1:]
+    try:
+        run_guarded(command, args.evidence)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"ERROR: guarded stage failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_publication(args: argparse.Namespace) -> int:
+    try:
+        if args.action == "prepare":
+            prepare_publication(args.repo_root, args.run_root, args.candidate)
+        else:
+            verify_publication(
+                args.run_root, args.candidate, downloaded=args.action == "verify-download"
+            )
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print(f"ERROR: publication identity verification failed: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _fresh_output(path: Path, description: str) -> None:
@@ -247,9 +303,23 @@ def _run_verify_candidate_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_prepare_observation_definition(args: argparse.Namespace) -> int:
+    try:
+        _fresh_output(args.output, "Definition observation output")
+        prepare_definition_observation(
+            args.raw_observation,
+            args.output,
+            args.accepted_error_class,
+        )
+    except (OSError, ValueError) as error:
+        print(f"ERROR: Definition observation preparation failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _run_approve_policy(args: argparse.Namespace) -> int:
     try:
-        approve_manifest_policy(args.manifest, args.observation, args.repo_root, args.rationale)
+        approve_manifest_policy(args.manifest, args.observation, args.repo_root)
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         print(f"ERROR: tolerance policy approval failed: {error}", file=sys.stderr)
         return 1
@@ -326,6 +396,15 @@ def _run_stage_marker(args: argparse.Namespace) -> int:
         write_stage_marker(args.run_root, args.stage, args.repo_root)
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         print(f"ERROR: stage marker failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_verify_stage_marker(args: argparse.Namespace) -> int:
+    try:
+        verify_stage_marker(args.run_root, args.stage, args.repo_root)
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        print(f"ERROR: stage marker verification failed: {error}", file=sys.stderr)
         return 1
     return 0
 

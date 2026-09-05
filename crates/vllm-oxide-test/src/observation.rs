@@ -14,6 +14,7 @@ use vllm_oxide::{Prompt, Source, LLM};
 use crate::benchmark::fixed_engine_options;
 use crate::capture::generate_with_preserved_capture;
 use crate::manifest::parse_observation_manifest;
+use crate::measurement::{validate_measurement_identity, validate_running_binary};
 use crate::prompts::PromptEntry;
 use crate::types::OracleName;
 
@@ -58,6 +59,7 @@ pub fn run_candidate_capture(
     manifest_path: &Path,
     prompts: &HashMap<String, PromptEntry>,
     output_dir: &Path,
+    repo_root: &Path,
     measurement_commit: &str,
     measurement_tree: &str,
 ) -> Result<CandidateCaptureIndex> {
@@ -66,9 +68,9 @@ pub fn run_candidate_capture(
     {
         bail!("candidate observation requires the deterministic process environment");
     }
-    if !is_lowercase_hex(measurement_commit, 40) || !is_lowercase_hex(measurement_tree, 40) {
-        bail!("candidate observation requires exact measurement commit and tree identities");
-    }
+    let measurement =
+        validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
+    validate_running_binary(repo_root)?;
     if output_dir.exists() || output_dir.is_symlink() {
         bail!("candidate capture output must be fresh and non-existing");
     }
@@ -120,8 +122,8 @@ pub fn run_candidate_capture(
     }
     let index = CandidateCaptureIndex {
         schema_version: 1,
-        measurement_commit: measurement_commit.to_string(),
-        measurement_tree: measurement_tree.to_string(),
+        measurement_commit: measurement.commit,
+        measurement_tree: measurement.tree,
         manifest_sha256: format!("{:x}", Sha256::digest(&manifest_bytes)),
         candidate_binary_sha256: format!("{:x}", Sha256::digest(&binary_bytes)),
         runtime_sha256: format!("{:x}", Sha256::digest(&runtime_bytes)),
@@ -144,13 +146,6 @@ pub fn run_candidate_capture(
     output.write_all(b"\n")?;
     output.sync_all()?;
     Ok(index)
-}
-
-fn is_lowercase_hex(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[cfg(test)]

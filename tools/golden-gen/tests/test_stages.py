@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from golden_gen.stages import write_stage_marker
+from golden_gen.stages import verify_stage_marker, write_stage_marker
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -20,6 +20,7 @@ def test_stage_marker_binds_outputs_commit_tree_and_predecessor(ticket_artifact_
 
     env_marker = write_stage_marker(run_root, "env", REPO_ROOT)
     env_record = json.loads(env_marker.read_text())
+    assert verify_stage_marker(run_root, "env", REPO_ROOT) == env_marker
 
     assert env_record["stage"] == "env"
     assert len(env_record["generator_commit"]) == 40
@@ -41,6 +42,22 @@ def test_stage_marker_binds_outputs_commit_tree_and_predecessor(ticket_artifact_
         generated_record["predecessor_marker_sha256"]
         == hashlib.sha256(env_marker.read_bytes()).hexdigest()
     )
+    assert verify_stage_marker(run_root, "generate", REPO_ROOT) == generated_marker
+
+    runtime.write_bytes(b"changed predecessor")
+    with pytest.raises(ValueError, match="output identity changed"):
+        verify_stage_marker(run_root, "generate", REPO_ROOT)
+    runtime.write_bytes(b"runtime")
+
+    unexpected = generate / "unexpected.json"
+    unexpected.write_bytes(b"unexpected")
+    with pytest.raises(ValueError, match="output set changed"):
+        verify_stage_marker(run_root, "generate", REPO_ROOT)
+    unexpected.unlink()
+
+    (generate / "evidence.json").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="output identity changed"):
+        verify_stage_marker(run_root, "generate", REPO_ROOT)
 
     with pytest.raises(FileExistsError, match="already exists"):
         write_stage_marker(run_root, "generate", REPO_ROOT)

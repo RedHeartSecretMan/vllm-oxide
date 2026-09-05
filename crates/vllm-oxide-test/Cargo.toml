@@ -21,6 +21,10 @@ path = "src/bin/benchmark.rs"
 name = "vllm-oxide-observe"
 path = "src/bin/observe.rs"
 
+[[bin]]
+name = "vllm-oxide-verify-bundle"
+path = "src/bin/verify_bundle.rs"
+
 [features]
 cuda = ["vllm_oxide/cuda"]
 

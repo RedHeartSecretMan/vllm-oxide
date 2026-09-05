@@ -26,7 +26,8 @@ reference failure or select acceptance thresholds automatically.
 `tools/validate-release.sh` exposes separately invocable, content-marked stages:
 
 - `env` installs registry dependencies from locked wheels only, then validates
-  exact model/tokenizer hashes and runtime identities.
+  exact model/tokenizer hashes and runtime identities. It retains actual installer
+  logs and matches every live registry distribution's wheel tags/build to the lock.
 - `generate` runs Transformers and vLLM in separate fresh processes twice,
   verifies bit-identical replay, and assembles exactly 28 cases / 56 assets.
 - `calibrate` records baseline evidence without selecting acceptance thresholds.
@@ -37,6 +38,8 @@ reference failure or select acceptance thresholds automatically.
   reviewed Definition checkpoint. It then runs and replays all 28 candidate cases.
 - `benchmark`, `report`, and `bundle` produce the fixed performance evidence,
   evidence-only report, and exact two-asset bundle.
+- `verify-local` exercises the production Rust downloader against that exact pair
+  in a new cache before any publication operation is available.
 - `publish` and `verify` are separate. `publish` is inert unless the user supplies
   the explicit publication guard and frozen candidate identity.
 
@@ -53,6 +56,13 @@ Run later stages one at a time with the same root. Never use
 release evidence. Each successful stage creates a JSON marker binding the
 generator commit/tree, predecessor marker, and output checksums. A failed stage
 creates no successor marker.
+
+Generation, baseline calibration, and policy approval keep separate immutable
+fixture/manifest copies. Marker checks recursively rehash predecessor outputs and
+reject changed executable inputs. GPU owners run under a process-lifetime RAM
+watchdog, with disk/RAM/GPU evidence before and after execution. Rust GPU runners
+also check their compiler-produced source fingerprint against the clean reviewed
+worktree. Reports retain complete runtime identities and every benchmark repetition.
 
 ```bash
 uv run python -m golden_gen --help

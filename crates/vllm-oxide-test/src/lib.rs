@@ -20,6 +20,7 @@ pub mod l2;
 pub mod l3;
 pub mod lifecycle;
 pub mod manifest;
+pub mod measurement;
 pub mod observation;
 pub mod prompts;
 pub mod report;

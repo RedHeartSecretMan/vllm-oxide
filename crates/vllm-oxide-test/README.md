@@ -42,6 +42,9 @@ Definition-approved observation and retain a second set of candidate captures:
 ```bash
 cargo run --release -p vllm_oxide_test --features cuda -- \
     --mode authoritative \
+    --repo-root /path/to/reviewed-checkout \
+    --measurement-commit "$VLLM_OXIDE_MEASUREMENT_COMMIT" \
+    --measurement-tree "$VLLM_OXIDE_MEASUREMENT_TREE" \
     --approved-observation docs/releases/goldens-v0.2-calibration-observation.json \
     --model-path /path/to/Qwen3-0.6B \
     --manifest /path/to/goldens/manifest.json \
@@ -53,6 +56,9 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 ```bash
 cargo run --release -p vllm_oxide_test --features cuda -- \
     --mode authoritative \
+    --repo-root /path/to/reviewed-checkout \
+    --measurement-commit "$VLLM_OXIDE_MEASUREMENT_COMMIT" \
+    --measurement-tree "$VLLM_OXIDE_MEASUREMENT_TREE" \
     --approved-observation docs/releases/goldens-v0.2-calibration-observation.json \
     --model-path /path/to/Qwen3-0.6B \
     --release-tag goldens-v0.2 \
@@ -65,6 +71,8 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 | Flag | Description |
 |------|-------------|
 | `--mode authoritative` | The only accepting comparator mode |
+| `--repo-root PATH` | Clean reviewed source checkout, matching the binary build fingerprint |
+| `--measurement-commit SHA` / `--measurement-tree SHA` | Frozen measured source identities |
 | `--approved-observation PATH` | Definition-tracked observation that unlocks holdout access |
 | `--model-path PATH` | Model directory (config.json + tokenizer.json + weights) |
 | `--manifest PATH` | Local manifest.json + fixture directory |

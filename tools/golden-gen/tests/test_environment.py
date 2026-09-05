@@ -1,15 +1,52 @@
 from __future__ import annotations
 
 import hashlib
+from email.message import Message
 
 import pytest
 
 from golden_gen.environment import (
     InstallEvidence,
+    collect_installed_wheels,
     validate_deterministic_environment,
     validate_model_artifacts,
     validate_wheel_only_install,
 )
+
+
+def test_live_wheel_provenance_rejects_unknown_and_source_distributions(tmp_path):
+    lock = tmp_path / "uv.lock"
+    lock.write_text("""[[package]]
+name = "example"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+[[package.wheels]]
+url = "https://files.pythonhosted.org/example-1.0-py3-none-any.whl"
+hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+""")
+
+    class Distribution:
+        def __init__(self, name="example", direct=None):
+            self.metadata = Message()
+            self.metadata["Name"] = name
+            self.version = "1.0"
+            self.direct = direct
+
+        def read_text(self, name):
+            return {
+                "WHEEL": "Wheel-Version: 1.0\nTag: py3-none-any\n",
+                "INSTALLER": "uv\n",
+                "direct_url.json": self.direct,
+            }.get(name)
+
+    wheels = collect_installed_wheels(lock, distributions=[Distribution()])
+    assert [(wheel.name, wheel.filename) for wheel in wheels] == [
+        ("example", "example-1.0-py3-none-any.whl")
+    ]
+    with pytest.raises(ValueError, match="not a unique locked registry"):
+        collect_installed_wheels(lock, distributions=[Distribution("unlocked")])
+    with pytest.raises(ValueError, match="direct/source"):
+        collect_installed_wheels(lock, distributions=[Distribution(direct='{"url":"file:///src"}')])
 
 
 def test_environment_requires_deterministic_variables_before_runtime_import():

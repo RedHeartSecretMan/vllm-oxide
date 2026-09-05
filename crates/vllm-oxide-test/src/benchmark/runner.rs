@@ -14,9 +14,10 @@ use vllm_oxide::{Source, LLM};
 
 use super::{
     aggregate_workload, approved_workloads, fixed_engine_options, fixed_sampling_params,
-    is_lowercase_hex, summarize_durations, validate_private_telemetry, workload_prompts,
-    BenchmarkRepetitionEvidence, BenchmarkRunEvidence, MemoryMonitorEvidence, MemorySample,
+    summarize_durations, validate_private_telemetry, workload_prompts, BenchmarkRepetitionEvidence,
+    BenchmarkRunEvidence, MemoryMonitorEvidence, MemorySample,
 };
+use crate::measurement::{validate_measurement_identity, validate_running_binary};
 use crate::prompts::PromptEntry;
 
 fn ensure_no_unrelated_compute_processes() -> Result<()> {
@@ -34,6 +35,7 @@ fn ensure_no_unrelated_compute_processes() -> Result<()> {
         .context("nvidia-smi process output is not UTF-8")?
         .lines()
         .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != std::process::id())
         .collect::<Vec<_>>();
     if !pids.is_empty() {
         bail!("unrelated CUDA compute processes are active: {pids:?}");
@@ -43,7 +45,7 @@ fn ensure_no_unrelated_compute_processes() -> Result<()> {
 
 struct ActiveMemoryMonitor {
     child: Child,
-    reader: thread::JoinHandle<Result<Vec<MemorySample>>>,
+    reader: Option<thread::JoinHandle<Result<Vec<MemorySample>>>>,
 }
 
 impl ActiveMemoryMonitor {
@@ -89,22 +91,41 @@ impl ActiveMemoryMonitor {
             }
             Ok(samples)
         });
+        let monitor = Self {
+            child,
+            reader: Some(reader),
+        };
         ready_receiver
             .recv_timeout(Duration::from_secs(5))
             .context("GPU memory monitor did not produce a post-initialization baseline")?;
-        Ok(Self { child, reader })
+        Ok(monitor)
     }
 
     fn finish(mut self) -> Result<MemoryMonitorEvidence> {
+        if self.child.try_wait()?.is_some() {
+            bail!("GPU memory monitor exited before the final synchronization");
+        }
         self.child.kill().context("stopping GPU memory monitor")?;
         self.child
             .wait()
             .context("waiting for GPU memory monitor")?;
         let samples = self
             .reader
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("GPU memory reader missing"))?
             .join()
             .map_err(|_| anyhow::anyhow!("GPU memory monitor reader panicked"))??;
         MemoryMonitorEvidence::validate(50, false, &[], samples)
+    }
+}
+
+impl Drop for ActiveMemoryMonitor {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
@@ -149,12 +170,13 @@ pub fn run_release_benchmark(
     model_path: &Path,
     prompts: &HashMap<String, PromptEntry>,
     output_path: &Path,
+    repo_root: &Path,
     measurement_commit: &str,
     measurement_tree: &str,
 ) -> Result<BenchmarkRunEvidence> {
-    if !is_lowercase_hex(measurement_commit, 40) || !is_lowercase_hex(measurement_tree, 40) {
-        bail!("benchmark measurement commit and tree must be exact 40-hex identities");
-    }
+    let measurement =
+        validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
+    validate_running_binary(repo_root)?;
     let output_dir = output_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("benchmark output must have a parent directory"))?;
@@ -229,8 +251,8 @@ pub fn run_release_benchmark(
     }
     let evidence = BenchmarkRunEvidence {
         schema_version: 1,
-        measurement_commit: measurement_commit.to_string(),
-        measurement_tree: measurement_tree.to_string(),
+        measurement_commit: measurement.commit,
+        measurement_tree: measurement.tree,
         workloads,
     };
     let mut output = OpenOptions::new()

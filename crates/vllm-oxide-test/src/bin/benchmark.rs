@@ -13,6 +13,8 @@ struct Cli {
     #[arg(long)]
     output: PathBuf,
     #[arg(long)]
+    repo_root: PathBuf,
+    #[arg(long)]
     measurement_commit: String,
     #[arg(long)]
     measurement_tree: String,
@@ -25,6 +27,7 @@ fn main() -> Result<()> {
         &cli.model_path,
         &prompts,
         &cli.output,
+        &cli.repo_root,
         &cli.measurement_commit,
         &cli.measurement_tree,
     )?;

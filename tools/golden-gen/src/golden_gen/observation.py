@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -129,6 +130,13 @@ class CalibrationObservationRecord:
     cases: tuple[CaseObservation, ...]
     aggregate: AggregateObservation
     proposal: ThresholdProposal
+    approval: ObservationApproval | None = None
+
+
+@dataclass(frozen=True)
+class ObservationApproval:
+    status: str
+    accepted_error_classes: tuple[str, ...]
 
 
 def observe_case(
@@ -522,15 +530,250 @@ def verify_candidate_capture_replay(primary_dir: Path, replay_dir: Path) -> dict
     }
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_normalized_observation(
+    observation: dict[str, object], *, require_approval: bool
+) -> tuple[float, float]:
+    expected_top_level = {
+        "schema_version",
+        "status",
+        "accepting",
+        "input_l1_threshold",
+        "input_l2_threshold",
+        "opened_fixture_ids",
+        "sealed_holdout_ids",
+        "identity",
+        "cases",
+        "aggregate",
+        "proposal",
+        "approval",
+    }
+    if set(observation) != expected_top_level:
+        raise ValueError("normalized observation has missing or additional fields")
+    opened = observation["opened_fixture_ids"]
+    sealed = observation["sealed_holdout_ids"]
+    if (
+        observation["schema_version"] != 1
+        or observation["status"] != "non_accepting_calibration_observation"
+        or observation["accepting"] is not False
+        or observation["input_l1_threshold"] != 0.0
+        or observation["input_l2_threshold"] != 0.0
+        or not isinstance(opened, list)
+        or tuple(opened) != CALIBRATION_IDS
+        or not isinstance(sealed, list)
+        or tuple(sealed) != HOLDOUT_IDS
+    ):
+        raise ValueError("normalized observation violates the non-accepting holdout contract")
+    identity = observation["identity"]
+    if not isinstance(identity, dict) or set(identity) != {
+        "measurement_commit",
+        "measurement_tree",
+        "manifest_sha256",
+        "candidate_binary_sha256",
+        "runtime_sha256",
+        "kernel_scope",
+        "raw_evidence_sha256",
+    }:
+        raise ValueError("normalized observation identity is incomplete")
+    if not all(
+        _is_sha256(identity[field])
+        for field in (
+            "manifest_sha256",
+            "candidate_binary_sha256",
+            "runtime_sha256",
+            "raw_evidence_sha256",
+        )
+    ) or any(
+        not isinstance(identity[field], str)
+        or len(identity[field]) != 40
+        or any(character not in "0123456789abcdef" for character in identity[field])
+        for field in ("measurement_commit", "measurement_tree")
+    ):
+        raise ValueError("normalized observation contains a malformed content identity")
+    cases = observation["cases"]
+    if (
+        not isinstance(cases, list)
+        or any(not isinstance(case, dict) for case in cases)
+        or [case.get("prompt_id") for case in cases] != list(CALIBRATION_IDS)
+    ):
+        raise ValueError("normalized observation must contain the exact four calibration cases")
+    case_maxima: list[float] = []
+    gaps: list[float] = []
+    total_elements = 0
+    total_rows = 0
+    weighted_mean = 0.0
+    weighted_square = 0.0
+    divergences = 0
+    for case in cases:
+        if not isinstance(case, dict) or set(case) != set(CaseObservation.__dataclass_fields__):
+            raise ValueError("normalized observation case schema is invalid")
+        numbers = [
+            case[field]
+            for field in (
+                "mean_abs_error",
+                "rms_abs_error",
+                "p50_abs_error",
+                "p95_abs_error",
+                "p99_abs_error",
+                "p999_abs_error",
+                "maximum_abs_error",
+            )
+        ]
+        if any(
+            type(value) not in (int, float) or not math.isfinite(value) or value < 0
+            for value in numbers
+        ):
+            raise ValueError("normalized observation case contains non-finite statistics")
+        if case["non_finite_count"] != 0:
+            raise ValueError("normalized observation cannot approve non-finite samples")
+        ordered = [
+            float(case["p50_abs_error"]),
+            float(case["p95_abs_error"]),
+            float(case["p99_abs_error"]),
+            float(case["p999_abs_error"]),
+            float(case["maximum_abs_error"]),
+        ]
+        if any(left > right for left, right in zip(ordered, ordered[1:], strict=False)):
+            raise ValueError("normalized observation case quantiles are inconsistent")
+        elements_value = case["compared_elements"]
+        rows_value = case["compared_rows"]
+        divergence = case["first_divergence"]
+        excluded = case["excluded_rows"]
+        if (
+            not isinstance(elements_value, int)
+            or isinstance(elements_value, bool)
+            or not isinstance(rows_value, int)
+            or isinstance(rows_value, bool)
+            or not isinstance(excluded, int)
+            or isinstance(excluded, bool)
+            or excluded < 0
+            or (
+                divergence is not None
+                and (
+                    not isinstance(divergence, int)
+                    or isinstance(divergence, bool)
+                    or divergence < 0
+                    or divergence + 1 != rows_value
+                )
+            )
+        ):
+            raise ValueError("normalized observation case counts are invalid")
+        elements = elements_value
+        rows = rows_value
+        if elements <= 0 or rows <= 0:
+            raise ValueError("normalized observation case has an empty comparison set")
+        if elements % rows != 0 or (divergence is None and excluded != 0):
+            raise ValueError("normalized observation case counts are inconsistent")
+        if not 0 <= case["mean_abs_error"] <= case["rms_abs_error"] <= case["maximum_abs_error"]:
+            raise ValueError("normalized observation case moments are inconsistent")
+        total_elements += elements
+        total_rows += rows
+        weighted_mean += float(case["mean_abs_error"]) * elements
+        weighted_square += float(case["rms_abs_error"]) ** 2 * elements
+        case_maxima.append(float(case["maximum_abs_error"]))
+        if divergence is not None:
+            divergences += 1
+            gap = case["candidate_token_gap"]
+            if not isinstance(gap, (int, float)) or not math.isfinite(gap) or gap < 0:
+                raise ValueError("normalized observation divergence has no finite candidate gap")
+            gaps.append(float(gap))
+        elif case["candidate_token_gap"] is not None:
+            raise ValueError("normalized observation gap exists without a divergence")
+    aggregate = observation["aggregate"]
+    if not isinstance(aggregate, dict) or set(aggregate) != set(
+        AggregateObservation.__dataclass_fields__
+    ):
+        raise ValueError("normalized observation aggregate schema is invalid")
+    expected_mean = weighted_mean / total_elements
+    expected_rms = math.sqrt(weighted_square / total_elements)
+    if (
+        aggregate["compared_elements"] != total_elements
+        or aggregate["compared_rows"] != total_rows
+        or aggregate["divergence_count"] != divergences
+        or aggregate["non_finite_count"] != 0
+        or not math.isclose(float(aggregate["mean_abs_error"]), expected_mean, rel_tol=1e-12)
+        or not math.isclose(float(aggregate["rms_abs_error"]), expected_rms, rel_tol=1e-12)
+        or float(aggregate["maximum_abs_error"]) != max(case_maxima)
+    ):
+        raise ValueError("normalized observation aggregate does not cover every case sample")
+    aggregate_ordered = [
+        float(aggregate["p50_abs_error"]),
+        float(aggregate["p95_abs_error"]),
+        float(aggregate["p99_abs_error"]),
+        float(aggregate["p999_abs_error"]),
+        float(aggregate["maximum_abs_error"]),
+    ]
+    if any(not math.isfinite(value) for value in aggregate_ordered) or any(
+        left > right for left, right in zip(aggregate_ordered, aggregate_ordered[1:], strict=False)
+    ):
+        raise ValueError("normalized observation aggregate quantiles are invalid")
+    proposed_l1 = _smallest_covering_ladder(max(gaps, default=0.0), L1_LADDER, "L1 candidate gap")
+    proposed_l2 = _smallest_covering_ladder(max(case_maxima), L2_LADDER, "L2 absolute error")
+    proposal = observation["proposal"]
+    if not isinstance(proposal, dict) or proposal != {
+        "l1_near_tie_max_abs_logit_gap": proposed_l1,
+        "l2_atol": proposed_l2,
+    }:
+        raise ValueError("normalized observation proposal is not the smallest covering ladder pair")
+    approval = observation["approval"]
+    if require_approval:
+        accepted = approval.get("accepted_error_classes") if isinstance(approval, dict) else None
+        if (
+            not isinstance(approval, dict)
+            or approval.get("status") != "approved"
+            or set(approval) != {"status", "accepted_error_classes"}
+            or not isinstance(accepted, list)
+            or not accepted
+            or any(
+                not isinstance(item, str) or not item or item != item.strip() for item in accepted
+            )
+            or accepted != sorted(set(accepted), key=str.encode)
+        ):
+            raise ValueError("Definition observation lacks reviewed accepted error classes")
+    elif approval is not None:
+        raise ValueError("raw calibration observation must not claim Definition approval")
+    return proposed_l1, proposed_l2
+
+
+def prepare_definition_observation(
+    raw_observation: Path,
+    output: Path,
+    accepted_error_classes: list[str],
+) -> Path:
+    observation = json.loads(Path(raw_observation).read_bytes())
+    _validate_normalized_observation(observation, require_approval=False)
+    if not accepted_error_classes or any(not item.strip() for item in accepted_error_classes):
+        raise ValueError("at least one reviewed accepted error class is required")
+    normalized_error_classes = sorted(
+        {item.strip() for item in accepted_error_classes}, key=str.encode
+    )
+    if len(normalized_error_classes) != len(accepted_error_classes):
+        raise ValueError("reviewed accepted error classes must be unique")
+    observation["approval"] = {
+        "status": "approved",
+        "accepted_error_classes": normalized_error_classes,
+    }
+    _validate_normalized_observation(observation, require_approval=True)
+    with Path(output).open("xb") as destination:
+        destination.write(
+            (json.dumps(observation, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+    return Path(output)
+
+
 def approve_manifest_policy(
     manifest_path: Path,
     observation_path: Path,
     repo_root: Path,
-    rationale: str,
 ) -> Manifest:
     """Apply only the Definition-tracked mechanical proposal to the pending manifest."""
-    if not rationale.strip():
-        raise ValueError("approved tolerance policy requires root-cause rationale")
     repo_root = Path(repo_root).resolve()
     observation_path = Path(observation_path).resolve()
     expected_path = repo_root / "docs/releases/goldens-v0.2-calibration-observation.json"
@@ -548,6 +791,26 @@ def approve_manifest_policy(
         capture_output=True,
         text=True,
     ).stdout.strip()
+    working_blob = subprocess.run(
+        ["git", "-C", str(repo_root), "hash-object", str(observation_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if working_blob != blob:
+        raise ValueError("working observation bytes differ from the reviewed HEAD blob")
+    definition = json.loads((repo_root / ".dag/definition-index.json").read_bytes())
+    selected = [item for item in definition["inputs"] if item.get("path") == relative]
+    if definition.get("schema_version") != 1 or selected != [{"path": relative, "blob_oid": blob}]:
+        raise ValueError("approved observation is not selected by the bound Definition index")
+    status = subprocess.run(
+        ["git", "-C", str(repo_root), "status", "--porcelain=v1"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if status:
+        raise ValueError("policy approval requires a clean measurement worktree")
     manifest_bytes = Path(manifest_path).read_bytes()
     manifest = Manifest.model_validate_json(manifest_bytes)
     expected_baseline = {
@@ -564,23 +827,84 @@ def approve_manifest_policy(
         raise ValueError("only a pending zero-threshold manifest can receive approval")
     observation_bytes = observation_path.read_bytes()
     observation = json.loads(observation_bytes)
+    proposed_l1, proposed_l2 = _validate_normalized_observation(observation, require_approval=True)
+    identity = observation["identity"]
+    assert isinstance(identity, dict)
     if (
-        observation.get("schema_version") != 1
-        or observation.get("status") != "non_accepting_calibration_observation"
-        or observation.get("accepting") is not False
-        or tuple(observation.get("opened_fixture_ids", [])) != CALIBRATION_IDS
-        or tuple(observation.get("sealed_holdout_ids", [])) != HOLDOUT_IDS
-        or observation["identity"]["manifest_sha256"] != hashlib.sha256(manifest_bytes).hexdigest()
-        or observation["identity"]["kernel_scope"] != manifest.kernel_paths.comparison_scope
+        identity["manifest_sha256"] != hashlib.sha256(manifest_bytes).hexdigest()
+        or identity["kernel_scope"] != manifest.kernel_paths.comparison_scope
+        or identity["runtime_sha256"]
+        != hashlib.sha256(manifest.runtime.model_dump_json().encode()).hexdigest()
     ):
         raise ValueError(
             "tracked observation does not bind the pending manifest and sealed holdout"
         )
-    proposal = observation["proposal"]
-    proposed_l1 = float(proposal["l1_near_tie_max_abs_logit_gap"])
-    proposed_l2 = float(proposal["l2_atol"])
-    if proposed_l1 not in L1_LADDER or proposed_l2 not in L2_LADDER:
-        raise ValueError("tracked observation proposal is outside the mechanical ladders")
+    measurement_commit = str(identity["measurement_commit"])
+    measurement_tree = str(identity["measurement_tree"])
+    resolved_measurement_tree = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", f"{measurement_commit}^{{tree}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if resolved_measurement_tree != measurement_tree:
+        raise ValueError("tracked observation measurement commit/tree identity is invalid")
+    ancestor = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", measurement_commit, "HEAD"],
+        check=False,
+        capture_output=True,
+    )
+    if ancestor.returncode != 0:
+        raise ValueError("tracked observation measurement commit is not an ancestor of HEAD")
+    changed_paths = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "diff",
+            "--name-only",
+            "-z",
+            f"{measurement_commit}..HEAD",
+            "--",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
+    allowed_exact = {
+        b"CONTEXT.md",
+        b".dag/definition-index.json",
+        b".dag/definitions/v0.2.0-github.json",
+        b"docs/releases/goldens-v0.2-calibration-observation.json",
+    }
+    disallowed = sorted(
+        path.decode(errors="backslashreplace")
+        for path in changed_paths
+        if path
+        and path not in allowed_exact
+        and not (path.startswith(b"docs/adr/") and path.endswith(b".md"))
+    )
+    if disallowed:
+        raise ValueError(
+            "executable or non-Definition bytes changed after calibration measurement: "
+            + ", ".join(disallowed)
+        )
+    head_commit = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    head_tree = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    approval = observation["approval"]
+    assert isinstance(approval, dict)
+    accepted_error_classes = approval["accepted_error_classes"]
+    assert isinstance(accepted_error_classes, list)
+    rationale = "; ".join(str(item) for item in accepted_error_classes)
     observation_sha256 = hashlib.sha256(observation_bytes).hexdigest()
     manifest.tolerance_policy = TolerancePolicy(
         version="same-prefix-v1",
@@ -588,10 +912,17 @@ def approve_manifest_policy(
         kernel=manifest.kernel_paths.comparison_scope,
         l1_near_tie_max_abs_logit_gap=proposed_l1,
         l2_atol=proposed_l2,
-        rationale=rationale.strip(),
+        rationale=rationale,
         evidence=[
             f"definition-observation-sha256:{observation_sha256}",
             f"definition-observation-blob:{blob}",
+            f"observation-measurement-commit:{measurement_commit}",
+            f"observation-measurement-tree:{measurement_tree}",
+            f"measurement-commit:{head_commit}",
+            f"measurement-tree:{head_tree}",
+            f"candidate-binary-sha256:{identity['candidate_binary_sha256']}",
+            f"runtime-sha256:{identity['runtime_sha256']}",
+            f"raw-evidence-sha256:{identity['raw_evidence_sha256']}",
         ],
     )
     manifest = Manifest.model_validate(manifest.model_dump())

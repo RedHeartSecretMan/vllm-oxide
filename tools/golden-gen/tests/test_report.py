@@ -85,6 +85,11 @@ def test_report_records_three_commit_roles_all_metrics_and_no_self_reference():
         assert heading in report
     assert "final candidate commit" not in report.lower()
     assert "recorded externally" in report
+    assert '"samples": [' in report
+    assert '"mean": 2500000.0' in report
+    assert '"baseline_mib": 2000' in report
+    assert '"sample_count": 3' in report
+    assert "2.10.0" in report
 
 
 def test_report_rejects_missing_metric_or_a_final_commit_self_reference():

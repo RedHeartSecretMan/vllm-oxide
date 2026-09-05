@@ -35,6 +35,18 @@ struct Cli {
     #[arg(long)]
     model_path: PathBuf,
 
+    /// Reviewed repository whose executable bytes produced this measurement.
+    #[arg(long)]
+    repo_root: PathBuf,
+
+    /// Frozen measurement commit containing all executable and workflow bytes.
+    #[arg(long)]
+    measurement_commit: String,
+
+    /// Tree object belonging to the frozen measurement commit.
+    #[arg(long)]
+    measurement_tree: String,
+
     /// Path to a local manifest.json + fixture directory.
     #[arg(long, group = "source")]
     manifest: Option<PathBuf>,
@@ -89,6 +101,12 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let measurement = vllm_oxide_test::measurement::validate_measurement_identity(
+        &cli.repo_root,
+        &cli.measurement_commit,
+        &cli.measurement_tree,
+    )?;
+    vllm_oxide_test::measurement::validate_running_binary(&cli.repo_root)?;
 
     // 1. Load or download golden fixtures.
     let (golden_manifest, fixture_dir) = if let Some(ref manifest_path) = cli.manifest {
@@ -113,7 +131,12 @@ fn main() -> Result<()> {
         .approved_observation
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("authoritative mode requires --approved-observation"))?;
-    vllm_oxide_test::approval::validate_authoritative_approval(&golden_manifest, approval)?;
+    vllm_oxide_test::approval::validate_authoritative_approval(
+        &golden_manifest,
+        approval,
+        &cli.repo_root,
+        &measurement,
+    )?;
     if cli.capture_dir.exists() || cli.capture_dir.is_symlink() {
         anyhow::bail!("authoritative capture directory must be fresh and non-existing");
     }

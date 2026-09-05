@@ -81,6 +81,7 @@ class BenchmarkRepetition(BaseModel):
     time_to_first_token_ns: list[int] = Field(min_length=1)
     inter_token_latency_ns: InterTokenLatency
     memory: MemoryEvidence
+    telemetry_artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class WorkloadEvidence(BaseModel):
@@ -183,6 +184,10 @@ def render_release_report(evidence: ReleaseReportInput) -> str:
         f"- Baseline: `{evidence.kernel_paths.baseline}`",
         f"- Candidate: `{evidence.kernel_paths.candidate}`",
         "",
+        "```json",
+        evidence.runtime.model_dump_json(indent=2),
+        "```",
+        "",
         "## Fixture lifecycle",
         "",
         (
@@ -229,9 +234,15 @@ def render_release_report(evidence: ReleaseReportInput) -> str:
                 f"- Time to first token median: {median(ttft):.3f} ns",
                 (
                     f"- Per-token latency median: {median(itl):.3f} ns "
-                    "(all raw samples retained in benchmark JSON)"
+                    "(all raw samples retained below)"
                 ),
                 f"- Peak memory median: {median(peak):.3f} MiB",
+                "",
+                "Complete repetitions (TTFT and ITL in ns, memory in MiB):",
+                "",
+                "```json",
+                workload.model_dump_json(indent=2, exclude_none=True),
+                "```",
             ]
         )
     lines.extend(

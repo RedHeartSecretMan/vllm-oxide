@@ -411,13 +411,6 @@ fn aggregate_workload(
     })
 }
 
-fn is_lowercase_hex(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
