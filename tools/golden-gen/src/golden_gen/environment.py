@@ -101,14 +101,87 @@ def require_available_ram() -> None:
 
 
 def _command(*args: str) -> str:
-    result = subprocess.run(args, check=True, capture_output=True, text=True)
+    result = subprocess.run(args, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ValueError(f"{args[0]} preflight failed: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def _expanded_wheel_tags(tag: str) -> set[str]:
+    python, abi, platform_tag = tag.split("-")
+    return {
+        f"{python_tag}-{abi_tag}-{platform}"
+        for python_tag in python.split(".")
+        for abi_tag in abi.split(".")
+        for platform in platform_tag.split(".")
+    }
+
+
+def _cached_wheel_matches(
+    distribution: importlib.metadata.Distribution,
+    name: str,
+    filename: str,
+    digest: str,
+    cache_root: Path,
+) -> bool:
+    """Prove a vendor-retagged wheel through uv's actual hash-bound cache entry.
+
+    uv wheels-v6 retains a MessagePack archive identity before its HTTP policy.
+    Accept only the observed four-field format and a WHEEL hardlink to that exact
+    archive. Unsupported cache formats and copied/unidentifiable installs fail.
+    This does not guess equivalence between linux and manylinux tags.
+    """
+
+    def string(value: str) -> bytes:
+        encoded = value.encode()
+        if len(encoded) < 32:
+            return bytes([0xA0 + len(encoded)]) + encoded
+        if len(encoded) < 256:
+            return bytes([0xD9, len(encoded)]) + encoded
+        raise ValueError("unsupported uv cache identity string length")
+
+    installed = [
+        Path(str(distribution.locate_file(path)))
+        for path in (distribution.files or [])
+        if str(path).endswith(".dist-info/WHEEL")
+    ]
+    if len(installed) != 1:
+        return False
+    suffix = filename.removeprefix(name.replace("-", "_") + "-").removesuffix(".whl")
+    entries = [
+        *cache_root.glob(f"wheels-v6/index/*/{name}/{suffix}"),
+        *cache_root.glob(f"wheels-v6/pypi/{name}/{suffix}"),
+    ]
+    for entry in entries:
+        if not entry.is_symlink():
+            continue
+        archive = entry.resolve(strict=True)
+        origin = entry.with_name(entry.name + ".http")
+        expected = (
+            b"\x94"
+            + string(archive.name)
+            + b"\x91\x92"
+            + string("Sha256")
+            + string(digest)
+            + string(filename)
+            + b"\x00"
+        )
+        cached_wheel = archive / installed[0].parent.name / "WHEEL"
+        if (
+            origin.is_file()
+            and origin.read_bytes().startswith(expected)
+            and cached_wheel.is_file()
+            and installed[0].samefile(cached_wheel)
+        ):
+            return True
+    return False
 
 
 def collect_installed_wheels(
     lock_path: Path,
     *,
     distributions: Iterable[importlib.metadata.Distribution] | None = None,
+    cache_root: Path | None = None,
 ) -> list[WheelIdentity]:
     """Match every live registry distribution's wheel tags/build to one locked archive.
 
@@ -123,11 +196,13 @@ def collect_installed_wheels(
     live = importlib.metadata.distributions() if distributions is None else distributions
     for distribution in live:
         name = re.sub(r"[-_.]+", "-", distribution.metadata["Name"]).lower()
+        if name == "golden-gen":
+            # An editable project exposes both its installed dist-info and source
+            # egg-info. uv --check validates this sole permitted local project.
+            continue
         if name in seen:
             raise ValueError(f"duplicate installed distribution: {name}")
         seen.add(name)
-        if name == "golden-gen":
-            continue  # The sole explicitly permitted local project build.
         version = distribution.version
         if distribution.read_text("direct_url.json") is not None:
             raise ValueError(f"unexpected direct/source distribution: {name}")
@@ -145,7 +220,11 @@ def collect_installed_wheels(
         if not wheel_metadata or not installer or installer.strip() != "uv":
             raise ValueError(f"installed wheel metadata or uv installer identity missing: {name}")
         metadata = Parser().parsestr(wheel_metadata)
-        tags = set(metadata.get_all("Tag", []))
+        tags = {
+            expanded
+            for tag in metadata.get_all("Tag", [])
+            for expanded in _expanded_wheel_tags(tag)
+        }
         build = metadata.get("Build", "")
         compatible = []
         for wheel in packages[0].get("wheels", []):
@@ -153,16 +232,21 @@ def collect_installed_wheels(
             parts = filename.removesuffix(".whl").split("-")
             if len(parts) not in (5, 6):
                 continue
-            wheel_tags = {
-                f"{python}-{abi}-{platform_tag}"
-                for python in parts[-3].split(".")
-                for abi in parts[-2].split(".")
-                for platform_tag in parts[-1].split(".")
-            }
+            wheel_tags = _expanded_wheel_tags("-".join(parts[-3:]))
             if tags == wheel_tags and build == (parts[2] if len(parts) == 6 else ""):
                 compatible.append((filename, wheel["hash"].removeprefix("sha256:")))
         if len(compatible) != 1:
-            raise ValueError(f"live wheel tags/build do not identify one locked archive: {name}")
+            cache_root = cache_root or Path(_command("uv", "cache", "dir"))
+            compatible = []
+            for wheel in packages[0].get("wheels", []):
+                filename = unquote(Path(urlparse(wheel["url"]).path).name)
+                sha256 = wheel["hash"].removeprefix("sha256:")
+                if _cached_wheel_matches(distribution, name, filename, sha256, cache_root):
+                    compatible.append((filename, sha256))
+            if len(compatible) != 1:
+                raise ValueError(
+                    f"live wheel does not identify one hash-bound locked archive: {name}"
+                )
         filename, sha256 = compatible[0]
         identities.append(
             WheelIdentity(name=name, version=version, filename=filename, sha256=sha256)
@@ -185,7 +269,9 @@ def collect_release_runtime(model_dir: Path, repo_root: Path) -> RuntimeInfo:
         "--frozen",
         "--check",
         "--offline",
-        "--no-build",
+        # --check is read-only. A global --no-build here rejects the permitted
+        # editable local project even when the complete environment is current.
+        # Registry installation itself remains --no-build in validate-release.sh.
         "--python",
         sys.executable,
         "--no-python-downloads",
