@@ -1,4 +1,4 @@
-"""Private two-step localization. Not a fixture generator or acceptance stage."""
+"""Private fixed-case localization. Not a fixture generator or acceptance stage."""
 
 from __future__ import annotations
 
@@ -13,50 +13,69 @@ import numpy as np
 from golden_gen.layer_diagnostic import (
     CHECKPOINTS,
     MANIFEST_SHA,
+    REGRESSION11_MANIFEST_SHA,
+    REGRESSION11_PREFIX,
+    REGRESSION11_PROMPT,
     compare,
     identity,
     require_prefix_equivalence,
+    require_regression11_equivalence,
     sha,
 )
 
 
-def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> None:
+def reference(
+    root: Path, repo: Path, model_path: Path, manifest_path: Path, regression11: bool = False
+) -> None:
     from golden_gen.environment import validate_deterministic_environment
     from golden_gen.io import load_fixture
     from golden_gen.oracles.transformers_oracle import TransformersOracle
 
     validate_deterministic_environment(os.environ)
     source = identity(repo)
-    if sha(manifest_path) != MANIFEST_SHA:
+    prompt_id = "regression_11" if regression11 else "canonical_03"
+    steps = 12 if regression11 else 2
+    checkpoints = CHECKPOINTS[:11] if regression11 else CHECKPOINTS
+    prefix = REGRESSION11_PREFIX if regression11 else [151667]
+    if sha(manifest_path) != (REGRESSION11_MANIFEST_SHA if regression11 else MANIFEST_SHA):
         raise ValueError("wrong BC reference manifest")
     manifest = json.loads(manifest_path.read_text())
     fixture = next(
         x
         for x in manifest["fixtures"]
-        if x["prompt_id"] == "canonical_03" and x["oracle"] == "transformers"
+        if x["prompt_id"] == prompt_id and x["oracle"] == "transformers"
     )
     fixture_path = manifest_path.parent / fixture["filename"]
     if sha(fixture_path) != fixture["sha256"]:
         raise ValueError("reference fixture changed")
     previous = load_fixture(fixture_path)
+    prompt_file = "regression.jsonl" if regression11 else "canonical.jsonl"
     prompt = next(
         json.loads(line)
-        for line in (repo / "tools/golden-gen/prompts/canonical.jsonl").read_text().splitlines()
-        if json.loads(line)["id"] == "canonical_03"
+        for line in (repo / "tools/golden-gen/prompts" / prompt_file).read_text().splitlines()
+        if json.loads(line)["id"] == prompt_id
     )
     root.mkdir(mode=0o700)
     (root / "torch").mkdir(mode=0o700)
     import torch
 
     oracle = TransformersOracle(model_path)
-    input_ids = oracle.tokenizer(prompt["prompt"], return_tensors="pt", add_special_tokens=False)[
-        "input_ids"
-    ].to("cuda")
+    input_ids = oracle.tokenizer(
+        prompt["prompt"], return_tensors="pt", add_special_tokens=regression11
+    )["input_ids"].to("cuda")
     token_ids = input_ids[0].cpu().tolist()
     if not 0 < len(token_ids) <= 1024:
         raise ValueError("canonical_03 request length outside diagnostic bound")
+    if regression11 and token_ids != REGRESSION11_PROMPT:
+        raise ValueError("regression_11 original prompt tokens changed")
     (root / "request.json").write_text(
-        json.dumps(dict(prompt_id="canonical_03", token_ids=token_ids, decode_token=151667))
+        json.dumps(
+            dict(
+                prompt_id=prompt_id,
+                token_ids=token_ids,
+                **({"decode_tokens": prefix} if regression11 else {"decode_token": 151667}),
+            )
+        )
     )
     state: dict[str, Any] = {
         "step": -1,
@@ -81,15 +100,19 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
 
     def embedding_hook(_module: Any, inputs: Any, output: Any) -> None:
         state["step"] += 1
-        if state["step"] not in (0, 1):
-            raise ValueError("reference exceeded the two-step diagnostic")
+        if state["step"] not in range(steps):
+            raise ValueError("reference exceeded the fixed diagnostic")
         state["tokens"] = inputs[0][0].cpu().tolist()
         state["pending"] = checkpoint("embedding", output)
 
     def rotary_hook(_module: Any, inputs: Any) -> None:
         positions = inputs[1][0].cpu().tolist()
-        expected = token_ids if state["step"] == 0 else [151667]
-        expected_positions = list(range(len(token_ids))) if state["step"] == 0 else [len(token_ids)]
+        expected = token_ids if state["step"] == 0 else [prefix[state["step"] - 1]]
+        expected_positions = (
+            list(range(len(token_ids)))
+            if state["step"] == 0
+            else [len(token_ids) + state["step"] - 1]
+        )
         if state["tokens"] != expected or positions != expected_positions:
             raise ValueError("reference input differs from shared prefix")
         state["records"] = [
@@ -97,7 +120,7 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
                 kind="header",
                 diagnostic_only=True,
                 accepting=False,
-                prompt_id="canonical_03",
+                prompt_id=prompt_id,
                 step=state["step"],
                 token_ids=expected,
                 positions=positions,
@@ -122,8 +145,10 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
                 state["records"].extend(
                     state["pending_qk_norm"].pop(key) for key in ("layer0_q_norm", "layer0_k_norm")
                 )
-            if name == "final_norm":
-                state["records"].append(dict(kind="trailer", complete=True, checkpoints=39))
+            if name == checkpoints[-1]:
+                state["records"].append(
+                    dict(kind="trailer", complete=True, checkpoints=len(checkpoints))
+                )
             flush_records()
 
         return record
@@ -280,11 +305,14 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
         getattr(first_layer.self_attn, f"{name}_proj").register_forward_hook(hook(f"layer0_{name}"))
         for name in ("q", "k", "v")
     )
-    handles.extend(
-        layer.register_forward_hook(hook(f"layer_{i}"))
-        for i, layer in enumerate(oracle.model.model.layers)
-    )
-    handles.append(oracle.model.model.norm.register_forward_hook(hook("final_norm")))
+    if regression11:
+        handles.append(first_layer.register_forward_hook(hook("layer_0")))
+    else:
+        handles.extend(
+            layer.register_forward_hook(hook(f"layer_{i}"))
+            for i, layer in enumerate(oracle.model.model.layers)
+        )
+        handles.append(oracle.model.model.norm.register_forward_hook(hook("final_norm")))
     modeling_qwen3.apply_rotary_pos_emb = rope_call
     torch.nn.functional.scaled_dot_product_attention = sdpa_call
     sdpa_module.repeat_kv = repeat_call
@@ -295,7 +323,7 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
         ):
             out = oracle.model.generate(
                 input_ids,
-                max_new_tokens=2,
+                max_new_tokens=steps,
                 do_sample=False,
                 temperature=None,
                 top_p=None,
@@ -306,13 +334,23 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
             )
         logits = np.stack([row[0].float().cpu().numpy() for row in out.logits])
         tokens = out.sequences[0, len(token_ids) :].cpu().numpy().astype(np.int64)
-        require_prefix_equivalence(
-            logits,
-            tokens,
-            previous["logits"].astype(np.float32),
-            previous["token_ids"].astype(np.int64),
-        )
-        np.savez(root / "torch/logits.npz", logits=logits, tokens=tokens)
+        if regression11:
+            # Match the original regression producer's CPU top-k, including tie ordering.
+            top5 = torch.topk(torch.from_numpy(logits), k=5, dim=-1)
+            indices = top5.indices.numpy().astype(np.int64)
+            values = top5.values.numpy().astype(np.float32)
+            require_regression11_equivalence(tokens, indices, values, previous)
+            np.savez(
+                root / "torch/logits.npz", tokens=tokens, top5_indices=indices, top5_logits=values
+            )
+        else:
+            require_prefix_equivalence(
+                logits,
+                tokens,
+                previous["logits"].astype(np.float32),
+                previous["token_ids"].astype(np.int64),
+            )
+            np.savez(root / "torch/logits.npz", logits=logits, tokens=tokens)
         report = dict(
             diagnostic_only=True,
             accepting=False,
@@ -326,19 +364,21 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
             warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
             attention_backend="SDPBackend.MATH",
             device=str(input_ids.device),
-            checkpoints=CHECKPOINTS,
+            checkpoints=checkpoints,
             artifacts={
                 name: sha(root / name)
-                for name in (
+                for name in [
                     "request.json",
-                    "torch/step-0.jsonl",
-                    "torch/step-1.jsonl",
                     "torch/logits.npz",
-                    "torch/attention-0.json",
-                    "torch/attention-1.json",
-                )
+                    *(f"torch/step-{step}.jsonl" for step in range(steps)),
+                    *(f"torch/attention-{step}.json" for step in range(steps)),
+                ]
             },
         )
+        if regression11:
+            report.pop("equivalent_to_bc_reference")
+            report["equivalent_to_original_regression_tokens_top5"] = True
+            report["manifest_sha256"] = sha(manifest_path)
         (root / "reference.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     finally:
         modeling_qwen3.apply_rotary_pos_emb = original_rope
@@ -357,14 +397,34 @@ def main() -> None:
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--previous-dir", type=Path)
+    parser.add_argument(
+        "--regression11",
+        action="store_true",
+        help="fixed original regression_11, layer zero only, rows 0..11",
+    )
     args = parser.parse_args()
     if args.mode == "reference":
         if args.model_path is None or args.manifest is None:
             parser.error("reference requires --model-path and --manifest")
-        reference(args.output_dir, args.repo_root, args.model_path, args.manifest)
+        reference(
+            args.output_dir, args.repo_root, args.model_path, args.manifest, args.regression11
+        )
     else:
         if args.previous_dir is None or args.manifest is None:
             parser.error("compare requires --previous-dir and --manifest")
+        if args.regression11:
+            from golden_gen.layer_diagnostic import compare_regression11_collection
+
+            print(
+                json.dumps(
+                    compare_regression11_collection(
+                        args.output_dir, args.repo_root, args.previous_dir, args.manifest
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return
         print(
             json.dumps(
                 compare(args.output_dir, args.repo_root, args.previous_dir, args.manifest),

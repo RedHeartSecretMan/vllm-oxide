@@ -26,6 +26,226 @@ CHECKPOINTS = [
     "final_norm",
 ]
 
+REGRESSION11_PREFIX = [7281, 11, 1128, 374, 279, 6010, 504, 16629, 362, 311, 279]
+REGRESSION11_PROMPT = [
+    2679,
+    264,
+    5426,
+    10901,
+    16629,
+    362,
+    20971,
+    518,
+    220,
+    21,
+    15,
+    8756,
+    817,
+    6460,
+    323,
+    2441,
+    5426,
+    10901,
+    16629,
+    425,
+    20971,
+    518,
+    220,
+    24,
+    15,
+    8756,
+    817,
+    6460,
+    8841,
+    1817,
+    1008,
+    11,
+    323,
+    279,
+    17337,
+    525,
+    220,
+    18,
+    15,
+    15,
+    8756,
+    10747,
+    11,
+    1246,
+    1293,
+    686,
+    432,
+    1896,
+    369,
+    279,
+    27688,
+    311,
+    3367,
+    30,
+]
+REGRESSION11_MANIFEST_SHA = "22cb86ded8987bec629717c08ef6e964f10a0fe483002de717a64367c8fef9c0"
+REGRESSION11_RAW_SHA = "32b460857158defe0852613c4f90cad0af24c1470359b961f940855857c30d5e"
+
+
+def require_regression11_equivalence(
+    tokens: NDArray[np.int64],
+    indices: NDArray[np.int64],
+    values: NDArray[np.float32],
+    previous: dict[str, Any],
+) -> None:
+    """Original regression assets have top-5 only; never claim full reference L2."""
+    if (
+        tokens.shape != (12,)
+        or indices.shape != (12, 5)
+        or values.shape != (12, 5)
+        or tokens.dtype != np.int64
+        or indices.dtype != np.int64
+        or values.dtype != np.float32
+        or tokens[:11].tolist() != REGRESSION11_PREFIX
+        or not np.isfinite(values).all()
+        or not tensor_bits_equal(tokens, previous["token_ids"][:12])
+        or not tensor_bits_equal(indices, previous["top5_indices"][:12])
+        or not tensor_bits_equal(values, previous["top5_logits"][:12])
+    ):
+        raise ValueError("regression_11 collection differs from original tokens/top5")
+
+
+def require_regression11_candidate_equivalence(
+    logits: NDArray[np.float32],
+    tokens: NDArray[np.int64],
+    previous_logits: NDArray[np.float32],
+    previous_tokens: NDArray[np.int64],
+) -> None:
+    if (
+        logits.dtype != np.float32
+        or logits.shape != (12, 151936)
+        or tokens.dtype != np.int64
+        or tokens.shape != (12,)
+        or tokens[:11].tolist() != REGRESSION11_PREFIX
+        or not np.isfinite(logits).all()
+        or not tensor_bits_equal(logits, previous_logits[:12])
+        or not tensor_bits_equal(tokens, previous_tokens[:12])
+    ):
+        raise ValueError("regression_11 candidate collection differs from original raw rows 0..11")
+
+
+def compare_regression11_collection(
+    root: Path, repo: Path, previous: Path, manifest_path: Path
+) -> dict[str, Any]:
+    """Collection gate only. No tensor attribution or acceptance is performed."""
+    from golden_gen.io import load_fixture
+    from golden_gen.observation import _read_candidate_capture
+
+    source = identity(repo)
+    if sha(manifest_path) != REGRESSION11_MANIFEST_SHA:
+        raise ValueError("wrong original regression manifest")
+    fixture = next(
+        x
+        for x in json.loads(manifest_path.read_text())["fixtures"]
+        if x["prompt_id"] == "regression_11" and x["oracle"] == "transformers"
+    )
+    fixture_path = manifest_path.parent / fixture["filename"]
+    if sha(fixture_path) != fixture["sha256"]:
+        raise ValueError("original regression fixture changed")
+    metadata = json.loads((root / "reference.json").read_text())
+    expected_artifacts = {
+        "request.json",
+        "torch/logits.npz",
+        *(f"torch/step-{step}.jsonl" for step in range(12)),
+        *(f"torch/attention-{step}.json" for step in range(12)),
+    }
+    if (
+        metadata["source"] != source
+        or metadata.get("equivalent_to_original_regression_tokens_top5") is not True
+        or metadata.get("diagnostic_only") is not True
+        or metadata.get("accepting") is not False
+        or metadata["manifest_sha256"] != REGRESSION11_MANIFEST_SHA
+        or metadata["reference_fixture_sha256"] != fixture["sha256"]
+        or metadata["script_sha256"]
+        != sha(repo / "tools/golden-gen/scripts/canonical03_layer_probe.py")
+        or metadata["checkpoints"] != CHECKPOINTS[:11]
+        or metadata["deterministic_algorithms"] is not True
+        or metadata["warn_only"] is not False
+        or metadata["device"] != "cuda:0"
+        or metadata["attention_backend"] != "SDPBackend.MATH"
+        or set(metadata["artifacts"]) != expected_artifacts
+    ):
+        raise ValueError("invalid regression reference collection identity")
+    for filename, expected in metadata["artifacts"].items():
+        if sha(root / filename) != expected:
+            raise ValueError("reference collection artifact changed")
+    with np.load(root / "torch/logits.npz", allow_pickle=False) as captured:
+        require_regression11_equivalence(
+            captured["tokens"],
+            captured["top5_indices"],
+            captured["top5_logits"],
+            load_fixture(fixture_path),
+        )
+    filename = "regression_11.candidate.jsonl"
+    if sha(previous / filename) != REGRESSION11_RAW_SHA:
+        raise ValueError("wrong original M regression capture")
+    index = json.loads((root / "rust/capture-index.json").read_text())
+    if (
+        index["measurement_commit"] != source["commit"]
+        or index["measurement_tree"] != source["tree"]
+        or index["opened_fixture_ids"] != ["regression_11"]
+        or len(index["captures"]) != 1
+        or index.get("diagnostic_only") is not True
+        or index.get("accepting") is not False
+        or index["manifest_sha256"] != REGRESSION11_MANIFEST_SHA
+        or index["captures"][0]["prompt_id"] != "regression_11"
+        or index["captures"][0]["filename"] != filename
+        or index["captures"][0]["token_count"] != 12
+        or index["captures"][0]["tensor_shape"] != [12, 151936]
+        or sha(root / "rust" / filename) != index["captures"][0]["sha256"]
+    ):
+        raise ValueError("invalid regression candidate collection identity")
+    require_regression11_candidate_equivalence(
+        *_read_candidate_capture(root / "rust" / filename),
+        *_read_candidate_capture(previous / filename),
+    )
+    request = json.loads((root / "request.json").read_text())
+    if request != {
+        "prompt_id": "regression_11",
+        "token_ids": REGRESSION11_PROMPT,
+        "decode_tokens": REGRESSION11_PREFIX,
+    }:
+        raise ValueError("regression request changed")
+    # Only after both collection gates may trace records be validated. Their
+    # contents remain uninterpreted until a separately authorized causal experiment.
+    trace_hashes = {}
+    for side in ("torch", "rust"):
+        for step in range(12):
+            path = root / side / f"step-{step}.jsonl"
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            if rows[0]["prompt_id"] != "regression_11" or rows[0]["step"] != step:
+                raise ValueError("wrong fixed regression trace")
+            decode_trace(rows)
+            trace_hashes[f"{side}/{path.name}"] = sha(path)
+            call_path = root / side / f"attention-{step}.json"
+            call = json.loads(call_path.read_text())
+            if (
+                call.get("diagnostic_only") is not True
+                or call.get("accepting") is not False
+                or call["step"] != step
+                or call["common"]["q_length"] != (54 if step == 0 else 1)
+                or call["common"]["k_length"] != 54 + step
+            ):
+                raise ValueError("wrong regression attention step")
+            trace_hashes[f"{side}/{call_path.name}"] = sha(call_path)
+    return dict(
+        diagnostic_only=True,
+        accepting=False,
+        source=source,
+        prompt_id="regression_11",
+        collection_equivalent=True,
+        rows=12,
+        reference_evidence="tokens_and_top5_only",
+        tensor_interpretation="not_performed",
+        original_candidate_sha256=REGRESSION11_RAW_SHA,
+        trace_hashes=trace_hashes,
+    )
+
 
 def layer0_cause(
     reference: dict[str, NDArray[np.float32]], candidate: dict[str, NDArray[np.float32]]
@@ -115,15 +335,22 @@ def identity(repo: Path) -> dict[str, str]:
 
 
 def decode_trace(lines: list[dict[str, Any]]) -> dict[str, NDArray[np.float32]]:
-    if len(lines) != 41 or lines[-1] != {"kind": "trailer", "complete": True, "checkpoints": 39}:
+    regression11 = bool(lines) and lines[0].get("prompt_id") == "regression_11"
+    checkpoints = CHECKPOINTS[:11] if regression11 else CHECKPOINTS
+    if len(lines) != len(checkpoints) + 2 or lines[-1] != {
+        "kind": "trailer",
+        "complete": True,
+        "checkpoints": len(checkpoints),
+    }:
         raise ValueError("incomplete layer diagnostic trace")
     header = lines[0]
     if (
         header.get("kind") != "header"
         or header.get("diagnostic_only") is not True
         or header.get("accepting") is not False
-        or header.get("prompt_id") != "canonical_03"
-        or header.get("step") not in (0, 1)
+        or header.get("prompt_id") != ("regression_11" if regression11 else "canonical_03")
+        or type(header.get("step")) is not int
+        or header.get("step") not in range(12 if regression11 else 2)
     ):
         raise ValueError("invalid layer diagnostic header")
     tokens, positions = header.get("token_ids"), header.get("positions")
@@ -136,8 +363,14 @@ def decode_trace(lines: list[dict[str, Any]]) -> dict[str, NDArray[np.float32]]:
         or len(positions) != len(tokens)
     ):
         raise ValueError("invalid trace input identity")
+    if regression11:
+        step = header["step"]
+        expected_tokens = REGRESSION11_PROMPT if step == 0 else [REGRESSION11_PREFIX[step - 1]]
+        expected_positions = list(range(54)) if step == 0 else [53 + step]
+        if tokens != expected_tokens or positions != expected_positions:
+            raise ValueError("invalid regression_11 trace input identity")
     arrays: dict[str, NDArray[np.float32]] = {}
-    for name, row in zip(CHECKPOINTS, lines[1:-1], strict=True):
+    for name, row in zip(checkpoints, lines[1:-1], strict=True):
         width = (
             2048
             if name in ("layer0_q", "layer0_q_norm", "layer0_q_rope", "layer0_attention_context")

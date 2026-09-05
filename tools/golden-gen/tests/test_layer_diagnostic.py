@@ -11,6 +11,44 @@ from golden_gen.layer_diagnostic import (
 )
 
 
+def test_regression11_collection_requires_all_twelve_original_rows_and_top5_bits() -> None:
+    from golden_gen.layer_diagnostic import require_regression11_equivalence
+
+    prefix = [7281, 11, 1128, 374, 279, 6010, 504, 16629, 362, 311, 279]
+    tokens = np.array([*prefix, 1459], dtype=np.int64)
+    indices = np.tile(np.arange(5, dtype=np.int64), (12, 1))
+    values = np.ones((12, 5), dtype=np.float32)
+    previous = dict(token_ids=tokens, top5_indices=indices, top5_logits=values)
+    require_regression11_equivalence(tokens, indices, values, previous)
+    changed = values.copy()
+    changed[11, 4] = np.nextafter(np.float32(1), np.float32(2))
+    with pytest.raises(ValueError, match="collection"):
+        require_regression11_equivalence(tokens, indices, changed, previous)
+    with pytest.raises(ValueError, match="collection"):
+        require_regression11_equivalence(tokens[:-1], indices[:-1], values[:-1], previous)
+    changed_ids = indices.copy()
+    changed_ids[11, 0] = 99
+    with pytest.raises(ValueError, match="collection"):
+        require_regression11_equivalence(tokens, changed_ids, values, previous)
+
+
+def test_regression11_candidate_equivalence_rejects_changed_final_row_and_extra_step() -> None:
+    from golden_gen.layer_diagnostic import require_regression11_candidate_equivalence
+
+    tokens = np.array(
+        [7281, 11, 1128, 374, 279, 6010, 504, 16629, 362, 311, 279, 6438], dtype=np.int64
+    )
+    old = np.ones((32, 151936), dtype=np.float32)
+    old_tokens = np.concatenate((tokens, np.zeros(20, dtype=np.int64)))
+    require_regression11_candidate_equivalence(old[:12], tokens, old, old_tokens)
+    changed = old[:12].copy()
+    changed[11, 151935] = np.nextafter(np.float32(1), np.float32(2))
+    with pytest.raises(ValueError, match="collection"):
+        require_regression11_candidate_equivalence(changed, tokens, old, old_tokens)
+    with pytest.raises(ValueError, match="collection"):
+        require_regression11_candidate_equivalence(old[:13], old_tokens[:13], old, old_tokens)
+
+
 def test_localization_rejects_one_changed_bit_before_interpreting_layers() -> None:
     old = np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32)
     new = old.copy()
@@ -118,6 +156,14 @@ def test_trace_decodes_literal_bf16_and_rejects_order_dtype_and_shape() -> None:
         dict(kind="trailer", complete=True, checkpoints=39),
     ]
     assert np.array_equal(decode_trace(rows)["layer_27"], np.ones((1, 1024), dtype=np.float32))
+    regression = deepcopy(rows[:12]) + [dict(kind="trailer", complete=True, checkpoints=11)]
+    regression[0].update(prompt_id="regression_11", step=11, token_ids=[279], positions=[64])
+    assert list(decode_trace(regression)) == names[:11]
+    for field, value in (("step", 12), ("token_ids", [280]), ("positions", [65])):
+        invalid = deepcopy(regression)
+        invalid[0][field] = value
+        with pytest.raises(ValueError):
+            decode_trace(invalid)
     for field, value in (("name", "layer_1"), ("dtype", "F32"), ("shape", [1024])):
         invalid = deepcopy(rows)
         invalid[1][field] = value

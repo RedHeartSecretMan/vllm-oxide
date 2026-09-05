@@ -429,6 +429,14 @@ impl Qwen3Model {
                     .record(&format!("layer_{_layer_index}"), &(&hidden + &res)?)
                     .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
             }
+            #[cfg(feature = "internal-golden")]
+            if _layer_index == 0 && trace.as_ref().is_some_and(|trace| trace.layer0_only()) {
+                if let Some(trace) = trace.take() {
+                    trace
+                        .finish()
+                        .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+                }
+            }
             residual = Some(res);
         }
         let hidden = self.norm.forward(&hidden, residual.as_ref())?.0;
