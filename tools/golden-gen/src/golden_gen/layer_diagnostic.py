@@ -11,7 +11,36 @@ from numpy.typing import NDArray
 
 from golden_gen.replay import tensor_bits_equal
 
-CHECKPOINTS = ["embedding", *(f"layer_{i}" for i in range(28)), "final_norm"]
+CHECKPOINTS = [
+    "embedding",
+    "layer0_input_norm",
+    "layer0_q",
+    "layer0_k",
+    "layer0_v",
+    *(f"layer_{i}" for i in range(28)),
+    "final_norm",
+]
+
+
+def layer0_cause(
+    reference: dict[str, NDArray[np.float32]], candidate: dict[str, NDArray[np.float32]]
+) -> dict[str, Any]:
+    if not tensor_bits_equal(reference["embedding"], candidate["embedding"]):
+        raise ValueError("layer0 attribution requires bitwise identical embedding inputs")
+    if not tensor_bits_equal(reference["layer0_input_norm"], candidate["layer0_input_norm"]):
+        return {"first_path": "input_rmsnorm", "qkv_compared": False}
+    different = [
+        name
+        for name in ("layer0_q", "layer0_k", "layer0_v")
+        if not tensor_bits_equal(reference[name], candidate[name])
+    ]
+    return {
+        "first_path": "qkv_projection" if different else "after_qkv",
+        "qkv_compared": True,
+        "different_projections": different,
+    }
+
+
 PREVIOUS_COMMIT = "0e09fb5fb9096f700d675f66b8c0ff81e56c4f81"
 PREVIOUS_INDEX_SHA = "87e4fdbbaf563edf37e06ee49f984f0f8ba77d79c89df5bbae859485fecb5aea"
 MANIFEST_SHA = "83ca9488d5e01643106005ba63c1016aaaae8994063f685f4ae0b43fd14e29bb"
@@ -31,7 +60,7 @@ def identity(repo: Path) -> dict[str, str]:
 
 
 def decode_trace(lines: list[dict[str, Any]]) -> dict[str, NDArray[np.float32]]:
-    if len(lines) != 32 or lines[-1] != {"kind": "trailer", "complete": True, "checkpoints": 30}:
+    if len(lines) != 36 or lines[-1] != {"kind": "trailer", "complete": True, "checkpoints": 34}:
         raise ValueError("incomplete layer diagnostic trace")
     header = lines[0]
     if (
@@ -54,18 +83,19 @@ def decode_trace(lines: list[dict[str, Any]]) -> dict[str, NDArray[np.float32]]:
         raise ValueError("invalid trace input identity")
     arrays: dict[str, NDArray[np.float32]] = {}
     for name, row in zip(CHECKPOINTS, lines[1:-1], strict=True):
+        width = 2048 if name == "layer0_q" else 1024
         bits = row.get("bf16_bits")
         if (
             row.get("kind") != "checkpoint"
             or row.get("name") != name
             or row.get("dtype") != "BF16"
-            or row.get("shape") != [len(tokens), 1024]
+            or row.get("shape") != [len(tokens), width]
             or not isinstance(bits, list)
-            or len(bits) != len(tokens) * 1024
+            or len(bits) != len(tokens) * width
             or any(type(v) is not int or not 0 <= v <= 65535 for v in bits)
         ):
             raise ValueError("invalid layer diagnostic checkpoint order/shape/bits")
-        values = (np.array(bits, dtype=np.uint32) << 16).view(np.float32).reshape(-1, 1024)
+        values = (np.array(bits, dtype=np.uint32) << 16).view(np.float32).reshape(-1, width)
         if not np.isfinite(values).all():
             raise ValueError("non-finite layer diagnostic checkpoint")
         arrays[name] = values
@@ -165,7 +195,8 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
     old_logits, old_tokens = _read_candidate_capture(previous / filename)
     require_prefix_equivalence(logits, tokens, old_logits, old_tokens)
     request = json.loads((root / "request.json").read_text())
-    comparisons = []
+    comparisons: list[dict[str, Any]] = []
+    causes = []
     trace_hashes = {}
     for step in (0, 1):
         paths = [root / side / f"step-{step}.jsonl" for side in ("torch", "rust")]
@@ -182,7 +213,19 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
                 or side[0]["positions"] != expected_positions
             ):
                 raise ValueError("trace does not describe the shared prefill/decode input")
+        cause = layer0_cause(decoded[0], decoded[1])
+        causes.append({"step": step, **cause})
         for name in CHECKPOINTS:
+            if name in ("layer0_q", "layer0_k", "layer0_v") and not cause["qkv_compared"]:
+                comparisons.append(
+                    dict(
+                        step=step,
+                        checkpoint=name,
+                        status="not_compared",
+                        reason="RMSNorm outputs differ; projection inputs are not bitwise equal",
+                    )
+                )
+                continue
             a, b = decoded[0][name], decoded[1][name]
             errors = np.abs(a.astype(np.float64) - b.astype(np.float64))
             pos = np.unravel_index(np.argmax(errors), errors.shape)
@@ -214,4 +257,5 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
         trace_sha256=trace_hashes,
         opened_fixture_ids=["canonical_03"],
         comparisons=comparisons,
+        layer0_diagnosis=causes,
     )

@@ -131,36 +131,46 @@ impl StepTrace {
         }
         let expected = match self.next_checkpoint {
             0 => "embedding".to_string(),
-            1..=28 => format!("layer_{}", self.next_checkpoint - 1),
-            29 => "final_norm".to_string(),
+            1 => "layer0_input_norm".to_string(),
+            2 => "layer0_q".to_string(),
+            3 => "layer0_k".to_string(),
+            4 => "layer0_v".to_string(),
+            5..=32 => format!("layer_{}", self.next_checkpoint - 5),
+            33 => "final_norm".to_string(),
             _ => bail!("layer trace has extra checkpoints"),
         };
         if name != expected
             || value.rank() != 2
-            || self
-                .shape
-                .as_deref()
-                .is_some_and(|shape| shape != value.dims())
+            || self.shape.as_deref().is_some_and(|shape| {
+                let width = if name == "layer0_q" {
+                    shape[1] * 2
+                } else {
+                    shape[1]
+                };
+                value.dims() != [shape[0], width]
+            })
         {
             bail!("layer trace checkpoint order or shape mismatch");
         }
-        let values = value.flatten_all()?.to_vec1::<half::bf16>()?;
+        let values = value.contiguous()?.flatten_all()?.to_vec1::<half::bf16>()?;
         if values.iter().any(|v| !v.is_finite()) {
             bail!("layer trace contains non-finite values");
         }
         let bits: Vec<u16> = values.iter().map(|v| v.to_bits()).collect();
         self.write(&serde_json::json!({"kind":"checkpoint", "name":name,
             "dtype":"BF16", "shape":value.dims(), "bf16_bits":bits}))?;
-        self.shape = Some(value.dims().to_vec());
+        if self.shape.is_none() {
+            self.shape = Some(value.dims().to_vec());
+        }
         self.next_checkpoint += 1;
         Ok(())
     }
 
     pub(crate) fn finish(mut self) -> Result<()> {
-        if self.next_checkpoint != 30 {
+        if self.next_checkpoint != 34 {
             bail!("incomplete layer trace");
         }
-        self.write(&serde_json::json!({"kind":"trailer", "complete":true, "checkpoints":30}))?;
+        self.write(&serde_json::json!({"kind":"trailer", "complete":true, "checkpoints":34}))?;
         self.output.sync_all()?;
         Ok(())
     }
@@ -255,18 +265,44 @@ mod tests {
     #[test]
     fn trace_requires_ordered_complete_checkpoints_and_never_overwrites() {
         let directory = tempfile::tempdir().unwrap();
-        let value = Tensor::zeros((1, 2), DType::BF16, &Device::Cpu).unwrap();
-        let mut trace = StepTrace::create(directory.path(), 0, &[17], &[0]).unwrap();
-        assert!(StepTrace::create(directory.path(), 0, &[17], &[0]).is_err());
+        let value = Tensor::zeros((2, 2), DType::BF16, &Device::Cpu).unwrap();
+        let mut trace = StepTrace::create(directory.path(), 0, &[17, 18], &[0, 1]).unwrap();
+        assert!(StepTrace::create(directory.path(), 0, &[17, 18], &[0, 1]).is_err());
         assert!(trace.record("layer_0", &value).is_err());
         trace.record("embedding", &value).unwrap();
+        trace.record("layer0_input_norm", &value).unwrap();
+        let qkv = Tensor::new(
+            &[
+                [0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+                [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            ],
+            &Device::Cpu,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        trace
+            .record("layer0_q", &qkv.narrow(1, 0, 4).unwrap())
+            .unwrap();
+        trace
+            .record("layer0_k", &qkv.narrow(1, 4, 2).unwrap())
+            .unwrap();
+        trace
+            .record("layer0_v", &qkv.narrow(1, 6, 2).unwrap())
+            .unwrap();
         for layer in 0..28 {
             trace.record(&format!("layer_{layer}"), &value).unwrap();
         }
         trace.record("final_norm", &value).unwrap();
         trace.finish().unwrap();
         let bytes = std::fs::read_to_string(directory.path().join("step-0.jsonl")).unwrap();
-        assert_eq!(bytes.lines().count(), 32);
+        assert_eq!(bytes.lines().count(), 36);
+        let q: serde_json::Value = serde_json::from_str(bytes.lines().nth(3).unwrap()).unwrap();
+        assert_eq!(
+            q["bf16_bits"],
+            serde_json::json!([0, 16256, 16384, 16448, 16640, 16656, 16672, 16688])
+        );
+        assert_eq!(q["shape"], serde_json::json!([2, 4]));
         assert!(StepTrace::create(directory.path(), 1, &[151_667], &[1])
             .unwrap()
             .finish()

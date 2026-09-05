@@ -162,6 +162,9 @@ impl Qwen3Attention {
         hidden: &Tensor,
         positions: &Tensor,
         prepared: &PreparedAttention,
+        #[cfg(feature = "internal-golden")] trace: Option<
+            &mut crate::golden_capture::layer_trace::StepTrace,
+        >,
     ) -> CandleResult<Tensor> {
         let qkv = self.qkv_proj.forward(hidden)?;
         let qs = self.num_heads * self.head_dim;
@@ -169,6 +172,14 @@ impl Qwen3Attention {
         let q = qkv.i((.., 0..qs))?;
         let k = qkv.i((.., qs..qs + ks))?;
         let v = qkv.i((.., qs + ks..qs + 2 * ks))?;
+        #[cfg(feature = "internal-golden")]
+        if let Some(trace) = trace {
+            for (name, value) in [("layer0_q", &q), ("layer0_k", &k), ("layer0_v", &v)] {
+                trace
+                    .record(name, value)
+                    .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+            }
+        }
         let n = q.dim(0)?;
         let q = q.reshape((n, self.num_heads, self.head_dim))?;
         let k = k.reshape((n, self.num_kv_heads, self.head_dim))?;
@@ -258,9 +269,24 @@ impl Qwen3DecoderLayer {
         hidden: &Tensor,
         residual: Option<&Tensor>,
         prepared: &PreparedAttention,
+        #[cfg(feature = "internal-golden")] mut trace: Option<
+            &mut crate::golden_capture::layer_trace::StepTrace,
+        >,
     ) -> CandleResult<(Tensor, Tensor)> {
         let (normed, res) = self.input_layernorm.forward(hidden, residual)?;
-        let attn = self.self_attn.forward(&normed, positions, prepared)?;
+        #[cfg(feature = "internal-golden")]
+        if let Some(trace) = trace.as_deref_mut() {
+            trace
+                .record("layer0_input_norm", &normed)
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        }
+        let attn = self.self_attn.forward(
+            &normed,
+            positions,
+            prepared,
+            #[cfg(feature = "internal-golden")]
+            trace,
+        )?;
         let (normed, res) = self.post_attention_layernorm.forward(&attn, Some(&res))?;
         let mlp = self.mlp.forward(&normed)?;
         Ok((mlp, res))
@@ -329,7 +355,14 @@ impl Qwen3Model {
         }
         let mut residual: Option<Tensor> = None;
         for (_layer_index, layer) in self.layers.iter().enumerate() {
-            let (out, res) = layer.forward(positions, &hidden, residual.as_ref(), prepared)?;
+            let (out, res) = layer.forward(
+                positions,
+                &hidden,
+                residual.as_ref(),
+                prepared,
+                #[cfg(feature = "internal-golden")]
+                trace.as_mut().filter(|_| _layer_index == 0),
+            )?;
             hidden = out;
             #[cfg(feature = "internal-golden")]
             if let Some(trace) = trace.as_mut() {

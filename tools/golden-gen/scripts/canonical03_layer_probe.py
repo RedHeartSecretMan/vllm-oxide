@@ -110,7 +110,7 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
         def record(_module: Any, _inputs: Any, output: Any) -> None:
             state["records"].append(checkpoint(name, output))
             if name == "final_norm":
-                state["records"].append(dict(kind="trailer", complete=True, checkpoints=30))
+                state["records"].append(dict(kind="trailer", complete=True, checkpoints=34))
             flush_records()
 
         return record
@@ -119,6 +119,12 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
         oracle.model.model.embed_tokens.register_forward_hook(embedding_hook),
         oracle.model.model.rotary_emb.register_forward_pre_hook(rotary_hook),
     ]
+    first_layer = oracle.model.model.layers[0]
+    handles.append(first_layer.input_layernorm.register_forward_hook(hook("layer0_input_norm")))
+    handles.extend(
+        getattr(first_layer.self_attn, f"{name}_proj").register_forward_hook(hook(f"layer0_{name}"))
+        for name in ("q", "k", "v")
+    )
     handles.extend(
         layer.register_forward_hook(hook(f"layer_{i}"))
         for i, layer in enumerate(oracle.model.model.layers)
