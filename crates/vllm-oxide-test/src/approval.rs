@@ -12,7 +12,8 @@ use crate::measurement::{validate_measurement_identity, MeasurementIdentity};
 use crate::observation::{CALIBRATION_IDS, HOLDOUT_IDS};
 use crate::types::Manifest;
 
-const L1_LADDER: [f64; 10] = [
+// ADR-0013 ceilings bound the search, not automatic policy acceptance.
+const L1_LADDER: [f64; 11] = [
     0.0,
     0.000_244_140_625,
     0.000_488_281_25,
@@ -23,8 +24,9 @@ const L1_LADDER: [f64; 10] = [
     0.015_625,
     0.031_25,
     0.062_5,
+    0.125,
 ];
-const L2_LADDER: [f64; 12] = [
+const L2_LADDER: [f64; 14] = [
     0.0,
     0.000_244_140_625,
     0.000_488_281_25,
@@ -37,6 +39,8 @@ const L2_LADDER: [f64; 12] = [
     0.062_5,
     0.125,
     0.25,
+    0.5,
+    1.0,
 ];
 
 #[derive(Debug, Deserialize)]
@@ -440,6 +444,30 @@ mod tests {
 
     #[test]
     fn approval_binds_complete_definition_measurements_and_shared_holdout() {
+        assert_approval(0.0, None, (0.0, 0.0), None);
+    }
+
+    #[test]
+    fn revised_ceilings_are_independently_checked_without_multiplier_or_oversized_proposal() {
+        for (maximum, gap, proposal, error) in [
+            (0.250_001, 0.062_501, (0.125, 0.5), None),
+            (0.5, 0.125, (0.125, 0.5), None),
+            (0.500_001, 0.125, (0.125, 1.0), None),
+            (1.0, 0.125, (0.125, 1.0), None),
+            (1.000_001, 0.125, (0.125, 1.0), Some("ceiling")),
+            (1.0, 0.125_001, (0.125, 1.0), Some("ceiling")),
+            (0.5, 0.062_5, (0.125, 1.0), Some("smallest covering")),
+        ] {
+            assert_approval(maximum, Some(gap), proposal, error);
+        }
+    }
+
+    fn assert_approval(
+        maximum: f64,
+        gap: Option<f64>,
+        proposal: (f64, f64),
+        expected_error: Option<&str>,
+    ) {
         let bytes = include_bytes!("../../../tools/golden-gen/tests/fixtures/manifest-v4.json");
         let mut manifest = crate::manifest::parse_manifest_bytes(bytes, "shared fixture").unwrap();
         let runtime_sha = format!(
@@ -467,17 +495,17 @@ mod tests {
         let case = json!({
             "prompt_id": "placeholder",
             "compared_rows": 1,
-            "compared_elements": 1,
-            "first_divergence": null,
+            "compared_elements": if gap.is_some() { 2 } else { 1 },
+            "first_divergence": gap.map(|_| 0),
             "excluded_rows": 0,
-            "candidate_token_gap": null,
-            "mean_abs_error": 0.0,
-            "rms_abs_error": 0.0,
-            "p50_abs_error": 0.0,
-            "p95_abs_error": 0.0,
-            "p99_abs_error": 0.0,
-            "p999_abs_error": 0.0,
-            "maximum_abs_error": 0.0,
+            "candidate_token_gap": gap,
+            "mean_abs_error": maximum,
+            "rms_abs_error": maximum,
+            "p50_abs_error": maximum,
+            "p95_abs_error": maximum,
+            "p99_abs_error": maximum,
+            "p999_abs_error": maximum,
+            "maximum_abs_error": maximum,
             "non_finite_count": 0
         });
         let cases = crate::observation::CALIBRATION_IDS
@@ -508,24 +536,24 @@ mod tests {
             "cases": cases,
             "aggregate": {
                 "compared_rows": 4,
-                "compared_elements": 4,
-                "divergence_count": 0,
-                "mean_abs_error": 0.0,
-                "rms_abs_error": 0.0,
-                "p50_abs_error": 0.0,
-                "p95_abs_error": 0.0,
-                "p99_abs_error": 0.0,
-                "p999_abs_error": 0.0,
-                "maximum_abs_error": 0.0,
+                "compared_elements": if gap.is_some() { 8 } else { 4 },
+                "divergence_count": if gap.is_some() { 4 } else { 0 },
+                "mean_abs_error": maximum,
+                "rms_abs_error": maximum,
+                "p50_abs_error": maximum,
+                "p95_abs_error": maximum,
+                "p99_abs_error": maximum,
+                "p999_abs_error": maximum,
+                "maximum_abs_error": maximum,
                 "non_finite_count": 0
             },
             "proposal": {
-                "l1_near_tie_max_abs_logit_gap": 0.0,
-                "l2_atol": 0.0
+                "l1_near_tie_max_abs_logit_gap": proposal.0,
+                "l2_atol": proposal.1
             },
             "approval": {
                 "status": "approved",
-                "accepted_error_classes": ["Exact observation; no numerical error accepted."]
+                "accepted_error_classes": ["Reviewed synthetic complete calibration."]
             }
         });
         let path = repo.join("docs/releases/goldens-v0.2-calibration-observation.json");
@@ -564,10 +592,9 @@ mod tests {
         };
         let blob = git(repo, &["hash-object", path.to_string_lossy().as_ref()]);
         let observation_sha = format!("{:x}", sha2::Sha256::digest(&observation_bytes));
-        manifest.tolerance_policy.l1_near_tie_max_abs_logit_gap = 0.0;
-        manifest.tolerance_policy.l2_atol = 0.0;
-        manifest.tolerance_policy.rationale =
-            "Exact observation; no numerical error accepted.".to_owned();
+        manifest.tolerance_policy.l1_near_tie_max_abs_logit_gap = proposal.0;
+        manifest.tolerance_policy.l2_atol = proposal.1;
+        manifest.tolerance_policy.rationale = "Reviewed synthetic complete calibration.".to_owned();
         manifest.tolerance_policy.evidence = vec![
             format!("definition-observation-sha256:{observation_sha}"),
             format!("definition-observation-blob:{blob}"),
@@ -580,7 +607,12 @@ mod tests {
             format!("raw-evidence-sha256:{}", "6".repeat(64)),
         ];
 
-        validate_authoritative_approval(&manifest, &path, repo, &measurement).unwrap();
+        let result = validate_authoritative_approval(&manifest, &path, repo, &measurement);
+        if let Some(expected) = expected_error {
+            assert!(format!("{:#}", result.unwrap_err()).contains(expected));
+            return;
+        }
+        result.unwrap();
 
         manifest.tolerance_policy.evidence.pop();
         assert!(validate_authoritative_approval(&manifest, &path, repo, &measurement).is_err());

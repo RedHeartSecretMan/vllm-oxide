@@ -61,6 +61,35 @@ def test_non_finite_or_shape_invalid_observation_fails_instead_of_sampling_it():
         observe_case("canonical_01", logits[:, :1], logits, tokens, tokens)
 
 
+@pytest.mark.parametrize(
+    "maximum,expected",
+    [(0.0, 0.0), (0.25, 0.25), (0.250001, 0.5), (0.5, 0.5), (0.500001, 1.0), (1.0, 1.0)],
+)
+def test_revised_l2_ladder_selects_smallest_cover_without_multiplier(maximum, expected):
+    observed = observe_case(
+        "canonical_01",
+        np.array([[0.0]], dtype=np.float32),
+        np.array([[maximum]], dtype=np.float32),
+        np.array([0], dtype=np.int64),
+        np.array([0], dtype=np.int64),
+    )
+    proposal = propose_thresholds([observed])
+    assert proposal.l2_atol == expected
+    assert proposal.l1_near_tie_max_abs_logit_gap == 0.0
+
+
+@pytest.mark.parametrize("gap,expected", [(0.0625, 0.0625), (0.062501, 0.125), (0.125, 0.125)])
+def test_revised_l1_ladder_covers_every_actual_divergence_gap(gap, expected):
+    observed = observe_case(
+        "canonical_01",
+        np.array([[gap, 0.0]], dtype=np.float32),
+        np.array([[0.0, gap]], dtype=np.float32),
+        np.array([0], dtype=np.int64),
+        np.array([1], dtype=np.int64),
+    )
+    assert propose_thresholds([observed]).l1_near_tie_max_abs_logit_gap == expected
+
+
 def test_full_observation_reads_exact_candidate_subset_and_is_always_non_accepting():
     opened: list[str] = []
 
@@ -100,8 +129,8 @@ def test_full_observation_reads_exact_candidate_subset_and_is_always_non_accepti
 @pytest.mark.parametrize(
     ("maximum_abs_error", "candidate_token_gap", "message"),
     [
-        (0.250_001, None, "L2 absolute error"),
-        (0.0, 0.062_501, "L1 candidate gap"),
+        (1.000_001, None, "L2 absolute error"),
+        (0.0, 0.125_001, "L1 candidate gap"),
     ],
 )
 def test_threshold_proposal_never_exceeds_approved_ceilings(

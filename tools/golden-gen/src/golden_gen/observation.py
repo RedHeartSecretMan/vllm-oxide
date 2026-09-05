@@ -33,8 +33,9 @@ HOLDOUT_IDS = (
     "canonical_05c",
     "canonical_05d",
 )
-L2_LADDER = (0.0, *(2.0**-exponent for exponent in range(12, 1, -1)))
-L1_LADDER = (0.0, *(2.0**-exponent for exponent in range(12, 3, -1)))
+# ADR-0013 calibration ceilings, never an automatically approved policy.
+L2_LADDER = (0.0, *(2.0**-exponent for exponent in range(12, -1, -1)))
+L1_LADDER = (0.0, *(2.0**-exponent for exponent in range(12, 2, -1)))
 
 
 @dataclass

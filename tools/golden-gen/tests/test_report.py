@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from golden_gen.report import ReleaseReportInput, render_release_report, validate_report_sources
+from golden_gen.report import (
+    ReleaseReportInput,
+    ToleranceEvidence,
+    render_release_report,
+    validate_report_sources,
+)
 from golden_gen.schema import Manifest
 from tests.support import pinned_kernel_paths, release_runtime
 
@@ -112,6 +117,17 @@ def test_report_rejects_missing_metric_or_a_final_commit_self_reference():
         ReleaseReportInput.model_validate(payload)
 
 
+def test_report_accepts_revised_ceiling_endpoints_but_not_values_above_them():
+    payload = _input().tolerance.model_dump()
+    payload.update(l1_near_tie_max_abs_logit_gap=0.125, l2_atol=1.0)
+    evidence = ToleranceEvidence.model_validate(payload)
+    assert evidence.l1_near_tie_max_abs_logit_gap == 0.125
+    assert evidence.l2_atol == 1.0
+    for field, value in (("l1_near_tie_max_abs_logit_gap", 0.125001), ("l2_atol", 1.000001)):
+        with pytest.raises(ValidationError):
+            ToleranceEvidence.model_validate({**payload, field: value})
+
+
 def test_report_identities_bind_machine_evidence_and_real_checkpoint_ancestry(tmp_path):
     def git(*args):
         return subprocess.run(
@@ -192,3 +208,151 @@ def test_report_identities_bind_machine_evidence_and_real_checkpoint_ancestry(tm
             observation,
             benchmark,
         )
+
+
+def _forked_report(tmp_path, scenario="valid"):
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def commit(message):
+        git("add", ".")
+        git("commit", "--allow-empty", "-qm", message)
+        return git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    code = tmp_path / "runner.py"
+    code.write_text("accepted source\n")
+    base, _ = commit("accepted integration tip")
+    git("checkout", "-qb", "observation")
+    code.write_text("observed executable source\n")
+    observed, observed_tree = commit("observation O")
+    observation = {"identity": {"measurement_commit": observed, "measurement_tree": observed_tree}}
+    git("checkout", "-qb", "policy", base)
+    path = tmp_path / "docs/releases/goldens-v0.2-calibration-observation.json"
+    path.parent.mkdir(parents=True)
+    approved_bytes = json.dumps(observation).encode()
+    path.write_bytes(approved_bytes)
+    definition = tmp_path / "docs/adr/approved-policy.md"
+    definition.parent.mkdir()
+    definition.write_text("approved Definition bytes\n")
+    index = tmp_path / ".dag/definition-index.json"
+    index.parent.mkdir()
+    selected = [
+        {"path": entry.relative_to(tmp_path).as_posix(), "blob_oid": git("hash-object", str(entry))}
+        for entry in (definition, path)
+    ]
+    if scenario == "wrong_p_index":
+        selected[1]["blob_oid"] = "f" * 40
+    index_bytes = json.dumps({"schema_version": 1, "inputs": selected}).encode()
+    index.write_bytes(index_bytes)
+    policy, policy_tree = commit("Definition-only checkpoint P")
+    assert (
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge-base", "--is-ancestor", observed, policy],
+            check=False,
+        ).returncode
+        == 1
+    )
+    if scenario == "missing_o":
+        measured, measured_tree = commit("measurement without O ancestor")
+    elif scenario == "missing_p":
+        git("checkout", "-q", "observation")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        index.parent.mkdir(exist_ok=True)
+        path.write_bytes(approved_bytes)
+        definition.parent.mkdir(parents=True, exist_ok=True)
+        definition.write_text("approved Definition bytes\n")
+        index.write_bytes(index_bytes)
+        measured, measured_tree = commit("copied policy bytes without P ancestor")
+    else:
+        git("checkout", "-q", "observation")
+        git("merge", "--no-ff", "-qm", "measurement merge M", "policy")
+        assert git("rev-parse", "HEAD^1") == observed
+        assert git("rev-parse", "HEAD^2") == policy
+        if scenario == "executable_change":
+            code.write_text("different executable bytes after O\n")
+        elif scenario == "renamed_executable":
+            code.rename(definition.parent / "hidden-executable.md")
+        elif scenario == "wrong_blob":
+            path.write_text(json.dumps({**observation, "unreviewed": True}))
+        elif scenario == "wrong_index":
+            index.write_text(json.dumps({"schema_version": 1, "inputs": []}))
+        elif scenario == "wrong_definition":
+            definition.write_text("unreviewed Definition bytes\n")
+        if scenario != "valid":
+            commit("invalid measurement mutation")
+        measured, measured_tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+    manifest = Manifest.from_json(Path(__file__).parent / "fixtures/manifest-v4.json")
+    observation_sha = hashlib.sha256(approved_bytes).hexdigest()
+    if scenario == "wrong_p_sha":
+        observation_sha = "e" * 64
+    evidence = _input().model_copy(
+        update={
+            "observation_commit": observed,
+            "observation_tree": observed_tree,
+            "policy_checkpoint_commit": policy,
+            "policy_checkpoint_tree": policy_tree,
+            "measurement_commit": measured,
+            "measurement_tree": measured_tree,
+            "tolerance": _input().tolerance.model_copy(
+                update={
+                    "observation_sha256": observation_sha,
+                    "rationale": manifest.tolerance_policy.rationale,
+                }
+            ),
+        }
+    )
+    manifest.tolerance_policy = manifest.tolerance_policy.model_copy(
+        update={
+            "evidence": [
+                f"measurement-commit:{measured}",
+                f"measurement-tree:{measured_tree}",
+                f"observation-measurement-commit:{observed}",
+                f"observation-measurement-tree:{observed_tree}",
+                f"definition-observation-sha256:{observation_sha}",
+            ]
+        }
+    )
+    benchmark = {"measurement_commit": measured, "measurement_tree": measured_tree}
+    return evidence, manifest, observation, benchmark
+
+
+def test_report_accepts_true_merge_of_observation_and_definition_only_checkpoint(tmp_path):
+    evidence, manifest, observation, benchmark = _forked_report(tmp_path)
+    validate_report_sources(evidence, tmp_path, manifest, observation, benchmark)
+
+
+@pytest.mark.parametrize("scenario", ["missing_o", "missing_p"])
+def test_report_requires_both_real_ancestors_not_just_copied_checkpoint_bytes(tmp_path, scenario):
+    evidence, manifest, observation, benchmark = _forked_report(tmp_path, scenario)
+    with pytest.raises(subprocess.CalledProcessError):
+        validate_report_sources(evidence, tmp_path, manifest, observation, benchmark)
+
+
+@pytest.mark.parametrize(
+    "scenario,message",
+    [
+        ("executable_change", "executable"),
+        ("renamed_executable", "executable"),
+        ("wrong_blob", "checkpoint observation"),
+        ("wrong_index", "Definition index"),
+        ("wrong_definition", "Definition input"),
+        ("wrong_p_sha", "different observation"),
+        ("wrong_p_index", "not bound"),
+    ],
+)
+def test_report_merge_cannot_conceal_changed_source_or_definition(tmp_path, scenario, message):
+    evidence, manifest, observation, benchmark = _forked_report(tmp_path, scenario)
+    with pytest.raises(ValueError, match=message):
+        validate_report_sources(evidence, tmp_path, manifest, observation, benchmark)
+
+
+def test_report_still_requires_three_distinct_commit_roles():
+    payload = _input().model_dump()
+    payload["policy_checkpoint_commit"] = payload["observation_commit"]
+    with pytest.raises(ValidationError, match="commits must differ"):
+        ReleaseReportInput.model_validate(payload)

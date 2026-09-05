@@ -109,8 +109,8 @@ class BenchmarkEvidence(BaseModel):
 class ToleranceEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    l1_near_tie_max_abs_logit_gap: float = Field(ge=0.0, le=0.0625)
-    l2_atol: float = Field(ge=0.0, le=0.25)
+    l1_near_tie_max_abs_logit_gap: float = Field(ge=0.0, le=0.125)
+    l2_atol: float = Field(ge=0.0, le=1.0)
     observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     raw_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     rationale: str = Field(min_length=1)
@@ -203,7 +203,7 @@ def validate_report_sources(
         "merge-base",
         "--is-ancestor",
         evidence.observation_commit,
-        evidence.policy_checkpoint_commit,
+        evidence.measurement_commit,
     )
     git(
         "merge-base",
@@ -211,19 +211,59 @@ def validate_report_sources(
         evidence.policy_checkpoint_commit,
         evidence.measurement_commit,
     )
+    # ADR-0013: O and P are independent ancestors of M. A merge is not
+    # permission to change the executable inputs measured at O.
+    changed = git(
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        evidence.observation_commit,
+        evidence.measurement_commit,
+    ).split(b"\0")
+    evidence_paths = {
+        b"CONTEXT.md",
+        b".dag/definition-index.json",
+        b".dag/definitions/v0.2.0-github.json",
+        b"docs/releases/goldens-v0.2-calibration-observation.json",
+        b"docs/releases/goldens-v0.2.md",
+    }
+    if any(
+        path
+        and path not in evidence_paths
+        and not (path.startswith(b"docs/adr/") and path.endswith(b".md"))
+        for path in changed
+    ):
+        raise ValueError("executable inputs changed between observation and measurement")
     path = "docs/releases/goldens-v0.2-calibration-observation.json"
     checkpoint_bytes = git("show", f"{evidence.policy_checkpoint_commit}:{path}")
     if hashlib.sha256(checkpoint_bytes).hexdigest() != evidence.tolerance.observation_sha256:
         raise ValueError("report policy checkpoint contains a different observation")
+    if git("show", f"{evidence.measurement_commit}:{path}") != checkpoint_bytes:
+        raise ValueError("measurement does not preserve the policy checkpoint observation")
     checkpoint_blob = (
         git("rev-parse", f"{evidence.policy_checkpoint_commit}:{path}").decode().strip()
     )
-    index = json.loads(
-        git("show", f"{evidence.policy_checkpoint_commit}:.dag/definition-index.json")
+    checkpoint_index = git(
+        "show", f"{evidence.policy_checkpoint_commit}:.dag/definition-index.json"
     )
+    if git("show", f"{evidence.measurement_commit}:.dag/definition-index.json") != checkpoint_index:
+        raise ValueError("measurement does not preserve the approved Definition index")
+    index = json.loads(checkpoint_index)
+    if index.get("schema_version") != 1:
+        raise ValueError("policy checkpoint Definition index schema is invalid")
     selected = [item for item in index["inputs"] if item.get("path") == path]
     if selected != [{"path": path, "blob_oid": checkpoint_blob}]:
         raise ValueError("report observation was not bound by the policy checkpoint")
+    for item in index["inputs"]:
+        checkpoint_input = (
+            git("rev-parse", f"{evidence.policy_checkpoint_commit}:{item['path']}").decode().strip()
+        )
+        measured_input = (
+            git("rev-parse", f"{evidence.measurement_commit}:{item['path']}").decode().strip()
+        )
+        if checkpoint_input != item["blob_oid"] or measured_input != checkpoint_input:
+            raise ValueError("measurement does not preserve an approved Definition input")
 
 
 def render_release_report(evidence: ReleaseReportInput) -> str:
