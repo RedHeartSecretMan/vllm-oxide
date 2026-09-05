@@ -14,6 +14,10 @@
 //! y  = cat(y1, y2, dim=-1)
 //! ```
 //!
+//! Frequencies and the cache are computed in FP32. Before rotation, cos/sin
+//! are cast to the input dtype, and each multiply/add retains that dtype,
+//! matching Transformers Qwen3's BF16 materialization points.
+//!
 //! Qwen3 ships `rope_theta = 1_000_000` and no scaling; this module defaults
 //! to that and exposes no scaling knob (ADR-0003 R5 — scaling variants land
 //! in v0.2 if a model ships `rope_scaling`).
@@ -32,7 +36,7 @@
 //! candle-nn, or (b) update user story 37 to "implement V1-style RoPE with
 //! position lookup".
 
-use candle_core::{DType, Device, Result, Tensor, D::Minus1};
+use candle_core::{Device, Result, Tensor, D::Minus1};
 
 /// Precomputed RoPE cache + geometry. Stateless after construction — `forward`
 /// only reads `cos_sin_cache` indexed by `positions`.
@@ -144,16 +148,17 @@ impl RotaryEmbedding {
 
 fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let orig_dtype = x.dtype();
-    let x_fp32 = x.to_dtype(DType::F32)?;
-    let chunks = x_fp32.chunk(2, Minus1)?;
+    let cos = cos.to_dtype(orig_dtype)?;
+    let sin = sin.to_dtype(orig_dtype)?;
+    let chunks = x.chunk(2, Minus1)?;
     let x1 = &chunks[0];
     let x2 = &chunks[1];
     let y1 = x1
-        .broadcast_mul(cos)?
-        .broadcast_sub(&x2.broadcast_mul(sin)?)?;
+        .broadcast_mul(&cos)?
+        .broadcast_sub(&x2.broadcast_mul(&sin)?)?;
     let y2 = x2
-        .broadcast_mul(cos)?
-        .broadcast_add(&x1.broadcast_mul(sin)?)?;
+        .broadcast_mul(&cos)?
+        .broadcast_add(&x1.broadcast_mul(&sin)?)?;
     let y = Tensor::cat(&[&y1, &y2], Minus1)?;
     y.to_dtype(orig_dtype)
 }
@@ -166,6 +171,7 @@ fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 )]
 mod tests {
     use super::*;
+    use candle_core::DType;
 
     mod cache_shape {
         use super::*;
@@ -201,6 +207,40 @@ mod tests {
             let (q_rot, k_rot) = rope.forward(&positions, &q, &k).unwrap();
             assert_eq!(q_rot.shape().dims(), [3, 4, 8]);
             assert_eq!(k_rot.shape().dims(), [3, 4, 8]);
+        }
+
+        #[test]
+        fn bf16_rotation_rounds_cache_and_each_product_like_reference() {
+            assert_bf16_rotary_materialization(&Device::Cpu);
+        }
+
+        #[cfg(feature = "cuda")]
+        #[test]
+        #[ignore = "manual GPU operator diagnostic; no model or fixtures"]
+        fn gpu_bf16_materialization_rope() {
+            assert_bf16_rotary_materialization(&Device::new_cuda(0).unwrap());
+        }
+
+        fn assert_bf16_rotary_materialization(dev: &Device) {
+            let rope = RotaryEmbedding::new(2, 2, 2, 1_000_000.0, dev).unwrap();
+            let positions = Tensor::from_iter([1u32], dev).unwrap();
+            let q = Tensor::ones((1, 1, 2), DType::BF16, dev).unwrap();
+            let (rotated, _) = rope.forward(&positions, &q, &q).unwrap();
+            // Independent Torch 2.10 / Transformers 4.57.6 CPU result:
+            // BF16 cos(1)=0.5390625, sin(1)=0.83984375; the second sum
+            // 1.37890625 rounds ties-to-even to BF16 1.375.
+            let values = rotated
+                .flatten_all()
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            eprintln!(
+                "BF16_OPERATOR rope cuda={} output={values:?}",
+                dev.is_cuda()
+            );
+            assert_eq!(values, vec![-0.300_781_25, 1.375]);
         }
     }
 

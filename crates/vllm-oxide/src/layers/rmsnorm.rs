@@ -1,4 +1,4 @@
-//! RMSNorm with FP32 upcast (parity with nano-vllm `layernorm.py:21-25`).
+//! RMSNorm with FP32 statistics and Qwen3 reference dtype materialization.
 //!
 //! nano-vllm computes variance in FP32 regardless of input dtype:
 //! `orig_dtype = x.dtype; x = x.float(); var = x.pow(2).mean(-1); x = (x *
@@ -10,9 +10,10 @@
 //!
 //! The forward signature carries V1's add+norm pattern — `(hidden,
 //! Option<residual>) → (normed, residual)`. When `residual` is `Some(r)`,
-//! `r` is added to `hidden` (in FP32) BEFORE normalisation; the returned
-//! residual is the un-normalised sum (so the next add+norm layer consumes
-//! it). When `residual` is `None`, the returned residual is the input
+//! `r` is added to `hidden` and rounded to the input dtype BEFORE the FP32
+//! normalisation statistics, matching Transformers Qwen3's materialized
+//! residual addition. The returned residual is that same un-normalised sum.
+//! When `residual` is `None`, the returned residual is the input
 //! itself (the residual stream starts at the embedding output).
 
 use candle_core::{DType, Result, Tensor, D::Minus1};
@@ -60,7 +61,7 @@ impl RMSNorm {
                 let r_fp32 = r.to_dtype(internal_dtype)?;
                 let sum = x.to_dtype(internal_dtype)?.broadcast_add(&r_fp32)?;
                 let new_residual = sum.to_dtype(orig_dtype)?;
-                (sum, new_residual)
+                (new_residual.to_dtype(internal_dtype)?, new_residual)
             }
             None => {
                 let x_fp32 = x.to_dtype(internal_dtype)?;
@@ -164,6 +165,50 @@ mod tests {
 
     mod add_then_norm {
         use super::*;
+
+        #[test]
+        fn bf16_residual_sum_is_rounded_before_statistics() {
+            assert_bf16_residual_materialization(&candle_core::Device::Cpu);
+        }
+
+        #[cfg(feature = "cuda")]
+        #[test]
+        #[ignore = "manual GPU operator diagnostic; no model or fixtures"]
+        fn gpu_bf16_materialization_residual_norm() {
+            assert_bf16_residual_materialization(&candle_core::Device::new_cuda(0).unwrap());
+        }
+
+        fn assert_bf16_residual_materialization(dev: &candle_core::Device) {
+            let weight = Tensor::ones(4, DType::BF16, dev).unwrap();
+            let norm = RMSNorm::new(weight, 1e-6);
+            let x = Tensor::ones(4, DType::BF16, dev).unwrap();
+            let r = Tensor::from_iter([0.003_906_25f32, 0.003_906_25, 0.003_906_25, 0.0], dev)
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let (normed, residual) = norm.forward(&x, Some(&r)).unwrap();
+            // Qwen3's BF16 residual add rounds these three exact halfway sums
+            // back to 1.0 before RMSNorm upcasts. Torch 2.10 / Transformers
+            // 4.57.6 on CPU independently gives four exact BF16 ones.
+            assert_eq!(
+                residual
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap(),
+                vec![1.0; 4]
+            );
+            let values = normed
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            eprintln!(
+                "BF16_OPERATOR rmsnorm cuda={} output={values:?}",
+                dev.is_cuda()
+            );
+            assert_eq!(values, vec![1.0; 4]);
+        }
 
         #[test]
         fn residual_is_added_before_normalisation() {
