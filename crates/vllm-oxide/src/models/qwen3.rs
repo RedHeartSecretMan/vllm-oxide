@@ -319,7 +319,8 @@ impl Qwen3Model {
             .as_ref()
             .map(|trace| trace.begin(input_ids, positions))
             .transpose()
-            .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+            .map_err(|error| candle_core::Error::Msg(error.to_string()))?
+            .flatten();
         #[cfg(feature = "internal-golden")]
         if let Some(trace) = trace.as_mut() {
             trace

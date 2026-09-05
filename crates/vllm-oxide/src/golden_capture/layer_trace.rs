@@ -58,11 +58,27 @@ impl LayerTrace {
         }
     }
 
-    pub(crate) fn begin(&self, tokens: &Tensor, positions: &Tensor) -> Result<StepTrace> {
+    pub(crate) fn begin(&self, tokens: &Tensor, positions: &Tensor) -> Result<Option<StepTrace>> {
+        self.begin_capture(std::env::var_os(super::CALL_ID_ENV), tokens, positions)
+    }
+
+    fn begin_capture(
+        &self,
+        call_id: Option<std::ffi::OsString>,
+        tokens: &Tensor,
+        positions: &Tensor,
+    ) -> Result<Option<StepTrace>> {
+        // LLM::new performs real warmup before the consumer installs the
+        // existing golden capture call. Do not inspect tensors or advance
+        // the two-step diagnostic until that request boundary is active.
+        if call_id.is_none() {
+            return Ok(None);
+        }
         self.begin_values(
             &tokens.to_dtype(DType::U32)?.to_vec1::<u32>()?,
             &positions.to_dtype(DType::U32)?.to_vec1::<u32>()?,
         )
+        .map(Some)
     }
 
     fn begin_values(&self, tokens: &[u32], positions: &[u32]) -> Result<StepTrace> {
@@ -162,6 +178,30 @@ impl StepTrace {
 mod tests {
     use super::*;
     use candle_core::{DType, Device};
+
+    #[test]
+    fn initialization_warmup_does_not_write_or_consume_a_capture_step() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = Request::parse(
+            r#"{"prompt_id":"canonical_03","token_ids":[17,18],"decode_token":151667}"#,
+        )
+        .unwrap();
+        let trace = LayerTrace::new(directory.path().to_path_buf(), request);
+        let warmup = Tensor::new(&[0_u32, 0], &Device::Cpu).unwrap();
+        let positions = Tensor::new(&[0_u32, 1], &Device::Cpu).unwrap();
+        assert!(trace
+            .begin_capture(None, &warmup, &positions)
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        let actual = Tensor::new(&[17_u32, 18], &Device::Cpu).unwrap();
+        assert!(trace
+            .begin_capture(Some("capture".into()), &actual, &positions)
+            .unwrap()
+            .is_some());
+        assert!(directory.path().join("step-0.jsonl").exists());
+        trace.begin_values(&[151_667], &[2]).unwrap();
+    }
 
     #[test]
     fn trace_records_bf16_bits_shape_and_materialized_residual_without_mutation() {
