@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,6 +16,7 @@ from golden_gen.config import (
     REGRESSION_MAX_TOKENS,
     TOP_K_REGRESSION,
 )
+from golden_gen.environment import validate_release_model
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
 
@@ -50,7 +52,8 @@ class TransformersOracle:
 
     name = "transformers"
 
-    def __init__(self) -> None:
+    def __init__(self, model_dir: Path) -> None:
+        source = str(validate_release_model(model_dir))
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -58,7 +61,8 @@ class TransformersOracle:
         contract = reference_model_kwargs()
         self.model = (
             AutoModelForCausalLM.from_pretrained(
-                contract["model"],
+                source,
+                local_files_only=True,
                 revision=contract["revision"],
                 torch_dtype=torch.bfloat16,
                 attn_implementation=contract["attn_implementation"],
@@ -68,7 +72,8 @@ class TransformersOracle:
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
-            contract["model"],
+            source,
+            local_files_only=True,
             revision=contract["tokenizer_revision"],
         )
         if self.tokenizer.pad_token_id is None:

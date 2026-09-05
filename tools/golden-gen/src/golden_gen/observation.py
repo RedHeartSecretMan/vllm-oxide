@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 
 from golden_gen.io import load_fixture
 from golden_gen.release_protocol import validate_release_manifest_coverage
+from golden_gen.replay import tensor_bits_equal
 from golden_gen.schema import Manifest, TolerancePolicy
 
 CALIBRATION_IDS = (
@@ -442,7 +443,7 @@ def observe_capture_replays(
             raise ValueError(f"candidate replay capture checksum mismatch: {prompt_id}")
         primary_logits, primary_tokens = _read_candidate_capture(primary_path)
         replay_logits, replay_tokens = _read_candidate_capture(replay_path)
-        if not np.array_equal(primary_logits, replay_logits) or not np.array_equal(
+        if not tensor_bits_equal(primary_logits, replay_logits) or not tensor_bits_equal(
             primary_tokens, replay_tokens
         ):
             raise ValueError(f"candidate replay is not bit-identical: {prompt_id}")
@@ -514,7 +515,7 @@ def verify_candidate_capture_replay(primary_dir: Path, replay_dir: Path) -> dict
         replay_path = Path(replay_dir) / filename
         primary_logits, primary_tokens = _read_candidate_capture(primary_path)
         replay_logits, replay_tokens = _read_candidate_capture(replay_path)
-        if not np.array_equal(primary_logits, replay_logits) or not np.array_equal(
+        if not tensor_bits_equal(primary_logits, replay_logits) or not tensor_bits_equal(
             primary_tokens, replay_tokens
         ):
             raise ValueError(f"candidate correctness replay is not bit-identical: {filename}")

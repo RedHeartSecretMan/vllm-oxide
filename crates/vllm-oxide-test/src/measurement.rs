@@ -1,9 +1,45 @@
 //! Fail-closed binding between GPU evidence and the reviewed Git tree.
 
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
+
+/// Rehash the actual local source before every GPU owner's model initialization.
+pub fn validate_release_model(model_path: &Path) -> Result<()> {
+    for (filename, expected) in [
+        ("config.json", crate::types::MODEL_CONFIG_SHA256),
+        ("tokenizer.json", crate::types::TOKENIZER_SHA256),
+        ("model.safetensors", crate::types::MODEL_WEIGHTS_SHA256),
+    ] {
+        let mut file = std::fs::File::open(model_path.join(filename))
+            .with_context(|| format!("opening release model artifact {filename}"))?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 65536];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        if format!("{:x}", digest.finalize()) != expected {
+            bail!("release model artifact SHA-256 differs from ADR-0012: {filename}");
+        }
+    }
+    for entry in std::fs::read_dir(model_path)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if (name.ends_with(".safetensors") && name != "model.safetensors")
+            || name.ends_with(".safetensors.index.json")
+        {
+            bail!("unexpected alternative weights in release model directory: {name}");
+        }
+    }
+    Ok(())
+}
 
 #[path = "../source_identity.rs"]
 mod source_identity;
@@ -158,7 +194,15 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{git_text, validate_measurement_identity};
+    use super::{git_text, validate_measurement_identity, validate_release_model};
+
+    #[test]
+    fn release_model_rejects_wrong_local_bytes_before_model_loading() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(temporary.path().join("config.json"), b"unapproved model").unwrap();
+        let error = validate_release_model(temporary.path()).unwrap_err();
+        assert!(error.to_string().contains("SHA-256 differs"));
+    }
 
     fn git(repo: &Path, args: &[&str]) {
         let status = Command::new("git")

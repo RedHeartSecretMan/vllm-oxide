@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
 from safetensors.numpy import load_file
 
 
@@ -13,6 +14,15 @@ from safetensors.numpy import load_file
 class ReplayEvidence:
     fixture_count: int
     verified_filenames: tuple[str, ...]
+
+
+def tensor_bits_equal(left: NDArray[np.generic], right: NDArray[np.generic]) -> bool:
+    """Exclude container metadata, preserving signed zero and every tensor bit."""
+    return (
+        left.dtype == right.dtype
+        and left.shape == right.shape
+        and left.tobytes(order="C") == right.tobytes(order="C")
+    )
 
 
 def verify_oracle_replay(
@@ -41,11 +51,7 @@ def verify_oracle_replay(
         for name in primary:
             left = primary[name]
             right = replay[name]
-            if (
-                left.dtype != right.dtype
-                or left.shape != right.shape
-                or not np.array_equal(left, right)
-            ):
+            if not tensor_bits_equal(left, right):
                 raise ValueError(f"replay tensors are not bit-identical for {filename}:{name}")
     return ReplayEvidence(
         fixture_count=len(expected_filenames),

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import subprocess
+from pathlib import Path
 from statistics import median
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from golden_gen.schema import KernelPaths, RuntimeInfo
+from golden_gen.schema import KernelPaths, Manifest, RuntimeInfo
 
 
 class LifecycleEvidence(BaseModel):
@@ -108,6 +113,7 @@ class ToleranceEvidence(BaseModel):
     l2_atol: float = Field(ge=0.0, le=0.25)
     observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     raw_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    rationale: str = Field(min_length=1)
 
 
 class ReleaseReportInput(BaseModel):
@@ -146,6 +152,78 @@ class ReleaseReportInput(BaseModel):
 
 def _headline(workload: WorkloadEvidence, field: str) -> float:
     return float(median(getattr(repetition, field) for repetition in workload.repetitions))
+
+
+def validate_report_sources(
+    evidence: ReleaseReportInput,
+    repo: Path,
+    manifest: Manifest,
+    observation: dict[str, Any],
+    benchmark: dict[str, Any],
+) -> None:
+    """Bind caller-supplied report labels to machine evidence and committed Git objects."""
+    if (
+        benchmark.get("measurement_commit") != evidence.measurement_commit
+        or benchmark.get("measurement_tree") != evidence.measurement_tree
+    ):
+        raise ValueError("report measurement identity differs from benchmark evidence")
+    identity = observation["identity"]
+    if (
+        identity["measurement_commit"] != evidence.observation_commit
+        or identity["measurement_tree"] != evidence.observation_tree
+    ):
+        raise ValueError("report observation identity differs from calibration evidence")
+    required = {
+        f"measurement-commit:{evidence.measurement_commit}",
+        f"measurement-tree:{evidence.measurement_tree}",
+        f"observation-measurement-commit:{evidence.observation_commit}",
+        f"observation-measurement-tree:{evidence.observation_tree}",
+        f"definition-observation-sha256:{evidence.tolerance.observation_sha256}",
+    }
+    if not required.issubset(manifest.tolerance_policy.evidence):
+        raise ValueError("report identities differ from the approved manifest policy")
+    if evidence.tolerance.rationale != manifest.tolerance_policy.rationale:
+        raise ValueError("report rationale differs from the approved policy")
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True
+        ).stdout
+
+    if git("status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("report source worktree is dirty")
+    if git("rev-parse", "HEAD").decode().strip() != evidence.measurement_commit:
+        raise ValueError("report must be created from the frozen measurement commit")
+    for role in ("observation", "policy_checkpoint", "measurement"):
+        commit = getattr(evidence, f"{role}_commit")
+        tree = getattr(evidence, f"{role}_tree")
+        if git("rev-parse", f"{commit}^{{tree}}").decode().strip() != tree:
+            raise ValueError(f"report {role} commit/tree identity is invalid")
+    git(
+        "merge-base",
+        "--is-ancestor",
+        evidence.observation_commit,
+        evidence.policy_checkpoint_commit,
+    )
+    git(
+        "merge-base",
+        "--is-ancestor",
+        evidence.policy_checkpoint_commit,
+        evidence.measurement_commit,
+    )
+    path = "docs/releases/goldens-v0.2-calibration-observation.json"
+    checkpoint_bytes = git("show", f"{evidence.policy_checkpoint_commit}:{path}")
+    if hashlib.sha256(checkpoint_bytes).hexdigest() != evidence.tolerance.observation_sha256:
+        raise ValueError("report policy checkpoint contains a different observation")
+    checkpoint_blob = (
+        git("rev-parse", f"{evidence.policy_checkpoint_commit}:{path}").decode().strip()
+    )
+    index = json.loads(
+        git("show", f"{evidence.policy_checkpoint_commit}:.dag/definition-index.json")
+    )
+    selected = [item for item in index["inputs"] if item.get("path") == path]
+    if selected != [{"path": path, "blob_oid": checkpoint_blob}]:
+        raise ValueError("report observation was not bound by the policy checkpoint")
 
 
 def render_release_report(evidence: ReleaseReportInput) -> str:
@@ -202,6 +280,7 @@ def render_release_report(evidence: ReleaseReportInput) -> str:
         f"- L2 absolute tolerance: {evidence.tolerance.l2_atol}",
         f"- Observation SHA-256: `{evidence.tolerance.observation_sha256}`",
         f"- Raw evidence SHA-256: `{evidence.tolerance.raw_evidence_sha256}`",
+        f"- Approved error classes and rationale: {evidence.tolerance.rationale}",
         "",
         "## Performance",
     ]

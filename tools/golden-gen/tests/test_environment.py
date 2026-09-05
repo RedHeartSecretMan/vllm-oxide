@@ -75,6 +75,17 @@ def test_model_preflight_hashes_config_tokenizer_and_weights(tmp_path):
         validate_model_artifacts(tmp_path, expected)
 
 
+@pytest.mark.parametrize("oracle", ["transformers", "vllm"])
+def test_each_oracle_rechecks_its_actual_local_model_before_runtime_import(tmp_path, oracle):
+    from golden_gen.oracles.transformers_oracle import TransformersOracle
+    from golden_gen.oracles.vllm_oracle import VllmOracle
+
+    (tmp_path / "config.json").write_bytes(b"changed after environment preflight")
+    constructor = TransformersOracle if oracle == "transformers" else VllmOracle
+    with pytest.raises(ValueError, match="config.json SHA-256"):
+        constructor(tmp_path)
+
+
 def test_registry_install_allows_only_locked_wheels_and_local_project_build():
     validate_wheel_only_install(
         InstallEvidence(

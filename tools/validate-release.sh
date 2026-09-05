@@ -107,6 +107,7 @@ generate)
             env PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
                 "$PYTHON" -m golden_gen generate-oracle \
                 --oracle "$oracle" \
+                --model-dir "$MODEL_PATH" \
                 --runtime-record "$RUN_ROOT/env/runtime.json" \
                 --prompts-dir "$GOLDEN_PROJECT/prompts" \
                 --output-dir "$RUN_ROOT/generate/$oracle-$replay"
@@ -166,6 +167,7 @@ observe)
     test "$observe_status" -eq 3
     test -f "$RUN_ROOT/observe/calibration-observation.json"
     complete_stage observe
+    exit 3
     ;;
 authoritative)
     require_marker observe
@@ -184,7 +186,7 @@ authoritative)
         "$PYTHON" -m golden_gen guard \
             --evidence "$RUN_ROOT/authoritative/$replay-guard.json" -- \
         env PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
-        cargo run --manifest-path "$SCRIPT_DIR/Cargo.toml" --release -p vllm_oxide_test --features cuda -- \
+        cargo run --manifest-path "$SCRIPT_DIR/Cargo.toml" --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
             --mode authoritative \
             --approved-observation "$APPROVED_OBSERVATION" \
             --model-path "$MODEL_PATH" \
@@ -229,6 +231,7 @@ report)
     test ! -e "$RUN_ROOT/report"
     mkdir -m 0700 "$RUN_ROOT/report"
     "$PYTHON" -m golden_gen report \
+        --repo-root "$SCRIPT_DIR" \
         --manifest "$RUN_ROOT/authoritative/fixtures/manifest.json" \
         --observation "$SCRIPT_DIR/docs/releases/goldens-v0.2-calibration-observation.json" \
         --comparison "$RUN_ROOT/authoritative/comparison.json" \

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
-from pathlib import Path
 
 from golden_gen.config import (
     BASELINE_KERNEL_PATH,
@@ -33,47 +32,6 @@ def _approved_case_families() -> dict[str, str]:
         **{f"canonical_05{suffix}": "batch" for suffix in "abcd"},
         **{f"regression_{index:02d}": "regression" for index in range(1, 21)},
     }
-
-
-_ARTIFACT_PARENT = Path("/tmp/vllm-oxide-dag-v0.2.0/t45-artifacts")
-_STAGES = (
-    "env",
-    "generate",
-    "observe",
-    "authoritative",
-    "benchmark",
-    "report",
-    "bundle",
-    "publish",
-    "verify",
-)
-
-
-class StageLedger:
-    """Resolve fresh, ticket-owned stage directories without hidden resume state."""
-
-    def __init__(self, run_root: Path) -> None:
-        resolved = Path(run_root).resolve(strict=False)
-        try:
-            relative = resolved.relative_to(_ARTIFACT_PARENT)
-        except ValueError as error:
-            raise ValueError(
-                f"run path must be below ticket artifact root {_ARTIFACT_PARENT}"
-            ) from error
-        if not relative.parts:
-            raise ValueError("run path must name a fresh run below the ticket artifact root")
-        self.run_root = resolved
-
-    def output_path(self, stage: str) -> Path:
-        if stage not in _STAGES:
-            raise ValueError(f"unknown goldens-v0.2 stage: {stage}")
-        return self.run_root / stage
-
-    def require_fresh_output(self, stage: str) -> Path:
-        output = self.output_path(stage)
-        if output.exists() or output.is_symlink():
-            raise FileExistsError(f"stage requires a fresh non-existing output path: {output}")
-        return output
 
 
 @dataclass(frozen=True)

@@ -40,7 +40,7 @@ Direct invocation is intentionally verbose because holdout access must bind a
 Definition-approved observation and retain a second set of candidate captures:
 
 ```bash
-cargo run --release -p vllm_oxide_test --features cuda -- \
+cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
     --mode authoritative \
     --repo-root /path/to/reviewed-checkout \
     --measurement-commit "$VLLM_OXIDE_MEASUREMENT_COMMIT" \
@@ -54,7 +54,7 @@ cargo run --release -p vllm_oxide_test --features cuda -- \
 ### Download goldens from GitHub Release and run
 
 ```bash
-cargo run --release -p vllm_oxide_test --features cuda -- \
+cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
     --mode authoritative \
     --repo-root /path/to/reviewed-checkout \
     --measurement-commit "$VLLM_OXIDE_MEASUREMENT_COMMIT" \

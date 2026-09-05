@@ -71,6 +71,7 @@ pub fn run_candidate_capture(
     let measurement =
         validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
     validate_running_binary(repo_root)?;
+    crate::measurement::validate_release_model(model_path)?;
     if output_dir.exists() || output_dir.is_symlink() {
         bail!("candidate capture output must be fresh and non-existing");
     }

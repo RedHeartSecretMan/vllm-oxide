@@ -63,6 +63,24 @@ def validate_model_artifacts(model_dir: Path, expected: Mapping[str, str]) -> di
     return observed
 
 
+def validate_release_model(model_dir: Path) -> Path:
+    """Validate and return the actual local source used by an oracle GPU owner."""
+    model_dir = model_dir.resolve(strict=True)
+    validate_model_artifacts(
+        model_dir,
+        {
+            "config.json": MODEL_CONFIG_SHA256,
+            "tokenizer.json": TOKENIZER_SHA256,
+            "model.safetensors": MODEL_WEIGHTS_SHA256,
+        },
+    )
+    if any(path.name != "model.safetensors" for path in model_dir.glob("*.safetensors")) or any(
+        model_dir.glob("*.safetensors.index.json")
+    ):
+        raise ValueError("unexpected alternative release model weights")
+    return model_dir
+
+
 def validate_wheel_only_install(evidence: InstallEvidence) -> None:
     if not evidence.frozen or not evidence.registry_no_build:
         raise ValueError("environment install must be frozen and registry wheel-only")

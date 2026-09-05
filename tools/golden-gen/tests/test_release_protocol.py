@@ -15,7 +15,7 @@ from golden_gen.config import (
 )
 from golden_gen.observation import CalibrationAccessPlan
 from golden_gen.prompts import discover_fixtures, load_prompts
-from golden_gen.release_protocol import CorpusContract, StageLedger
+from golden_gen.release_protocol import CorpusContract
 from golden_gen.schema import KernelPaths, ModelInfo, RuntimeInfo, WheelIdentity
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -148,20 +148,3 @@ def test_calibration_access_plan_opens_only_four_candidates_and_seals_holdout():
         plan.record_open("canonical_04")
 
     assert plan.opened_ids == plan.candidate_ids
-
-
-def test_stage_ledger_requires_fresh_paths_below_the_ticket_artifact_root(
-    tmp_path, ticket_artifact_root
-):
-    approved_root = ticket_artifact_root
-    ledger = StageLedger(approved_root)
-
-    assert ledger.output_path("generate") == approved_root / "generate"
-
-    with pytest.raises(ValueError, match="ticket artifact root"):
-        StageLedger(tmp_path / "tools" / "golden-gen" / "output")
-
-    existing = approved_root / "generate"
-    existing.mkdir(parents=True)
-    with pytest.raises(FileExistsError, match="fresh non-existing"):
-        ledger.require_fresh_output("generate")

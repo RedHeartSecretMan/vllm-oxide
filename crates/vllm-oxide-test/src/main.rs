@@ -107,6 +107,7 @@ fn main() -> Result<()> {
         &cli.measurement_tree,
     )?;
     vllm_oxide_test::measurement::validate_running_binary(&cli.repo_root)?;
+    vllm_oxide_test::measurement::validate_release_model(&cli.model_path)?;
 
     // 1. Load or download golden fixtures.
     let (golden_manifest, fixture_dir) = if let Some(ref manifest_path) = cli.manifest {

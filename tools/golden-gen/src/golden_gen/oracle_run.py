@@ -82,6 +82,7 @@ def generate_oracle_run(
     runtime_record: Path,
     prompts_dir: Path,
     output_dir: Path,
+    model_dir: Path,
 ) -> OracleRun:
     runtime_bytes = Path(runtime_record).read_bytes()
     runtime = RuntimeInfo.model_validate_json(runtime_bytes)
@@ -100,11 +101,11 @@ def generate_oracle_run(
     if oracle == "transformers":
         from golden_gen.oracles.transformers_oracle import TransformersOracle
 
-        adapter = TransformersOracle()
+        adapter = TransformersOracle(model_dir)
     else:
         from golden_gen.oracles.vllm_oracle import VllmOracle
 
-        adapter = VllmOracle()
+        adapter = VllmOracle(model_dir)
     try:
         fixtures = run_all(
             [adapter],

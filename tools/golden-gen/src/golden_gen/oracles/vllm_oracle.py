@@ -7,6 +7,7 @@ full pre-sampling logits for canonical prompts.
 from __future__ import annotations
 
 import random
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,7 @@ from golden_gen.config import (
     TOP_K_REGRESSION,
     VOCAB_SIZE,
 )
+from golden_gen.environment import validate_release_model
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
 
@@ -92,12 +94,15 @@ class VllmOracle:
 
     name = "vllm"
 
-    def __init__(self) -> None:
+    def __init__(self, model_dir: Path) -> None:
+        source = str(validate_release_model(model_dir))
         import torch
         from vllm import LLM
 
         _configure_determinism(torch)
-        self.llm = LLM(**baseline_engine_kwargs())
+        contract = baseline_engine_kwargs()
+        contract.update(model=source, tokenizer=source)
+        self.llm = LLM(**contract)
 
     def _generate_canonical(self, prompt: PromptSpec) -> OracleResult:
         from vllm import SamplingParams

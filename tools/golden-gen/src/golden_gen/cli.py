@@ -31,7 +31,7 @@ from golden_gen.oracle_run import (
 )
 from golden_gen.oracles.fake import FakeOracle
 from golden_gen.publication import prepare_publication, verify_publication
-from golden_gen.report import ReleaseReportInput, render_release_report
+from golden_gen.report import ReleaseReportInput, render_release_report, validate_report_sources
 from golden_gen.schema import Manifest
 from golden_gen.stages import verify_stage_marker, write_stage_marker
 
@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     one = commands.add_parser("generate-oracle", help="Generate one fresh oracle corpus")
     one.add_argument("--oracle", choices=["transformers", "vllm"], required=True)
     one.add_argument("--runtime-record", type=Path, required=True)
+    one.add_argument("--model-dir", type=Path, required=True)
     one.add_argument("--prompts-dir", type=Path, default=Path("./prompts"))
     one.add_argument("--output-dir", type=Path, required=True)
 
@@ -121,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--repo-root", type=Path, required=True)
 
     report = commands.add_parser("report", help="Render the evidence-only release report")
+    report.add_argument("--repo-root", type=Path, required=True)
     for name in ("manifest", "observation", "comparison", "benchmark"):
         report.add_argument(f"--{name}", type=Path, required=True)
     for name in (
@@ -231,7 +233,9 @@ def _run_generate(args: argparse.Namespace) -> int:
 
 def _run_generate_oracle(args: argparse.Namespace) -> int:
     try:
-        generate_oracle_run(args.oracle, args.runtime_record, args.prompts_dir, args.output_dir)
+        generate_oracle_run(
+            args.oracle, args.runtime_record, args.prompts_dir, args.output_dir, args.model_dir
+        )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"ERROR: {args.oracle} oracle generation failed: {error}", file=sys.stderr)
         return 1
@@ -368,15 +372,17 @@ def _run_report(args: argparse.Namespace) -> int:
                 "l2_atol": manifest.tolerance_policy.l2_atol,
                 "observation_sha256": hashlib.sha256(observation_bytes).hexdigest(),
                 "raw_evidence_sha256": observation["identity"]["raw_evidence_sha256"],
+                "rationale": manifest.tolerance_policy.rationale,
             },
             benchmark=benchmark["workloads"],
             manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
             archive_sha256=manifest.archive.sha256,
             limitations=args.limitation,
         )
+        validate_report_sources(evidence, args.repo_root, manifest, observation, benchmark)
         with args.output.open("xb") as output:
             output.write(render_release_report(evidence).encode())
-    except (KeyError, OSError, ValueError) as error:
+    except (KeyError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"ERROR: release report generation failed: {error}", file=sys.stderr)
         return 1
     return 0

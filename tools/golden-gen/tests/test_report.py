@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from golden_gen.report import ReleaseReportInput, render_release_report
+from golden_gen.report import ReleaseReportInput, render_release_report, validate_report_sources
+from golden_gen.schema import Manifest
 from tests.support import pinned_kernel_paths, release_runtime
 
 
@@ -61,6 +67,7 @@ def _input() -> ReleaseReportInput:
             "l2_atol": 0.015625,
             "observation_sha256": "7" * 64,
             "raw_evidence_sha256": "8" * 64,
+            "rationale": "Reviewed candidate kernel rounding at same-prefix rows.",
         },
         benchmark=_benchmark(),
         manifest_sha256="9" * 64,
@@ -90,6 +97,7 @@ def test_report_records_three_commit_roles_all_metrics_and_no_self_reference():
     assert '"baseline_mib": 2000' in report
     assert '"sample_count": 3' in report
     assert "2.10.0" in report
+    assert "Reviewed candidate kernel rounding at same-prefix rows." in report
 
 
 def test_report_rejects_missing_metric_or_a_final_commit_self_reference():
@@ -102,3 +110,85 @@ def test_report_rejects_missing_metric_or_a_final_commit_self_reference():
     payload["final_commit"] = "f" * 40
     with pytest.raises(ValidationError, match="final_commit"):
         ReleaseReportInput.model_validate(payload)
+
+
+def test_report_identities_bind_machine_evidence_and_real_checkpoint_ancestry(tmp_path):
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def commit(message):
+        git("add", ".")
+        git(
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            message,
+        )
+        return git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    git("init", "-q")
+    observation_commit, observation_tree = commit("observation source")
+    observation = {
+        "identity": {"measurement_commit": observation_commit, "measurement_tree": observation_tree}
+    }
+    relative = "docs/releases/goldens-v0.2-calibration-observation.json"
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(observation))
+    blob = git("hash-object", str(path))
+    (tmp_path / ".dag").mkdir()
+    (tmp_path / ".dag/definition-index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "inputs": [{"path": relative, "blob_oid": blob}],
+            }
+        )
+    )
+    policy_commit, policy_tree = commit("approved policy")
+    measured_commit, measured_tree = commit("reviewed measurement source")
+    manifest = Manifest.from_json(Path(__file__).parent / "fixtures/manifest-v4.json")
+    observation_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    evidence = _input().model_copy(
+        update={
+            "observation_commit": observation_commit,
+            "observation_tree": observation_tree,
+            "policy_checkpoint_commit": policy_commit,
+            "policy_checkpoint_tree": policy_tree,
+            "measurement_commit": measured_commit,
+            "measurement_tree": measured_tree,
+            "tolerance": _input().tolerance.model_copy(
+                update={
+                    "observation_sha256": observation_sha,
+                    "rationale": manifest.tolerance_policy.rationale,
+                }
+            ),
+        }
+    )
+    manifest.tolerance_policy = manifest.tolerance_policy.model_copy(
+        update={
+            "evidence": [
+                f"measurement-commit:{measured_commit}",
+                f"measurement-tree:{measured_tree}",
+                f"observation-measurement-commit:{observation_commit}",
+                f"observation-measurement-tree:{observation_tree}",
+                f"definition-observation-sha256:{observation_sha}",
+            ]
+        }
+    )
+    benchmark = {"measurement_commit": measured_commit, "measurement_tree": measured_tree}
+    validate_report_sources(evidence, tmp_path, manifest, observation, benchmark)
+    with pytest.raises(ValueError, match="differs from benchmark"):
+        validate_report_sources(
+            evidence.model_copy(update={"measurement_commit": "f" * 40}),
+            tmp_path,
+            manifest,
+            observation,
+            benchmark,
+        )

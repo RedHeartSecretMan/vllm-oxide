@@ -67,7 +67,7 @@ impl ActiveMemoryMonitor {
             .ok_or_else(|| anyhow::anyhow!("GPU memory monitor stdout is unavailable"))?;
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let reader = thread::spawn(move || -> Result<Vec<MemorySample>> {
-            let started = Instant::now();
+            let mut started = None;
             let mut samples = Vec::new();
             for line in BufReader::new(stdout).lines() {
                 let line = line.context("reading GPU memory monitor output")?;
@@ -75,12 +75,9 @@ impl ActiveMemoryMonitor {
                     .trim()
                     .parse::<u64>()
                     .with_context(|| format!("parsing GPU memory sample {line:?}"))?;
-                let elapsed = if samples.is_empty() {
-                    0
-                } else {
-                    u64::try_from(started.elapsed().as_millis())
-                        .context("GPU memory monitor duration exceeds u64")?
-                };
+                let baseline = started.get_or_insert_with(Instant::now);
+                let elapsed = u64::try_from(baseline.elapsed().as_millis())
+                    .context("GPU memory monitor duration exceeds u64")?;
                 samples.push(MemorySample {
                     elapsed_ms: elapsed,
                     used_mib,
@@ -177,6 +174,7 @@ pub fn run_release_benchmark(
     let measurement =
         validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
     validate_running_binary(repo_root)?;
+    crate::measurement::validate_release_model(model_path)?;
     let output_dir = output_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("benchmark output must have a parent directory"))?;

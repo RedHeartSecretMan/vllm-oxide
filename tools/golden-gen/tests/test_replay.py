@@ -56,3 +56,16 @@ def test_replay_verifier_rejects_missing_unexpected_or_partial_files(tmp_path):
             replay,
             ("canonical_01.transformers.safetensors",),
         )
+
+
+def test_replay_rejects_different_signed_zero_bits(tmp_path):
+    from safetensors.numpy import save_file
+
+    primary = tmp_path / "primary"
+    replay = tmp_path / "replay"
+    primary.mkdir()
+    replay.mkdir()
+    save_file({"logits": np.array([0.0], dtype=np.float32)}, primary / "zero.safetensors")
+    save_file({"logits": np.array([-0.0], dtype=np.float32)}, replay / "zero.safetensors")
+    with pytest.raises(ValueError, match="bit-identical"):
+        verify_oracle_replay(primary, replay, ("zero.safetensors",))
