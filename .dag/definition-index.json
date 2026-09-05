@@ -55,7 +55,11 @@
     },
     {
       "path": "docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md",
-      "blob_oid": "9df938ddf8d9479ec2b635580d2570c68856b5f6"
+      "blob_oid": "4f48b6c70d60ae31e2e125e0ccd19a3ff2e01111"
+    },
+    {
+      "path": "docs/adr/0013-bf16-cross-kernel-calibration-ceilings.md",
+      "blob_oid": "eabdbf49daa8a0b351f439f43c24932381fa9ab8"
     }
   ]
 }
