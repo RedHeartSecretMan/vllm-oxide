@@ -6,7 +6,6 @@ full pre-sampling logits for canonical prompts.
 
 from __future__ import annotations
 
-import random
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +23,14 @@ from golden_gen.config import (
 from golden_gen.environment import validate_release_model
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
+from golden_gen.worker_determinism import BaselineWorkerEvidence, seed_and_enable_determinism
 
 
 def baseline_engine_kwargs() -> dict[str, Any]:
     """Exact no-fallback vLLM baseline construction contract from ADR-0012."""
     return {
         "model": MODEL_ID,
+        "worker_cls": "golden_gen.oracles.vllm_worker.DeterministicWorker",
         "tokenizer": MODEL_ID,
         "revision": MODEL_REVISION,
         "tokenizer_revision": MODEL_REVISION,
@@ -45,11 +46,7 @@ def baseline_engine_kwargs() -> dict[str, Any]:
 
 
 def _configure_determinism(torch: Any) -> None:
-    random.seed(0)
-    np.random.seed(0)
-    torch.manual_seed(0)
-    torch.cuda.manual_seed_all(0)
-    torch.use_deterministic_algorithms(True, warn_only=False)
+    seed_and_enable_determinism(torch)
 
 
 def _extract_full_logits(completion: Any, n: int, vocab_size: int) -> NDArray[np.float32]:
@@ -103,6 +100,19 @@ class VllmOracle:
         contract = baseline_engine_kwargs()
         contract.update(model=source, tokenizer=source)
         self.llm = LLM(**contract)
+        self._worker_ready = self._worker_evidence("ready")
+
+    def _worker_evidence(self, phase: str) -> BaselineWorkerEvidence:
+        records = self.llm.collective_rpc("release_worker_evidence", args=(phase,), timeout=30)
+        if len(records) != 1:
+            raise ValueError("baseline requires exactly one evidenced GPU worker")
+        return BaselineWorkerEvidence.model_validate(records[0])
+
+    def protocol_evidence(self) -> list[BaselineWorkerEvidence]:
+        completed = self._worker_evidence("complete")
+        if completed.pid != self._worker_ready.pid:
+            raise ValueError("baseline GPU worker changed during generation")
+        return [self._worker_ready, completed]
 
     def _generate_canonical(self, prompt: PromptSpec) -> OracleResult:
         from vllm import SamplingParams

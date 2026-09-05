@@ -6,7 +6,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -25,6 +25,10 @@ from golden_gen.schema import (
     RuntimeInfo,
     TolerancePolicy,
 )
+from golden_gen.worker_determinism import BaselineWorkerEvidence
+
+if TYPE_CHECKING:
+    from golden_gen.oracles.vllm_oracle import VllmOracle
 
 
 class OracleRun(BaseModel):
@@ -34,6 +38,7 @@ class OracleRun(BaseModel):
     oracle: Literal["transformers", "vllm"]
     runtime_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     fixtures: list[FixtureMetadata]
+    worker_evidence: list[BaselineWorkerEvidence] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def exact_oracle_corpus(self) -> OracleRun:
@@ -47,6 +52,11 @@ class OracleRun(BaseModel):
             raise ValueError("oracle run must contain the exact 28 concrete cases")
         if any(fixture.oracle != self.oracle for fixture in self.fixtures):
             raise ValueError("oracle run contains a fixture from a different oracle")
+        if self.oracle == "vllm" and (
+            [record.phase for record in self.worker_evidence] != ["ready", "complete"]
+            or len({record.pid for record in self.worker_evidence}) != 1
+        ):
+            raise ValueError("baseline run lacks actual worker determinism and backend evidence")
         return self
 
 
@@ -113,6 +123,9 @@ def generate_oracle_run(
             fixtures_dir,
             resource_guard=require_available_ram,
         )
+        worker_evidence = (
+            cast("VllmOracle", adapter).protocol_evidence() if oracle == "vllm" else []
+        )
     finally:
         adapter.close()
     run = OracleRun(
@@ -120,6 +133,7 @@ def generate_oracle_run(
         oracle=oracle,
         runtime_sha256=hashlib.sha256(runtime_bytes).hexdigest(),
         fixtures=fixtures,
+        worker_evidence=worker_evidence,
     )
     with (output_dir / "oracle-run.json").open("xb") as destination:
         destination.write(run.model_dump_json(indent=2).encode())

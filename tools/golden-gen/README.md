@@ -64,6 +64,14 @@ watchdog, with disk/RAM/GPU evidence before and after execution. Rust GPU runner
 also check their compiler-produced source fingerprint against the clean reviewed
 worktree. Reports retain complete runtime identities and every benchmark repetition.
 
+The vLLM baseline uses a pinned `worker_cls` subclass because WSL starts a fresh
+EngineCore process. That worker enables and verifies deterministic algorithms
+before CUDA initialization. Its ready/complete RPC records retain actual flags,
+PID, every attention layer's FlashAttention-2 backend, and eager/no-graph settings
+in `oracle-run.json`; missing or inconsistent worker evidence fails generation.
+The spawn regression is CPU-only and can use the prepared release interpreter:
+`GOLDEN_WORKER_TEST_PYTHON=<run-root>/env/.venv/bin/python pytest tests/test_worker_determinism.py`.
+
 ```bash
 uv run python -m golden_gen --help
 ```
