@@ -4,7 +4,7 @@ The complete fresh, non-accepting observation required by ADR-0012/0013 proposes
 
 ## Immutable observation binding
 
-The Definition input [goldens-v0.2-calibration-observation.json](../releases/goldens-v0.2-calibration-observation.json) contains the complete normalized observation plus the reviewed `approval` annotation. Removing that annotation reproduces the original normalized observation exactly; no measured value, identity, access-set or proposal has been replaced.
+The Definition input [goldens-v0.2-calibration-observation.json](../releases/goldens-v0.2-calibration-observation.json) contains the complete normalized observation plus the reviewed `approval` annotation. Restoring `approval` to its original `null` value and using the original canonical JSON serialization reproduces the original normalized observation byte-for-byte; the field is not deleted, and no measured value, identity, access-set or proposal has been replaced.
 
 - Observation source `O`: `4c5c2cb6df5ecdffa3d7c07926f9ff3d03580d70`, tree `2867ae0b63bcf7312ff107632bb33bd540e0be7e`.
 - Original normalized observation SHA-256: `a41eea0f5bdbe4c2e25649f793b545e3a5c7124b16ec5a3a9c64430fdf300723`.

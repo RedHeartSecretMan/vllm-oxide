@@ -63,7 +63,7 @@
     },
     {
       "path": "docs/adr/0014-goldens-v0.2-empirical-tolerance-policy.md",
-      "blob_oid": "5f17935b20da5199880979ec2ded6c6f72c298a4"
+      "blob_oid": "ca3e26970336cebc45a3afa23bcb25d4fadc1b20"
     },
     {
       "path": "docs/releases/goldens-v0.2-calibration-observation.json",
