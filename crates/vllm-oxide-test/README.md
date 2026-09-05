@@ -40,6 +40,7 @@ Direct invocation is intentionally verbose because holdout access must bind a
 Definition-approved observation and retain a second set of candidate captures:
 
 ```bash
+PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
 cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
     --mode authoritative \
     --repo-root /path/to/reviewed-checkout \
@@ -54,6 +55,7 @@ cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- 
 ### Download goldens from GitHub Release and run
 
 ```bash
+PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
 cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
     --mode authoritative \
     --repo-root /path/to/reviewed-checkout \

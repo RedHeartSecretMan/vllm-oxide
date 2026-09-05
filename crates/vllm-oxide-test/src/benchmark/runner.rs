@@ -171,6 +171,7 @@ pub fn run_release_benchmark(
     measurement_commit: &str,
     measurement_tree: &str,
 ) -> Result<BenchmarkRunEvidence> {
+    crate::measurement::validate_deterministic_environment()?;
     let measurement =
         validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
     validate_running_binary(repo_root)?;

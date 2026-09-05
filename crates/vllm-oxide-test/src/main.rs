@@ -105,6 +105,7 @@ fn initialize_tracing() {
 fn main() -> Result<()> {
     initialize_tracing();
     let cli = Cli::parse();
+    vllm_oxide_test::measurement::validate_deterministic_environment()?;
     let measurement = vllm_oxide_test::measurement::validate_measurement_identity(
         &cli.repo_root,
         &cli.measurement_commit,

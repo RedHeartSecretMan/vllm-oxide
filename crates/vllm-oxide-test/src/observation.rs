@@ -80,11 +80,7 @@ pub fn run_candidate_capture(
     measurement_commit: &str,
     measurement_tree: &str,
 ) -> Result<CandidateCaptureIndex> {
-    if std::env::var("PYTHONHASHSEED").as_deref() != Ok("0")
-        || std::env::var("CUBLAS_WORKSPACE_CONFIG").as_deref() != Ok(":4096:8")
-    {
-        bail!("candidate observation requires the deterministic process environment");
-    }
+    crate::measurement::validate_deterministic_environment()?;
     let measurement =
         validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
     validate_running_binary(repo_root)?;

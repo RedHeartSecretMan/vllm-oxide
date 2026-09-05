@@ -7,6 +7,16 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
+/// Require the fixed process settings before any correctness engine is initialized.
+pub fn validate_deterministic_environment() -> Result<()> {
+    if std::env::var("PYTHONHASHSEED").as_deref() != Ok("0")
+        || std::env::var("CUBLAS_WORKSPACE_CONFIG").as_deref() != Ok(":4096:8")
+    {
+        bail!("correctness capture requires the deterministic process environment: PYTHONHASHSEED=0 and CUBLAS_WORKSPACE_CONFIG=:4096:8");
+    }
+    Ok(())
+}
+
 /// Rehash the actual local source before every GPU owner's model initialization.
 pub fn validate_release_model(model_path: &Path) -> Result<()> {
     for (filename, expected) in [
