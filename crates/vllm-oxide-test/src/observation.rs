@@ -31,6 +31,14 @@ pub const HOLDOUT_IDS: [&str; 4] = [
     "canonical_05d",
 ];
 
+fn capture_ids(diagnostic: bool) -> &'static [&'static str] {
+    if diagnostic {
+        &["canonical_03"]
+    } else {
+        &CALIBRATION_IDS
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct CandidateCaptureEntry {
     pub prompt_id: String,
@@ -72,6 +80,14 @@ pub fn run_candidate_capture(
         validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
     validate_running_binary(repo_root)?;
     crate::measurement::validate_release_model(model_path)?;
+    let trace_root = std::env::var_os("VLLM_OXIDE_INTERNAL_LAYER_TRACE_DIR");
+    let diagnostic = trace_root.is_some();
+    if let Some(root) = trace_root {
+        let root = std::path::PathBuf::from(root).canonicalize()?;
+        if output_dir != root.join("rust") || !root.join("request.json").is_file() {
+            bail!("layer diagnostic must use its request root/rust destination");
+        }
+    }
     if output_dir.exists() || output_dir.is_symlink() {
         bail!("candidate capture output must be fresh and non-existing");
     }
@@ -83,7 +99,7 @@ pub fn run_candidate_capture(
     let runtime_bytes = serde_json::to_vec(&manifest.runtime)?;
     let binary_bytes = std::fs::read(std::env::current_exe()?)?;
     let mut captures = Vec::new();
-    for prompt_id in CALIBRATION_IDS {
+    for &prompt_id in capture_ids(diagnostic) {
         let prompt = prompts.get(prompt_id).ok_or_else(|| {
             anyhow::anyhow!("candidate calibration prompt is missing: {prompt_id}")
         })?;
@@ -100,17 +116,23 @@ pub fn run_candidate_capture(
         )?;
         let filename = format!("{prompt_id}.candidate.jsonl");
         let destination = output_dir.join(&filename);
+        let max_tokens = if diagnostic {
+            2
+        } else {
+            reference.num_tokens as usize
+        };
         let (captured, sha256) = generate_with_preserved_capture(
             &mut llm,
             Prompt::Text(prompt.prompt.clone()),
-            reference.num_tokens as usize,
+            max_tokens,
             prompt_id,
             &destination,
         )?;
-        if captured.tokens_by_input.len() != 1
-            || captured.tokens_by_input[0].len() != reference.num_tokens as usize
-        {
+        if captured.tokens_by_input.len() != 1 || captured.tokens_by_input[0].len() != max_tokens {
             bail!("candidate capture token count does not match reference metadata");
+        }
+        if diagnostic && captured.tokens_by_input[0][0] != 151_667 {
+            bail!("layer diagnostic first token differs from the shared prefix");
         }
         captures.push(CandidateCaptureEntry {
             prompt_id: prompt_id.to_string(),
@@ -129,7 +151,7 @@ pub fn run_candidate_capture(
         candidate_binary_sha256: format!("{:x}", Sha256::digest(&binary_bytes)),
         runtime_sha256: format!("{:x}", Sha256::digest(&runtime_bytes)),
         kernel_scope: manifest.kernel_paths.comparison_scope(),
-        opened_fixture_ids: CALIBRATION_IDS
+        opened_fixture_ids: capture_ids(diagnostic)
             .iter()
             .map(|value| (*value).to_string())
             .collect(),
@@ -143,7 +165,14 @@ pub fn run_candidate_capture(
         .write(true)
         .create_new(true)
         .open(output_dir.join("capture-index.json"))?;
-    serde_json::to_writer_pretty(&mut output, &index)?;
+    if diagnostic {
+        let mut value = serde_json::to_value(&index)?;
+        value["diagnostic_only"] = true.into();
+        value["accepting"] = false.into();
+        serde_json::to_writer_pretty(&mut output, &value)?;
+    } else {
+        serde_json::to_writer_pretty(&mut output, &index)?;
+    }
     output.write_all(b"\n")?;
     output.sync_all()?;
     Ok(index)
@@ -155,6 +184,8 @@ mod tests {
 
     #[test]
     fn candidate_capture_ids_are_disjoint_and_leave_the_holdout_sealed() {
+        assert_eq!(super::capture_ids(false), CALIBRATION_IDS);
+        assert_eq!(super::capture_ids(true), ["canonical_03"]);
         assert_eq!(
             CALIBRATION_IDS,
             [

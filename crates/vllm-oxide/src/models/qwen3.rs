@@ -271,6 +271,8 @@ struct Qwen3Model {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<Qwen3DecoderLayer>,
     norm: RMSNorm,
+    #[cfg(feature = "internal-golden")]
+    layer_trace: Option<crate::golden_capture::layer_trace::LayerTrace>,
 }
 
 impl Qwen3Model {
@@ -299,6 +301,9 @@ impl Qwen3Model {
             embed_tokens,
             layers,
             norm,
+            #[cfg(feature = "internal-golden")]
+            layer_trace: crate::golden_capture::layer_trace::LayerTrace::from_env()
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?,
         })
     }
     fn forward(
@@ -308,13 +313,40 @@ impl Qwen3Model {
         prepared: &PreparedAttention,
     ) -> CandleResult<Tensor> {
         let mut hidden = self.embed_tokens.forward(input_ids)?;
+        #[cfg(feature = "internal-golden")]
+        let mut trace = self
+            .layer_trace
+            .as_ref()
+            .map(|trace| trace.begin(input_ids, positions))
+            .transpose()
+            .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        #[cfg(feature = "internal-golden")]
+        if let Some(trace) = trace.as_mut() {
+            trace
+                .record("embedding", &hidden)
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        }
         let mut residual: Option<Tensor> = None;
-        for layer in &self.layers {
+        for (_layer_index, layer) in self.layers.iter().enumerate() {
             let (out, res) = layer.forward(positions, &hidden, residual.as_ref(), prepared)?;
             hidden = out;
+            #[cfg(feature = "internal-golden")]
+            if let Some(trace) = trace.as_mut() {
+                trace
+                    .record(&format!("layer_{_layer_index}"), &(&hidden + &res)?)
+                    .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+            }
             residual = Some(res);
         }
-        Ok(self.norm.forward(&hidden, residual.as_ref())?.0)
+        let hidden = self.norm.forward(&hidden, residual.as_ref())?.0;
+        #[cfg(feature = "internal-golden")]
+        if let Some(mut trace) = trace {
+            trace
+                .record("final_norm", &hidden)
+                .and_then(|()| trace.finish())
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        }
+        Ok(hidden)
     }
 }
 

@@ -22,6 +22,7 @@ pub(crate) const TEMP_DIR_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_TEMP_DIR";
 pub(crate) const DESTINATION_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_DESTINATION";
 pub(crate) const CALL_ID_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_CALL_ID";
 mod benchmark;
+pub(crate) mod layer_trace;
 pub(crate) use benchmark::BenchmarkSession;
 #[cfg(test)]
 use benchmark::{BenchmarkConfig, BENCHMARK_DESTINATION_ENV};
