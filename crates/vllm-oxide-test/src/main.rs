@@ -93,13 +93,17 @@ enum GateMode {
     Authoritative,
 }
 
-fn main() -> Result<()> {
+fn initialize_tracing() {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+}
 
+fn main() -> Result<()> {
+    initialize_tracing();
     let cli = Cli::parse();
     let measurement = vllm_oxide_test::measurement::validate_measurement_identity(
         &cli.repo_root,
@@ -190,4 +194,47 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+
+    #[test]
+    fn json_stdout_remains_parseable_with_info_logging() {
+        const CHILD: &str = "VLLM_OXIDE_JSON_STDOUT_TEST_CHILD";
+        const START: &str = "JSON_STDOUT_PROBE_BEGIN\n";
+        if std::env::var_os(CHILD).is_some() {
+            // Separate the test harness preamble from the CLI's real output streams.
+            print!("{START}");
+            super::initialize_tracing();
+            tracing::info!("json-stdout-routing-probe");
+            println!("{{\"overall\":false}}");
+            std::io::stdout().flush().unwrap();
+            std::process::exit(0);
+        }
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::json_stdout_remains_parseable_with_info_logging",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let (_, payload) = stdout.split_once(START).expect("child output boundary");
+        let report: serde_json::Value =
+            serde_json::from_str(payload).expect("stdout must contain JSON only, not INFO logs");
+        assert_eq!(report, serde_json::json!({"overall": false}));
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("json-stdout-routing-probe"));
+    }
 }
