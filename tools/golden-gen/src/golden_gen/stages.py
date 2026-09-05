@@ -157,7 +157,16 @@ def verify_stage_marker(run_root: Path, stage: str, repo_root: Path) -> Path:
         capture_output=True,
     )
     changes = subprocess.run(
-        ["git", "-C", str(repo_root), "diff", "--name-only", "-z", f"{commit}..HEAD"],
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            f"{commit}..HEAD",
+        ],
         check=True,
         capture_output=True,
     ).stdout.split(b"\0")

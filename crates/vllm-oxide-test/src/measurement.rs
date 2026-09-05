@@ -109,6 +109,7 @@ pub fn validate_measurement_identity(
         &canonical_root,
         &[
             "diff",
+            "--no-renames",
             "--name-only",
             "-z",
             &format!("{expected_commit}..{current_commit}"),
@@ -242,6 +243,35 @@ mod tests {
         fs::write(repo.join("untracked"), b"dirty").unwrap();
         let error = validate_measurement_identity(repo, &commit, &tree).unwrap_err();
         assert!(error.to_string().contains("not clean"));
+    }
+
+    #[test]
+    fn measurement_rejects_executable_renamed_into_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repo = temporary.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "diff.renames", "true"]);
+        git(repo, &["config", "user.name", "Test"]);
+        git(repo, &["config", "user.email", "test@example.com"]);
+        fs::write(repo.join("runner.rs"), b"fn main() {}\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "measurement"]);
+        let commit = git_text(repo, &["rev-parse", "HEAD"]).unwrap();
+        let tree = git_text(repo, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        fs::create_dir_all(repo.join("docs/adr")).unwrap();
+        fs::rename(
+            repo.join("runner.rs"),
+            repo.join("docs/adr/renamed-source.md"),
+        )
+        .unwrap();
+        git(repo, &["add", "-A"]);
+        git(
+            repo,
+            &["commit", "-qm", "hide source deletion as evidence rename"],
+        );
+
+        let error = validate_measurement_identity(repo, &commit, &tree).unwrap_err();
+        assert!(error.to_string().contains("unreviewed bytes"));
     }
 
     #[test]

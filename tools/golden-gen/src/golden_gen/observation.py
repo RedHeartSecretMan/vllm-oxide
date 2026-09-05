@@ -864,6 +864,7 @@ def approve_manifest_policy(
             "-C",
             str(repo_root),
             "diff",
+            "--no-renames",
             "--name-only",
             "-z",
             f"{measurement_commit}..HEAD",

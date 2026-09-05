@@ -271,7 +271,8 @@ def _policy_fixture(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
 
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    _commit(repo, "measurement candidate")
+    (repo / "src.py").write_text("print('measured executable')\n")
+    _commit(repo, "measurement candidate", "src.py")
     measurement_commit = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         check=True,
@@ -375,10 +376,18 @@ def test_policy_approval_rejects_tampered_statistics_and_proposal(tmp_path, fiel
         approve_manifest_policy(manifest_path, observation_path, repo)
 
 
-def test_policy_approval_rejects_executable_change_after_measurement(tmp_path):
+@pytest.mark.parametrize("rename", [False, True])
+def test_policy_approval_rejects_executable_change_after_measurement(tmp_path, rename):
     manifest_path, observation_path, repo, _head_commit, _head_tree = _policy_fixture(tmp_path)
-    (repo / "src.py").write_text("print('changed')\n")
-    _commit(repo, "changed executable", "src.py")
+    if rename:
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "diff.renames", "true"], check=True
+        )
+        (repo / "docs/adr").mkdir(parents=True)
+        (repo / "src.py").rename(repo / "docs/adr/renamed-source.md")
+    else:
+        (repo / "src.py").write_text("print('changed')\n")
+    _commit(repo, "changed executable", ".")
 
     with pytest.raises(ValueError, match="executable or non-Definition bytes"):
         approve_manifest_policy(manifest_path, observation_path, repo)
