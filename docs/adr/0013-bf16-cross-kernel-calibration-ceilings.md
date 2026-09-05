@@ -29,7 +29,7 @@ The new upper endpoints are the smallest powers of two covering the complete rep
 
 The L2 ladder is exactly `0`, then `2^-12` through `2^0`; the L1 ladder is exactly `0`, then `2^-12` through `2^-3`. Selection remains the smallest covering member, using all valid same-prefix elements and every actual divergence from the four calibration cases. A fresh observation exceeding either revised ceiling blocks approval; no further increase is authorized by this decision.
 
-All actual tolerances remain pending at `0/0`. These historical diagnostics justify reconsidering the envelope but are not an authoritative calibration observation, approved policy, successful stage marker, or release payload. Ticket #45 must update the implementation and tests to this Definition, freeze a newly reviewed observation source, and execute the complete official environment/generation/replay/calibration/observation sequence in a fresh staging directory. Earlier manifests, partial stages and diagnostic captures cannot substitute for that evidence.
+At the ceiling-revision checkpoint, actual tolerances remain pending at `0/0` until the separate empirical approval. These historical diagnostics justify reconsidering the envelope but are not an authoritative calibration observation, approved policy, successful stage marker, or release payload. Ticket #45 must update the implementation and tests to this Definition, freeze a newly reviewed observation source, and execute the complete official environment/generation/replay/calibration/observation sequence in a fresh staging directory. Earlier manifests, partial stages and diagnostic captures cannot substitute for that evidence.
 
 The separate empirical-approval Definition Checkpoint remains mandatory. It must bind the fresh normalized observation and raw-evidence hashes, state the exact mechanically proposed tolerance pair, explain the accepted numerical error classes and remaining limitations, and pass independent review. This ceiling revision is not that approval checkpoint. No full-model root-cause conclusion may be claimed from the layer-0 experiments alone.
 
@@ -45,4 +45,4 @@ The trade-off is explicit: this revision permits larger empirically justified ab
 
 **Supersedes**: only ADR-0012's initial numerical ladder upper endpoints and calibration ceilings.
 
-**Status**: accepted calibration-ceiling revision; exact acceptance tolerances and release acceptance remain pending.
+**Status**: accepted calibration-ceiling revision. This decision alone approves neither an actual tolerance nor release acceptance; [ADR-0014](0014-goldens-v0.2-empirical-tolerance-policy.md) records the later empirical policy decision.

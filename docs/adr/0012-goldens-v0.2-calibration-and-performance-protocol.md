@@ -50,4 +50,4 @@ Publication is a separately authorized final stage. After the exact Ticket candi
 
 GPU-owning stages are serial and use fresh processes so device memory returns before the next owner starts. Rust compilation uses `/home/wanghao/Projects/Codes/VibeCodings/vllm-oxide/target` with one build job and must reuse the existing FlashAttention cache. Available host RAM below 16 GiB stops the active stage. Oracle generation and benchmark stages record disk, RAM, and GPU guards before and after execution.
 
-**Status**: accepted protocol; exact numerical thresholds remain pending the required empirical Definition Revision.
+**Status**: accepted protocol; [ADR-0014](0014-goldens-v0.2-empirical-tolerance-policy.md) records the empirical tolerance approval. Authoritative comparison, holdout and release acceptance remain separate requirements.

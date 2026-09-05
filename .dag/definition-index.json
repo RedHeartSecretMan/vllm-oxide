@@ -55,11 +55,19 @@
     },
     {
       "path": "docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md",
-      "blob_oid": "4f48b6c70d60ae31e2e125e0ccd19a3ff2e01111"
+      "blob_oid": "bef7c52daf594fbd9a7929d9e63d5ba0670fe915"
     },
     {
       "path": "docs/adr/0013-bf16-cross-kernel-calibration-ceilings.md",
-      "blob_oid": "eabdbf49daa8a0b351f439f43c24932381fa9ab8"
+      "blob_oid": "154c3df03bc41568a913ceb6c8f09460a5f1af0f"
+    },
+    {
+      "path": "docs/adr/0014-goldens-v0.2-empirical-tolerance-policy.md",
+      "blob_oid": "5f17935b20da5199880979ec2ded6c6f72c298a4"
+    },
+    {
+      "path": "docs/releases/goldens-v0.2-calibration-observation.json",
+      "blob_oid": "f61e289b43ded163d00d659c08a530f8fbe6a9b8"
     }
   ]
 }
