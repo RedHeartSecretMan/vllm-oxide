@@ -13,6 +13,11 @@ use candle_flash_attn::{flash_attn_varlen, flash_attn_varlen_paged_windowed};
 
 use super::PreparedAttention;
 
+// These exact arguments are also retained by the private diagnostic caller.
+pub(crate) const PREFILL_CAUSAL: bool = true;
+pub(crate) const PAGED_WINDOW_LEFT: Option<usize> = None;
+pub(crate) const PAGED_WINDOW_RIGHT: Option<usize> = Some(0);
+
 pub fn prefill_attn(
     q: &Tensor,
     k: &Tensor,
@@ -31,7 +36,7 @@ pub fn prefill_attn(
         logical.max_seqlen_q,
         logical.max_seqlen_k,
         softmax_scale,
-        true,
+        PREFILL_CAUSAL,
     )
 }
 
@@ -56,8 +61,8 @@ pub fn paged_attn(
         logical.max_seqlen_q,
         logical.max_seqlen_k,
         softmax_scale,
-        None,
-        Some(0),
+        PAGED_WINDOW_LEFT,
+        PAGED_WINDOW_RIGHT,
         page_block_size,
         None,
     )

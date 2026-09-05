@@ -103,6 +103,11 @@ impl LayerTrace {
 
 pub(crate) struct StepTrace {
     output: File,
+    #[cfg(any(feature = "cuda", test))]
+    directory: PathBuf,
+    #[cfg(any(feature = "cuda", test))]
+    step: usize,
+    attention_written: bool,
     next_checkpoint: usize,
     shape: Option<Vec<usize>>,
 }
@@ -116,6 +121,11 @@ impl StepTrace {
             .open(directory.join(format!("step-{step}.jsonl")))?;
         let mut trace = Self {
             output,
+            #[cfg(any(feature = "cuda", test))]
+            directory: directory.to_path_buf(),
+            #[cfg(any(feature = "cuda", test))]
+            step,
+            attention_written: false,
             next_checkpoint: 0,
             shape: None,
         };
@@ -135,14 +145,22 @@ impl StepTrace {
             2 => "layer0_q".to_string(),
             3 => "layer0_k".to_string(),
             4 => "layer0_v".to_string(),
-            5..=32 => format!("layer_{}", self.next_checkpoint - 5),
-            33 => "final_norm".to_string(),
+            5 => "layer0_q_norm".to_string(),
+            6 => "layer0_k_norm".to_string(),
+            7 => "layer0_q_rope".to_string(),
+            8 => "layer0_k_rope".to_string(),
+            9 => "layer0_attention_context".to_string(),
+            10..=37 => format!("layer_{}", self.next_checkpoint - 10),
+            38 => "final_norm".to_string(),
             _ => bail!("layer trace has extra checkpoints"),
         };
         if name != expected
             || value.rank() != 2
             || self.shape.as_deref().is_some_and(|shape| {
-                let width = if name == "layer0_q" {
+                let width = if matches!(
+                    name,
+                    "layer0_q" | "layer0_q_norm" | "layer0_q_rope" | "layer0_attention_context"
+                ) {
                     shape[1] * 2
                 } else {
                     shape[1]
@@ -167,10 +185,10 @@ impl StepTrace {
     }
 
     pub(crate) fn finish(mut self) -> Result<()> {
-        if self.next_checkpoint != 34 {
+        if self.next_checkpoint != 39 || !self.attention_written {
             bail!("incomplete layer trace");
         }
-        self.write(&serde_json::json!({"kind":"trailer", "complete":true, "checkpoints":34}))?;
+        self.write(&serde_json::json!({"kind":"trailer", "complete":true, "checkpoints":39}))?;
         self.output.sync_all()?;
         Ok(())
     }
@@ -180,6 +198,85 @@ impl StepTrace {
         self.output.write_all(b"\n")?;
         self.output.flush()?;
         Ok(())
+    }
+
+    #[cfg(any(feature = "cuda", test))]
+    pub(crate) fn record_attention(&mut self, call: AttentionCall) -> Result<()> {
+        if self.attention_written {
+            bail!("duplicate attention call evidence");
+        }
+        let value = call.evidence(self.step)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.directory.join(format!("attention-{}.json", self.step)))?;
+        serde_json::to_writer(&mut file, &value)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        self.attention_written = true;
+        Ok(())
+    }
+}
+
+/// Values actually passed by the fixed FA wrappers, not inferred from dtype.
+#[cfg(any(feature = "cuda", test))]
+pub(crate) struct AttentionCall {
+    pub cu_q: Vec<u32>,
+    pub cu_k: Vec<u32>,
+    pub max_q: usize,
+    pub max_k: usize,
+    pub heads: (usize, usize, usize),
+    pub scale: f32,
+    pub causal: Option<bool>,
+    pub window: (Option<usize>, Option<usize>),
+}
+
+#[cfg(any(feature = "cuda", test))]
+impl AttentionCall {
+    fn evidence(self, step: usize) -> Result<serde_json::Value> {
+        if self.cu_q.len() != 2
+            || self.cu_k.len() != 2
+            || self.cu_q[0] != 0
+            || self.cu_k[0] != 0
+            || usize::try_from(self.cu_q[1])? != self.max_q
+            || usize::try_from(self.cu_k[1])? != self.max_k
+            || self.max_q == 0
+            || self.max_k < self.max_q
+            || self.max_k > 1025
+            || self.heads.1 == 0
+            || self.heads.0 % self.heads.1 != 0
+        {
+            bail!("attention call is outside the single-request diagnostic");
+        }
+        let mut allowed = Vec::with_capacity(self.max_q * self.max_k);
+        let head_mapping: Vec<usize> = (0..self.heads.0)
+            .map(|head| head / (self.heads.0 / self.heads.1))
+            .collect();
+        for row in 0..self.max_q {
+            let center = if self.causal.is_some() {
+                row
+            } else {
+                row + self.max_k - self.max_q
+            };
+            for column in 0..self.max_k {
+                allowed.push(
+                    (!self.causal.unwrap_or(false) || column <= row)
+                        && self.window.0.map_or(true, |left| column + left >= center)
+                        && self.window.1.map_or(true, |right| column <= center + right),
+                );
+            }
+        }
+        Ok(
+            serde_json::json!({"diagnostic_only":true,"accepting":false,"step":step,
+            "raw":{"backend":if self.causal.is_some(){"flash_attn_varlen"}else{"flash_attn_varlen_paged_windowed"},
+                "cu_seqlens_q":self.cu_q,"cu_seqlens_k":self.cu_k,"max_seqlen_q":self.max_q,"max_seqlen_k":self.max_k,
+                "causal_argument":self.causal,"window_left":self.window.0,"window_right":self.window.1,
+                "scale_f32_bits":self.scale.to_bits()},
+            "common":{"q_length":self.max_q,"k_length":self.max_k,"q_heads":self.heads.0,"kv_heads":self.heads.1,
+                "head_dim":self.heads.2,"head_mapping":head_mapping,"scale_argument":f64::from(self.scale),"dropout_p":0.0,
+                "mask":{"kind":"visibility","shape":[self.max_q,self.max_k],"allowed":allowed}}}),
+        )
     }
 }
 
@@ -290,19 +387,54 @@ mod tests {
         trace
             .record("layer0_v", &qkv.narrow(1, 6, 2).unwrap())
             .unwrap();
+        trace
+            .record("layer0_q_norm", &qkv.narrow(1, 0, 4).unwrap())
+            .unwrap();
+        trace.record("layer0_k_norm", &value).unwrap();
+        trace
+            .record("layer0_q_rope", &qkv.narrow(1, 0, 4).unwrap())
+            .unwrap();
+        trace.record("layer0_k_rope", &value).unwrap();
+        trace
+            .record_attention(AttentionCall {
+                cu_q: vec![0, 2],
+                cu_k: vec![0, 2],
+                max_q: 2,
+                max_k: 2,
+                heads: (16, 8, 128),
+                scale: 0.088_388_346,
+                causal: Some(true),
+                window: (None, None),
+            })
+            .unwrap();
+        trace
+            .record("layer0_attention_context", &qkv.narrow(1, 0, 4).unwrap())
+            .unwrap();
         for layer in 0..28 {
             trace.record(&format!("layer_{layer}"), &value).unwrap();
         }
         trace.record("final_norm", &value).unwrap();
         trace.finish().unwrap();
         let bytes = std::fs::read_to_string(directory.path().join("step-0.jsonl")).unwrap();
-        assert_eq!(bytes.lines().count(), 36);
+        assert_eq!(bytes.lines().count(), 41);
         let q: serde_json::Value = serde_json::from_str(bytes.lines().nth(3).unwrap()).unwrap();
         assert_eq!(
             q["bf16_bits"],
             serde_json::json!([0, 16256, 16384, 16448, 16640, 16656, 16672, 16688])
         );
         assert_eq!(q["shape"], serde_json::json!([2, 4]));
+        let call: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.path().join("attention-0.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            call["common"]["mask"]["allowed"],
+            serde_json::json!([true, false, true, true])
+        );
+        assert_eq!(
+            call["common"]["scale_argument"].as_f64().unwrap(),
+            f64::from(0.088_388_346_f32)
+        );
         assert!(StepTrace::create(directory.path(), 1, &[151_667], &[1])
             .unwrap()
             .finish()

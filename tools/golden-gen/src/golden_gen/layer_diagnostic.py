@@ -17,6 +17,11 @@ CHECKPOINTS = [
     "layer0_q",
     "layer0_k",
     "layer0_v",
+    "layer0_q_norm",
+    "layer0_k_norm",
+    "layer0_q_rope",
+    "layer0_k_rope",
+    "layer0_attention_context",
     *(f"layer_{i}" for i in range(28)),
     "final_norm",
 ]
@@ -42,6 +47,56 @@ def layer0_cause(
 
 
 PREVIOUS_COMMIT = "0e09fb5fb9096f700d675f66b8c0ff81e56c4f81"
+
+
+def attention_gate(
+    reference: dict[str, NDArray[np.float32]],
+    candidate: dict[str, NDArray[np.float32]],
+    reference_call: dict[str, Any],
+    candidate_call: dict[str, Any],
+    cache_prefix_equal: bool,
+) -> dict[str, Any]:
+    allowed: list[str] = []
+
+    def same(names: tuple[str, ...]) -> bool:
+        return all(tensor_bits_equal(reference[name], candidate[name]) for name in names)
+
+    if not same(("embedding", "layer0_input_norm", "layer0_q", "layer0_k")):
+        return {"allowed": allowed, "blocked_after": "raw_qk_inputs"}
+    allowed.extend(("layer0_q_norm", "layer0_k_norm"))
+    if not same(("layer0_q_norm", "layer0_k_norm")):
+        return {"allowed": allowed, "blocked_after": "qk_norm"}
+    allowed.extend(("layer0_q_rope", "layer0_k_rope"))
+    if not same(("layer0_q_rope", "layer0_k_rope", "layer0_v")) or not cache_prefix_equal:
+        return {"allowed": allowed, "blocked_after": "attention_tensor_inputs"}
+    required = {
+        "q_length",
+        "k_length",
+        "q_heads",
+        "kv_heads",
+        "head_dim",
+        "head_mapping",
+        "scale_argument",
+        "dropout_p",
+        "mask",
+    }
+    if set(reference_call) != required or set(candidate_call) != required:
+        raise ValueError("incomplete actual attention call metadata")
+    differences = {
+        key: {"reference": reference_call.get(key), "candidate": candidate_call.get(key)}
+        for key in sorted(set(reference_call) | set(candidate_call))
+        if reference_call.get(key) != candidate_call.get(key)
+    }
+    if differences:
+        return {
+            "allowed": allowed,
+            "blocked_after": "attention_metadata",
+            "metadata_differences": differences,
+        }
+    allowed.append("layer0_attention_context")
+    return {"allowed": allowed, "blocked_after": None}
+
+
 PREVIOUS_INDEX_SHA = "87e4fdbbaf563edf37e06ee49f984f0f8ba77d79c89df5bbae859485fecb5aea"
 MANIFEST_SHA = "83ca9488d5e01643106005ba63c1016aaaae8994063f685f4ae0b43fd14e29bb"
 
@@ -60,7 +115,7 @@ def identity(repo: Path) -> dict[str, str]:
 
 
 def decode_trace(lines: list[dict[str, Any]]) -> dict[str, NDArray[np.float32]]:
-    if len(lines) != 36 or lines[-1] != {"kind": "trailer", "complete": True, "checkpoints": 34}:
+    if len(lines) != 41 or lines[-1] != {"kind": "trailer", "complete": True, "checkpoints": 39}:
         raise ValueError("incomplete layer diagnostic trace")
     header = lines[0]
     if (
@@ -83,7 +138,11 @@ def decode_trace(lines: list[dict[str, Any]]) -> dict[str, NDArray[np.float32]]:
         raise ValueError("invalid trace input identity")
     arrays: dict[str, NDArray[np.float32]] = {}
     for name, row in zip(CHECKPOINTS, lines[1:-1], strict=True):
-        width = 2048 if name == "layer0_q" else 1024
+        width = (
+            2048
+            if name in ("layer0_q", "layer0_q_norm", "layer0_q_rope", "layer0_attention_context")
+            else 1024
+        )
         bits = row.get("bf16_bits")
         if (
             row.get("kind") != "checkpoint"
@@ -146,6 +205,8 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
         "torch/step-0.jsonl",
         "torch/step-1.jsonl",
         "torch/logits.npz",
+        "torch/attention-0.json",
+        "torch/attention-1.json",
     }:
         raise ValueError("unexpected reference artifact set")
     for filename, expected in metadata["artifacts"].items():
@@ -197,6 +258,8 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
     request = json.loads((root / "request.json").read_text())
     comparisons: list[dict[str, Any]] = []
     causes = []
+    attention_causes = []
+    cache_prefix_equal = False
     trace_hashes = {}
     for step in (0, 1):
         paths = [root / side / f"step-{step}.jsonl" for side in ("torch", "rust")]
@@ -215,7 +278,58 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
                 raise ValueError("trace does not describe the shared prefill/decode input")
         cause = layer0_cause(decoded[0], decoded[1])
         causes.append({"step": step, **cause})
+        calls = [
+            json.loads((root / side / f"attention-{step}.json").read_text())
+            for side in ("torch", "rust")
+        ]
+        for call in calls:
+            common = call["common"]
+            if (
+                call.get("diagnostic_only") is not True
+                or call.get("accepting") is not False
+                or call.get("step") != step
+                or common["q_length"] != len(expected_tokens)
+                or common["k_length"] != len(request["token_ids"]) + step
+                or common["head_dim"] != 128
+                or common["q_heads"] != 16
+            ):
+                raise ValueError(
+                    "attention metadata does not describe the actual diagnostic request"
+                )
+        gate = attention_gate(
+            decoded[0],
+            decoded[1],
+            calls[0]["common"],
+            calls[1]["common"],
+            step == 0 or cache_prefix_equal,
+        )
+        attention_causes.append({"step": step, **gate})
+        if step == 0:
+            cache_prefix_equal = all(
+                tensor_bits_equal(decoded[0][name], decoded[1][name])
+                for name in ("layer0_k_rope", "layer0_v")
+            )
         for name in CHECKPOINTS:
+            if (
+                name
+                in (
+                    "layer0_q_norm",
+                    "layer0_k_norm",
+                    "layer0_q_rope",
+                    "layer0_k_rope",
+                    "layer0_attention_context",
+                )
+                and name not in gate["allowed"]
+            ):
+                comparisons.append(
+                    dict(
+                        step=step,
+                        checkpoint=name,
+                        status="not_compared",
+                        reason=gate["blocked_after"],
+                    )
+                )
+                continue
             if name in ("layer0_q", "layer0_k", "layer0_v") and not cause["qkv_compared"]:
                 comparisons.append(
                     dict(
@@ -245,6 +359,12 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
                 )
             )
         trace_hashes.update({str(path.relative_to(root)): sha(path) for path in paths})
+        trace_hashes.update(
+            {
+                f"{side}/attention-{step}.json": sha(root / side / f"attention-{step}.json")
+                for side in ("torch", "rust")
+            }
+        )
     return dict(
         diagnostic_only=True,
         accepting=False,
@@ -258,4 +378,5 @@ def compare(root: Path, repo: Path, previous: Path, manifest_path: Path) -> dict
         opened_fixture_ids=["canonical_03"],
         comparisons=comparisons,
         layer0_diagnosis=causes,
+        attention_diagnosis=attention_causes,
     )

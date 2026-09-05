@@ -162,7 +162,7 @@ impl Qwen3Attention {
         hidden: &Tensor,
         positions: &Tensor,
         prepared: &PreparedAttention,
-        #[cfg(feature = "internal-golden")] trace: Option<
+        #[cfg(feature = "internal-golden")] mut trace: Option<
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
     ) -> CandleResult<Tensor> {
@@ -173,7 +173,7 @@ impl Qwen3Attention {
         let k = qkv.i((.., qs..qs + ks))?;
         let v = qkv.i((.., qs + ks..qs + 2 * ks))?;
         #[cfg(feature = "internal-golden")]
-        if let Some(trace) = trace {
+        if let Some(trace) = trace.as_deref_mut() {
             for (name, value) in [("layer0_q", &q), ("layer0_k", &k), ("layer0_v", &v)] {
                 trace
                     .record(name, value)
@@ -192,8 +192,29 @@ impl Qwen3Attention {
             Some(nm) => nm.forward(&k, None)?.0,
             None => k,
         };
+        #[cfg(feature = "internal-golden")]
+        if let Some(trace) = trace.as_deref_mut() {
+            trace
+                .record("layer0_q_norm", &q.reshape((n, qs))?)
+                .and_then(|()| trace.record("layer0_k_norm", &k.reshape((n, ks))?))
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        }
         let (q, k) = self.rotary_emb.forward(positions, &q, &k)?;
-        self.attn_compute(&q, &k, &v, prepared)
+        #[cfg(feature = "internal-golden")]
+        if let Some(trace) = trace.as_deref_mut() {
+            trace
+                .record("layer0_q_rope", &q.reshape((n, qs))?)
+                .and_then(|()| trace.record("layer0_k_rope", &k.reshape((n, ks))?))
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        }
+        self.attn_compute(
+            &q,
+            &k,
+            &v,
+            prepared,
+            #[cfg(feature = "internal-golden")]
+            trace,
+        )
     }
     #[cfg(feature = "cuda")]
     fn attn_compute(
@@ -202,6 +223,9 @@ impl Qwen3Attention {
         k: &Tensor,
         v: &Tensor,
         prepared: &PreparedAttention,
+        #[cfg(feature = "internal-golden")] mut trace: Option<
+            &mut crate::golden_capture::layer_trace::StepTrace,
+        >,
     ) -> CandleResult<Tensor> {
         let logical = prepared.logical();
         let pkv = self
@@ -215,12 +239,44 @@ impl Qwen3Attention {
         let bs = pkv.block_size();
         drop(pkv);
         let scale = 1.0_f32 / (self.head_dim as f32).sqrt();
+        #[cfg(feature = "internal-golden")]
+        if let Some(trace) = trace.as_deref_mut() {
+            use crate::attention::flash_attn::{
+                PAGED_WINDOW_LEFT, PAGED_WINDOW_RIGHT, PREFILL_CAUSAL,
+            };
+            let unpaged = logical.is_prefill && !logical.uses_paged_kv();
+            trace
+                .record_attention(crate::golden_capture::layer_trace::AttentionCall {
+                    cu_q: prepared.cu_seqlens_q().to_vec1::<u32>()?,
+                    cu_k: prepared.cu_seqlens_k().to_vec1::<u32>()?,
+                    max_q: logical.max_seqlen_q,
+                    max_k: logical.max_seqlen_k,
+                    heads: (q.dim(1)?, k.dim(1)?, q.dim(2)?),
+                    scale,
+                    causal: unpaged.then_some(PREFILL_CAUSAL),
+                    window: if unpaged {
+                        (None, None)
+                    } else {
+                        (PAGED_WINDOW_LEFT, PAGED_WINDOW_RIGHT)
+                    },
+                })
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        }
         let out = if logical.is_prefill && !logical.uses_paged_kv() {
             crate::attention::flash_attn::prefill_attn(q, k, v, prepared, scale)?
         } else {
             crate::attention::flash_attn::paged_attn(q, &kc, &vc, prepared, scale, bs)?
         };
         let n = out.dim(0)?;
+        #[cfg(feature = "internal-golden")]
+        if let Some(trace) = trace {
+            trace
+                .record(
+                    "layer0_attention_context",
+                    &out.reshape((n, self.num_heads * self.head_dim))?,
+                )
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+        }
         self.o_proj
             .forward(&out.reshape((n, self.num_heads * self.head_dim))?)
     }
@@ -231,6 +287,9 @@ impl Qwen3Attention {
         _: &Tensor,
         _: &Tensor,
         _: &PreparedAttention,
+        #[cfg(feature = "internal-golden")] _: Option<
+            &mut crate::golden_capture::layer_trace::StepTrace,
+        >,
     ) -> CandleResult<Tensor> {
         candle_core::bail!("attention requires --features cuda")
     }

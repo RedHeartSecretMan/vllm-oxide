@@ -58,7 +58,14 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
     (root / "request.json").write_text(
         json.dumps(dict(prompt_id="canonical_03", token_ids=token_ids, decode_token=151667))
     )
-    state: dict[str, Any] = {"step": -1, "records": [], "pending": None, "tokens": None}
+    state: dict[str, Any] = {
+        "step": -1,
+        "records": [],
+        "pending": None,
+        "tokens": None,
+        "active_attention": False,
+        "pending_qk_norm": {},
+    }
 
     def checkpoint(name: str, output: Any) -> dict[str, Any]:
         if output.dtype != torch.bfloat16 or output.shape[0] != 1:
@@ -109,17 +116,165 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
     def hook(name: str) -> Any:
         def record(_module: Any, _inputs: Any, output: Any) -> None:
             state["records"].append(checkpoint(name, output))
+            if name == "layer0_v":
+                # HF interleaves Q projection/norm and K projection/norm.
+                # Only the two CPU snapshots wait for logical trace order.
+                state["records"].extend(
+                    state["pending_qk_norm"].pop(key) for key in ("layer0_q_norm", "layer0_k_norm")
+                )
             if name == "final_norm":
-                state["records"].append(dict(kind="trailer", complete=True, checkpoints=34))
+                state["records"].append(dict(kind="trailer", complete=True, checkpoints=39))
             flush_records()
 
         return record
+
+    def norm_hook(name: str) -> Any:
+        def record(_module: Any, _inputs: Any, output: Any) -> None:
+            flat = output.reshape(output.shape[0], output.shape[1], -1)
+            state["pending_qk_norm"][name] = checkpoint(name, flat)
+
+        return record
+
+    def active(_module: Any, _inputs: Any) -> None:
+        state["active_attention"] = True
+        state["repeat_events"] = []
+
+    def inactive(_module: Any, _inputs: Any, _output: Any) -> None:
+        state["active_attention"] = False
+
+    def context_hook(module: Any, inputs: Any) -> None:
+        hook("layer0_attention_context")(module, (), inputs[0])
+
+    from importlib import import_module
+
+    from transformers.models.qwen3 import modeling_qwen3
+
+    sdpa_module: Any = import_module("transformers.integrations.sdpa_attention")
+
+    original_rope = modeling_qwen3.apply_rotary_pos_emb
+    original_sdpa = torch.nn.functional.scaled_dot_product_attention
+    original_repeat = sdpa_module.repeat_kv
+
+    def repeat_call(hidden: Any, n_rep: int) -> Any:
+        output = original_repeat(hidden, n_rep)
+        if state["active_attention"]:
+            state["repeat_events"].append(
+                dict(
+                    n_rep=n_rep,
+                    input_heads=hidden.shape[1],
+                    output_heads=output.shape[1],
+                    output_to_input_head=[head // n_rep for head in range(output.shape[1])],
+                )
+            )
+        return output
+
+    def rope_call(*args: Any, **kwargs: Any) -> Any:
+        query, key = original_rope(*args, **kwargs)
+        if state["active_attention"]:
+            for name, tensor in (("layer0_q_rope", query), ("layer0_k_rope", key)):
+                flat = tensor.transpose(1, 2).reshape(tensor.shape[0], tensor.shape[2], -1)
+                state["records"].append(checkpoint(name, flat))
+            flush_records()
+        return query, key
+
+    def sdpa_call(
+        query: Any,
+        key: Any,
+        value: Any,
+        *,
+        attn_mask: Any = None,
+        dropout_p: float = 0.0,
+        is_causal: bool = False,
+        scale: float | None = None,
+        enable_gqa: bool = False,
+    ) -> Any:
+        if state["active_attention"]:
+            q_length, k_length = query.shape[-2], key.shape[-2]
+            raw_mask = None
+            visible = (
+                np.tri(q_length, k_length, dtype=bool)
+                if is_causal
+                else np.ones((q_length, k_length), dtype=bool)
+            )
+            mask_contract: dict[str, Any] = dict(
+                kind="visibility", shape=[q_length, k_length], allowed=visible.flatten().tolist()
+            )
+            if attn_mask is not None:
+                host = attn_mask.detach().cpu().contiguous()
+                raw_mask = dict(
+                    dtype=str(host.dtype),
+                    shape=list(host.shape),
+                    bytes_hex=host.view(torch.uint8).numpy().tobytes().hex(),
+                )
+                array = host.double().numpy()
+                expanded = np.broadcast_to(array, (1, query.shape[1], q_length, k_length))
+                uniform = np.array_equal(expanded, np.broadcast_to(expanded[:, :1], expanded.shape))
+                if host.dtype == torch.bool and uniform:
+                    visible &= expanded[0, 0].astype(bool)
+                elif uniform and np.all((array == 0) | np.isneginf(array)):
+                    visible &= expanded[0, 0] == 0
+                else:
+                    mask_contract = dict(kind="unreduced_additive_or_head_specific", raw=raw_mask)
+                if mask_contract["kind"] == "visibility":
+                    mask_contract["allowed"] = visible.flatten().tolist()
+            evidence = dict(
+                diagnostic_only=True,
+                accepting=False,
+                step=state["step"],
+                raw=dict(
+                    backend="SDPA_MATH",
+                    query_shape=list(query.shape),
+                    key_shape=list(key.shape),
+                    value_shape=list(value.shape),
+                    is_causal=is_causal,
+                    scale_argument_hex=None if scale is None else scale.hex(),
+                    enable_gqa=enable_gqa,
+                    repeat_kv_calls=state["repeat_events"],
+                    mask=raw_mask,
+                ),
+                common=dict(
+                    q_length=q_length,
+                    k_length=k_length,
+                    q_heads=query.shape[1],
+                    kv_heads=key.shape[1],
+                    head_dim=query.shape[-1],
+                    head_mapping=[
+                        head // (query.shape[1] // key.shape[1]) for head in range(query.shape[1])
+                    ]
+                    if enable_gqa
+                    else list(range(query.shape[1])),
+                    scale_argument=scale,
+                    dropout_p=dropout_p,
+                    mask=mask_contract,
+                ),
+            )
+            with (root / "torch" / f"attention-{state['step']}.json").open("x") as output:
+                json.dump(evidence, output, sort_keys=True)
+        return original_sdpa(
+            query,
+            key,
+            value,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=scale,
+            enable_gqa=enable_gqa,
+        )
 
     handles = [
         oracle.model.model.embed_tokens.register_forward_hook(embedding_hook),
         oracle.model.model.rotary_emb.register_forward_pre_hook(rotary_hook),
     ]
     first_layer = oracle.model.model.layers[0]
+    handles.extend(
+        (
+            first_layer.self_attn.register_forward_pre_hook(active),
+            first_layer.self_attn.register_forward_hook(inactive),
+            first_layer.self_attn.q_norm.register_forward_hook(norm_hook("layer0_q_norm")),
+            first_layer.self_attn.k_norm.register_forward_hook(norm_hook("layer0_k_norm")),
+            first_layer.self_attn.o_proj.register_forward_pre_hook(context_hook),
+        )
+    )
     handles.append(first_layer.input_layernorm.register_forward_hook(hook("layer0_input_norm")))
     handles.extend(
         getattr(first_layer.self_attn, f"{name}_proj").register_forward_hook(hook(f"layer0_{name}"))
@@ -130,6 +285,9 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
         for i, layer in enumerate(oracle.model.model.layers)
     )
     handles.append(oracle.model.model.norm.register_forward_hook(hook("final_norm")))
+    modeling_qwen3.apply_rotary_pos_emb = rope_call
+    torch.nn.functional.scaled_dot_product_attention = sdpa_call
+    sdpa_module.repeat_kv = repeat_call
     try:
         with (
             torch.inference_mode(),
@@ -176,11 +334,16 @@ def reference(root: Path, repo: Path, model_path: Path, manifest_path: Path) -> 
                     "torch/step-0.jsonl",
                     "torch/step-1.jsonl",
                     "torch/logits.npz",
+                    "torch/attention-0.json",
+                    "torch/attention-1.json",
                 )
             },
         )
         (root / "reference.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     finally:
+        modeling_qwen3.apply_rotary_pos_emb = original_rope
+        torch.nn.functional.scaled_dot_product_attention = original_sdpa
+        sdpa_module.repeat_kv = original_repeat
         for handle in handles:
             handle.remove()
         oracle.close()
