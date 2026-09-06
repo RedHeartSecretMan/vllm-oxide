@@ -91,7 +91,7 @@ class VllmOracle:
 
     name = "vllm"
 
-    def __init__(self, model_dir: Path) -> None:
+    def __init__(self, model_dir: Path, *, fixed_prefix: bool = False) -> None:
         source = str(validate_release_model(model_dir))
         import torch
         from vllm import LLM
@@ -99,6 +99,9 @@ class VllmOracle:
         _configure_determinism(torch)
         contract = baseline_engine_kwargs()
         contract.update(model=source, tokenizer=source)
+        self.fixed_prefix = fixed_prefix
+        if fixed_prefix:
+            contract["logits_processors"] = ["golden_gen.fixed_prefix_vllm:FixedPrefixProcessor"]
         self.llm = LLM(**contract)
         self._worker_ready = self._worker_evidence("ready")
 

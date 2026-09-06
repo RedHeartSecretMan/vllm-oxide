@@ -77,20 +77,23 @@ impl EngineCore {
     /// Returns `RequestOutput`s for any sequences that finished this step.
     /// When no work remains, returns `Ok(Vec::new())`.
     pub(crate) fn step(&mut self) -> Result<Vec<RequestOutput>> {
-        let (outputs, _capture) = self.step_internal()?;
+        let (outputs, _capture) = self.step_internal(
+            #[cfg(feature = "internal-golden")]
+            None,
+        )?;
         Ok(outputs)
     }
 
     #[cfg(feature = "internal-golden")]
     pub(crate) fn step_with_capture(&mut self) -> Result<(Vec<RequestOutput>, EngineStepCapture)> {
-        self.step_internal()
+        self.step_internal(None)
     }
 
     #[cfg(feature = "internal-golden")]
     pub(crate) fn step_with_telemetry(
         &mut self,
     ) -> Result<(Vec<RequestOutput>, EngineStepTelemetry)> {
-        let (outputs, capture) = self.step_internal()?;
+        let (outputs, capture) = self.step_internal(None)?;
         Ok((
             outputs,
             EngineStepTelemetry {
@@ -101,7 +104,20 @@ impl EngineCore {
         ))
     }
 
-    fn step_internal(&mut self) -> Result<(Vec<RequestOutput>, EngineStepCapture)> {
+    #[cfg(feature = "internal-golden")]
+    pub(crate) fn step_with_fixed_prefix(
+        &mut self,
+        replay: &mut crate::golden_capture::fixed_prefix::ReplaySession,
+    ) -> Result<Vec<RequestOutput>> {
+        self.step_internal(Some(replay)).map(|(outputs, _)| outputs)
+    }
+
+    fn step_internal(
+        &mut self,
+        #[cfg(feature = "internal-golden")] replay: Option<
+            &mut crate::golden_capture::fixed_prefix::ReplaySession,
+        >,
+    ) -> Result<(Vec<RequestOutput>, EngineStepCapture)> {
         let plan = match self.scheduler.plan_step(&mut self.kv_cache_manager) {
             Ok(plan) => plan,
             Err(error) => {
@@ -162,6 +178,14 @@ impl EngineCore {
             Ok(executed) => executed,
             Err(error) => return Err(self.cleanup_failed_step(error)),
         };
+        #[cfg(feature = "internal-golden")]
+        let mut result = result;
+        #[cfg(feature = "internal-golden")]
+        if let Some(replay) = replay {
+            if let Err(error) = replay.record_and_advance(&plan, &mut result, &logits) {
+                return Err(self.cleanup_failed_step(candle_core::Error::Msg(error.to_string())));
+            }
+        }
         #[cfg(feature = "internal-golden")]
         let capture_rows = plan
             .sequences

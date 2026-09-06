@@ -247,6 +247,15 @@ impl LLM {
             .iter()
             .map(|prompt| tokenize_prompt(prompt, &self.tokenizer))
             .collect::<Result<Vec<_>>>()?;
+        #[cfg(feature = "internal-golden")]
+        let mut replay = crate::golden_capture::fixed_prefix::ReplaySession::from_env(
+            &tokenized_prompts,
+            sampling_params,
+        )?;
+        #[cfg(feature = "internal-golden")]
+        if replay.is_some() && (capture.is_some() || benchmark.is_some()) {
+            bail!("fixed-prefix, legacy capture and benchmark modes are mutually exclusive");
+        }
         let prompt_lens = tokenized_prompts.iter().map(Vec::len).collect::<Vec<_>>();
         let mut request_ids = Vec::with_capacity(prompts.len());
         #[cfg(feature = "internal-golden")]
@@ -254,6 +263,12 @@ impl LLM {
         for (token_ids, params) in tokenized_prompts.into_iter().zip(sampling_params.iter()) {
             let request_id = self.engine.add_request(token_ids, params.clone());
             request_ids.push(request_id);
+        }
+        #[cfg(feature = "internal-golden")]
+        if let Some(replay) = replay.as_mut() {
+            if let Err(error) = replay.bind_requests(&request_ids) {
+                return Err(self.abort_after_capture_error(error));
+            }
         }
         #[cfg(feature = "internal-golden")]
         if let Some(capture) = capture.as_mut() {
@@ -275,13 +290,17 @@ impl LLM {
 
         while self.engine.is_running() {
             #[cfg(feature = "internal-golden")]
-            if capture.is_some() || benchmark.is_some() {
+            if capture.is_some() || benchmark.is_some() || replay.is_some() {
                 if let Err(error) = require_diagnostic_host_ram_floor() {
                     return Err(self.abort_after_capture_error(error));
                 }
             }
             #[cfg(feature = "internal-golden")]
-            let outputs = if let Some(benchmark) = benchmark.as_mut() {
+            let outputs = if let Some(replay) = replay.as_mut() {
+                self.engine
+                    .step_with_fixed_prefix(replay)
+                    .context("generate: fixed-prefix execution failed")?
+            } else if let Some(benchmark) = benchmark.as_mut() {
                 if let Err(error) = self.device.synchronize() {
                     return Err(self.abort_after_capture_error(
                         anyhow!(error).context("generate: synchronizing benchmark step start"),
@@ -340,6 +359,10 @@ impl LLM {
         }
 
         let elapsed = start.elapsed();
+        #[cfg(feature = "internal-golden")]
+        if let Some(replay) = replay.take() {
+            replay.finish(&completed_outputs)?;
+        }
         let mut results =
             order_request_outputs(&request_ids, completed_outputs).with_context(|| {
                 format!(
@@ -2269,6 +2292,57 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "isolated capture test process failed");
             false
+        }
+
+        #[test]
+        fn fixed_prefix_advances_frozen_tokens_without_changing_raw_prediction() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::fixed_prefix_advances_frozen_tokens_without_changing_raw_prediction") { return; }
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let plan = temp.path().join("plan.json");
+            let output = temp.path().join("fixed.json");
+            std::fs::write(
+                &plan,
+                serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
+                "execution_group_id":"toy-group","call_id":"fixed-call","vocab_size":100,
+                "members":[{"case_id":"toy","member_id":"a","prompt":[1],"continuation":[3,4]}]})
+                .to_string(),
+            )
+            .unwrap();
+            let _environment = EnvironmentRestore::install(&[
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN",
+                    Some(plan.as_os_str()),
+                ),
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT",
+                    Some(output.as_os_str()),
+                ),
+            ]);
+            let mut llm = test_llm();
+            let result = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[deterministic_causal_params(2)],
+                )
+                .unwrap();
+            assert_eq!(result[0].token_ids, vec![3, 4]);
+            let capture: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap();
+            assert_eq!(capture["rows"].as_array().unwrap().len(), 2);
+            assert_eq!(capture["rows"][0]["predicted_token_id"], 42);
+            assert_eq!(capture["rows"][1]["advance_token_id"], 4);
+            assert_eq!(capture["rows"][1]["effective_length"], 2);
+            assert_eq!(capture["rows"][1]["position"], 1);
+            assert_eq!(capture["execution_events"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                capture["execution_events"][1]["members"][0]["input_token_ids"],
+                serde_json::json!([3])
+            );
+            assert_eq!(
+                capture["execution_events"][1]["members"][0]["phase"],
+                "decode"
+            );
         }
 
         #[test]

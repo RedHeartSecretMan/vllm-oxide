@@ -27,6 +27,72 @@ class DeterministicWorker(Worker):  # type: ignore[misc]
         super().init_device()
         require_worker_determinism(torch)
 
+    def load_model(self) -> None:
+        super().load_model()
+        from golden_gen.fixed_prefix_vllm import FixedPrefixProcessor
+
+        self._fixed_events: list[dict[str, Any]] = []
+        processors = [
+            p
+            for p in self.model_runner.input_batch.logitsprocs.non_argmax_invariant
+            if isinstance(p, FixedPrefixProcessor)
+        ]
+        if not processors:
+            return
+
+        def record_execution(_module: Any, _args: Any, kwargs: Any) -> None:
+            runner = self.model_runner
+            if not any(p.state for p in processors):
+                return  # warmup/empty request state consumes no fixed replay step
+            ids, positions = kwargs["input_ids"], kwargs["positions"]
+            members = []
+            execution = {}
+            for index, request_id in enumerate(runner.input_batch.req_ids):
+                start, end = map(int, runner.query_start_loc.np[index : index + 2])
+                if end <= start:
+                    continue
+                tokens = ids[start:end].cpu().tolist()
+                pos = positions[start:end].cpu().tolist()
+                if pos != list(range(pos[0], pos[-1] + 1)):
+                    raise ValueError("vLLM executed noncontiguous positions")
+                history = runner.requests[request_id].output_token_ids
+                row = dict(
+                    request_id=int(request_id),
+                    input_token_ids=tokens,
+                    positions=[pos[0], pos[-1] + 1],
+                    cached_range=[0, pos[0]],
+                    kv_length=int(runner.seq_lens.np[index]),
+                    sampling_allowed=not bool(runner.discard_request_mask.np[index]),
+                    completion_step=len(history),
+                    phase="decode" if history and len(tokens) == 1 else "prefill",
+                )
+                execution[index] = row
+                members.append(row)
+            for processor in processors:
+                processor.execution = execution
+            self._fixed_events.append(
+                dict(
+                    plan_id=len(self._fixed_events),
+                    token_budget=sum(len(m["input_token_ids"]) for m in members),
+                    members=members,
+                )
+            )
+
+        self._fixed_handle = self.model_runner.model.register_forward_pre_hook(
+            record_execution, with_kwargs=True
+        )
+
+    def release_fixed_prefix_evidence(self) -> dict[str, Any]:
+        from golden_gen.fixed_prefix_vllm import FixedPrefixProcessor
+
+        rows = []
+        for processor in self.model_runner.input_batch.logitsprocs.non_argmax_invariant:
+            if isinstance(processor, FixedPrefixProcessor):
+                rows.extend(processor.rows)
+                processor.rows = []
+        events, self._fixed_events = self._fixed_events, []
+        return dict(rows=rows, execution_events=events)
+
     def release_worker_evidence(self, phase: str) -> dict[str, Any]:
         layers = [
             {
