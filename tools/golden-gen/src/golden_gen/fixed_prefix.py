@@ -129,6 +129,8 @@ def validate_execution_events(
     sampled: set[tuple[str, int]] = set()
     mechanisms: set[str] = set()
     seen_requests: set[int] = set()
+    computed_ends: dict[int, int] = {}
+    next_steps: dict[int, int] = {}
     prior_plan = -1
     for event in events:
         plan_id = event.get("plan_id")
@@ -151,6 +153,8 @@ def validate_execution_events(
             event_requests.add(request)
             member_id = bindings[request]
             step = item["completion_step"]
+            if type(step) is not int or step != next_steps.get(request, 0):
+                raise ValueError("execution skipped or repeated a prediction boundary")
             history = plan.history(member_id, step)
             start, end = item["positions"]
             phase = item["phase"]
@@ -167,6 +171,35 @@ def validate_execution_events(
             mechanisms.add(phase)
             if "cached_range" in item and item["cached_range"] != [0, start]:
                 raise ValueError("executed cached range is not the visible prefix")
+            previous_end = computed_ends.get(request)
+            if previous_end is None:
+                if (
+                    phase != "prefill"
+                    or step != 0
+                    or (start > 0 and item.get("cached_range") != [0, start])
+                ):
+                    raise ValueError(
+                        "first execution lacks its initial prefill/cached-prefix proof"
+                    )
+            elif phase == "decode":
+                if (
+                    step == 0
+                    or not item["sampling_allowed"]
+                    or start != previous_end
+                    or start != len(history) - 1
+                    or end != len(history)
+                ):
+                    raise ValueError(
+                        "decode must execute exactly the newly advanced token after contiguous KV"
+                    )
+            elif start > previous_end:
+                raise ValueError("prefill skipped an uncomputed KV interval")
+            elif start < previous_end:
+                if start > 0 and item.get("cached_range") != [0, start]:
+                    raise ValueError("recompute lacks its retained cached-prefix proof")
+                if step > 0:
+                    mechanisms.add("recompute")
+            computed_ends[request] = end
             if "slot_mapping" in item:
                 table = item["block_table"]
                 try:
@@ -177,8 +210,6 @@ def validate_execution_events(
                     raise ValueError("executed KV slots mismatch logical positions")
             if request not in seen_requests and start > 0:
                 mechanisms.add("prefix_hit")
-            if phase == "prefill" and step > 0:
-                mechanisms.add("recompute")
             if phase == "decode" and start > 0 and start % 256 == 0:
                 mechanisms.add("decode_cross_page")
             if not item["sampling_allowed"]:
@@ -193,6 +224,7 @@ def validate_execution_events(
                 ):
                     raise ValueError("prediction does not match a unique real sampling boundary")
                 sampled.add((member_id, step))
+                next_steps[request] = step + 1
             seen_requests.add(request)
     if len(sampled) != sum(len(r) for r in rows.values()):
         raise ValueError("missing execution evidence for prediction rows")

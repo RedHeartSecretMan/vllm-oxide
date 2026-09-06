@@ -195,3 +195,29 @@ def summarize_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
         case_equal_means=means,
         case_steps=[dict(case_id=c["case_id"], steps=len(c["rows"])) for c in cases],
     )
+
+
+def free_generation_diagnostics(
+    reference: list[int], candidate: list[int], baseline: list[int]
+) -> dict[str, Any]:
+    if not reference or len(reference) != len(candidate) or len(reference) != len(baseline):
+        raise ValueError("unforced control token streams must have their complete common budget")
+
+    def compare(other: list[int]) -> dict[str, Any]:
+        same = [a == b for a, b in zip(reference, other, strict=True)]
+        return dict(
+            first_divergence=next((i for i, equal in enumerate(same) if not equal), None),
+            token_agreement=sum(same) / len(same),
+            compared_output_positions=len(same),
+        )
+
+    return dict(
+        protocol=PROTOCOL,
+        mode="unforced_control",
+        history_mode="each_engine_own_generated_history",
+        ignore_eos=True,
+        accepting=False,
+        generated_token_ids=dict(reference=reference, candidate=candidate, baseline=baseline),
+        reference_candidate=compare(candidate),
+        reference_baseline=compare(baseline),
+    )

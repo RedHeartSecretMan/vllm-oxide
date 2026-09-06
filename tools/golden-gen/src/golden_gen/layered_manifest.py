@@ -18,7 +18,13 @@ from golden_gen.fixed_prefix import (
     validate_control_capture,
     validate_execution_events,
 )
-from golden_gen.layered_accuracy import PROTOCOL, Budgets, compare_case, summarize_cases
+from golden_gen.layered_accuracy import (
+    PROTOCOL,
+    Budgets,
+    compare_case,
+    free_generation_diagnostics,
+    summarize_cases,
+)
 from golden_gen.layered_artifacts import bound_file, sha, source_identity, verify_marker
 from golden_gen.layered_release import (
     POLICY_PATH,
@@ -83,6 +89,12 @@ def _read(root: Path, artifact: Artifact) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("layered artifact must be a JSON object")
     return value
+
+
+def _common_runtime(value: dict[str, Any]) -> dict[str, Any]:
+    profile = RuntimeInfo.model_validate(value).model_dump(exclude={"generator_commit"})
+    profile["wheels"] = sorted(profile["wheels"], key=lambda w: w["name"].lower().replace("_", "-"))
+    return profile
 
 
 def _receipt(
@@ -193,7 +205,7 @@ def evaluate_manifest(repo: Path, manifest_path: Path, *, authoritative: bool) -
 
 def _calibration_provenance(
     repo: Path, root: Path, manifest: LayeredManifest, registry: Registry, policy: BudgetPolicy
-) -> tuple[dict[str, dict[str, bool | None]], dict[str, Any]]:
+) -> tuple[dict[str, dict[str, bool | None]], dict[str, Any], dict[str, Any]]:
     from golden_gen.layered_faults import verify_global_fault_evidence
     from golden_gen.operator_faults import evaluate_distribution_fault, evaluate_fault_models
 
@@ -298,11 +310,13 @@ def _calibration_provenance(
         raise ValueError("fault evidence is not bound to the approved calibration source/registry")
     if not verify_global_fault_evidence(repo, calibration_path, registry, old, faults):
         raise ValueError("a required structural/identity/argmax fault was not detected")
-    return evaluate_fault_models(
-        registry.operator_profiles, faults, policy.operator_budgets
-    ), evaluate_distribution_fault(
-        Budgets(**policy.values) if policy.values is not None else None,
-        faults["numerical_fault_definition"],
+    return (
+        evaluate_fault_models(registry.operator_profiles, faults, policy.operator_budgets),
+        evaluate_distribution_fault(
+            Budgets(**policy.values) if policy.values is not None else None,
+            faults["numerical_fault_definition"],
+        ),
+        recomputed["runtime_profile"],
     )
 
 
@@ -377,12 +391,26 @@ def _evaluate(
     root = manifest_path.parent
     fault_checks = None
     distribution_fault = None
+    runtime_profile: dict[str, Any] | None = None
     if authoritative:
         if policy is None:
             raise ValueError("approved policy missing")
-        fault_checks, distribution_fault = _calibration_provenance(
+        fault_checks, distribution_fault, runtime_profile = _calibration_provenance(
             repo, root, manifest, registry, policy
         )
+
+    def bind_runtime(records: list[dict[str, Any]]) -> None:
+        nonlocal runtime_profile
+        for record in records:
+            actual = _common_runtime(record["runtime"])
+            if runtime_profile is None:
+                runtime_profile = actual
+            elif actual != runtime_profile:
+                raise ValueError(
+                    "measurement runtime differs across engines/replays "
+                    "or from approved calibration"
+                )
+
     selected = (
         registry.numerical_cases
         if authoritative
@@ -399,12 +427,14 @@ def _evaluate(
     if not expected or len(found) != len(expected) or set(found) != expected:
         raise ValueError("missing/duplicate/unexpected capture group, engine, or sealed subset")
     numeric = []
+    free_generation = []
     coverage = []
     execution_captures = {}
     unforced_captures = {}
     budgets = Budgets(**policy.values) if policy is not None and policy.values is not None else None
     for case in selected:
         by_engine = {}
+        own_tokens = {}
         for engine in ("reference", "baseline", "candidate"):
             entry = next(
                 e
@@ -440,6 +470,7 @@ def _evaluate(
                 )
             elif entry.control_replay is not None or entry.control_replay_receipt is not None:
                 raise ValueError("unexpected unforced control replay owner")
+            bind_runtime(receipts)
             if len({r["driver_pid"] for r in receipts}) != len(receipts):
                 raise ValueError("primary/replay/control must run in separate fresh processes")
             if (
@@ -486,6 +517,11 @@ def _evaluate(
                 execution_captures[case.plan.execution_group_id] = (case, first)
             replay = validate_capture(case.plan, second)
             shared = require_collection_equivalence(case.plan, first, control)
+            control_rows = validate_control_capture(case.plan, control)
+            own_tokens[engine] = {
+                m.member_id: [r["predicted_token_id"] for r in control_rows[m.member_id]]
+                for m in case.plan.members
+            }
             if public_control:
                 if entry.control_replay is None:
                     raise ValueError("unforced replay missing")
@@ -545,6 +581,17 @@ def _evaluate(
                 )
             )
         for member in case.plan.members:
+            free = free_generation_diagnostics(
+                own_tokens["reference"][member.member_id],
+                own_tokens["candidate"][member.member_id],
+                own_tokens["baseline"][member.member_id],
+            )
+            free.update(
+                case_id=member.case_id,
+                member_id=member.member_id,
+                execution_group_id=case.plan.execution_group_id,
+            )
+            free_generation.append(free)
             rows = [by_engine[e][member.member_id] for e in ("reference", "candidate", "baseline")]
             values = [
                 np.asarray([r["logits"] for r in engine_rows], dtype=np.float32)
@@ -577,6 +624,7 @@ def _evaluate(
                 (auxiliary_entry.replay_receipt, auxiliary_entry.replay),
             )
         ]
+        bind_runtime(receipts)
         if (
             receipts[0]["driver_pid"] == receipts[1]["driver_pid"]
             or len({(r["binary_sha256"], r["build_source_id"]) for r in receipts}) != 1
@@ -618,6 +666,7 @@ def _evaluate(
                 (auxiliary_entry.replay_receipt, auxiliary_entry.replay),
             )
         ]
+        bind_runtime(receipts)
         if (
             receipts[0]["driver_pid"] == receipts[1]["driver_pid"]
             or len({(r["binary_sha256"], r["build_source_id"]) for r in receipts}) != 1
@@ -701,6 +750,8 @@ def _evaluate(
         expected_unique_owners=len(inventory),
         validated_unique_owners=len(found_owners),
         case_equal_summary=summarize_cases(numeric),
+        runtime_profile=runtime_profile,
+        free_generation_diagnostics=free_generation,
         calibration_source=policy.calibration_source if policy is not None else None,
         distribution_fault=distribution_fault,
     )

@@ -30,6 +30,30 @@ pub(crate) use benchmark::BenchmarkSession;
 #[cfg(test)]
 use benchmark::{BenchmarkConfig, BENCHMARK_DESTINATION_ENV};
 
+/// Publish a small private JSON artifact without replacing any existing bytes.
+pub(crate) fn write_atomic_json(destination: &Path, value: &impl Serialize) -> Result<()> {
+    let parent =
+        validate_private_temp_dir(destination.parent().context("artifact parent missing")?)?;
+    let name = destination
+        .file_name()
+        .context("artifact filename missing")?;
+    validate_destination_name(name)?;
+    let destination = parent.join(name);
+    let stage = destination.with_extension("partial");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&stage)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    std::fs::hard_link(&stage, &destination)?;
+    std::fs::remove_file(&stage)?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub(crate) struct CaptureConfig {
     temp_dir: PathBuf,

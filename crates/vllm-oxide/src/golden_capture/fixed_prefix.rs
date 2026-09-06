@@ -325,3 +325,15 @@ impl ReplaySession {
         Ok(())
     }
 }
+
+impl crate::engine::GoldenStepControl for ReplaySession {
+    fn observe_and_advance(
+        &mut self,
+        plan: &StepPlan,
+        result: &mut StepResult,
+        logits: &Tensor,
+    ) -> candle_core::Result<()> {
+        self.record_and_advance(plan, result, logits)
+            .map_err(|error| candle_core::Error::Msg(error.to_string()))
+    }
+}

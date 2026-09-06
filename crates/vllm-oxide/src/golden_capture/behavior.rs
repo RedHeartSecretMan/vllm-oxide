@@ -3,9 +3,6 @@
 use anyhow::{bail, Context, Result};
 use candle_core::Device;
 use serde::Deserialize;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 pub(crate) const PLAN_ENV: &str = "VLLM_OXIDE_INTERNAL_BEHAVIOR_PLAN";
@@ -49,7 +46,9 @@ struct Parameters {
 }
 
 /// Calls the unchanged public generate seam. Expected verdicts are consumer-only.
-pub(crate) fn run_from_env(llm: &mut crate::LLM) -> Result<()> {
+pub(crate) fn run_from_env(
+    mut generate: impl FnMut(&[Vec<u32>], &[crate::SamplingParams]) -> Result<Vec<crate::RequestOutput>>,
+) -> Result<()> {
     let plan = std::env::var_os(PLAN_ENV).context("behavior plan missing")?;
     let destination = PathBuf::from(
         std::env::var_os("VLLM_OXIDE_INTERNAL_BEHAVIOR_OUTPUT")
@@ -88,11 +87,7 @@ pub(crate) fn run_from_env(llm: &mut crate::LLM) -> Result<()> {
             bail!("behavior binding already exists");
         }
         std::env::set_var("VLLM_OXIDE_INTERNAL_BEHAVIOR_BINDING", &binding_path);
-        let prompts = call
-            .prompts
-            .into_iter()
-            .map(crate::Prompt::TokenIds)
-            .collect::<Vec<_>>();
+        let prompts = call.prompts;
         let params = call
             .params
             .into_iter()
@@ -107,7 +102,7 @@ pub(crate) fn run_from_env(llm: &mut crate::LLM) -> Result<()> {
                 repetition_penalty: p.repetition_penalty,
             })
             .collect::<Vec<_>>();
-        let result = llm.generate(&prompts, &params);
+        let result = generate(&prompts, &params);
         std::env::remove_var("VLLM_OXIDE_INTERNAL_BEHAVIOR_BINDING");
         let binding: Option<serde_json::Value> = if binding_path.exists() {
             Some(serde_json::from_slice(&std::fs::read(binding_path)?)?)
@@ -129,23 +124,11 @@ pub(crate) fn run_from_env(llm: &mut crate::LLM) -> Result<()> {
         };
         calls.push(serde_json::json!({"call_id":call.call_id,"outputs":outputs,"error":error,"binding":binding}));
     }
-    let stage = destination.with_extension("partial");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&stage)?;
-    serde_json::to_writer(
-        &mut file,
+    super::write_atomic_json(
+        &destination,
         &serde_json::json!({"protocol":"layered-accuracy-v1",
         "schema_version":1,"mode":"free_generation","calls":calls}),
-    )?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::hard_link(&stage, destination)?;
-    std::fs::remove_file(stage)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    )
 }
 
 pub(crate) fn record_binding(
@@ -169,23 +152,11 @@ pub(crate) fn record_binding(
         .context("behavior binding name missing")?;
     super::validate_destination_name(name)?;
     let destination = parent.join(name);
-    let stage = destination.with_extension("partial");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&stage)?;
-    serde_json::to_writer(
-        &mut file,
+    super::write_atomic_json(
+        &destination,
         &serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
         "mode":"behavior_binding","device":if device.is_cuda(){"cuda:0"}else{"cpu"},
         "request_ids":ids,"prompt_lengths":prompt_lengths,"eos_token_ids":eos,"max_model_len":max_model_len,
         "forcing_enabled":std::env::var_os(super::fixed_prefix::PLAN_ENV).is_some()}),
-    )?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::hard_link(&stage, destination)?;
-    std::fs::remove_file(stage)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    )
 }

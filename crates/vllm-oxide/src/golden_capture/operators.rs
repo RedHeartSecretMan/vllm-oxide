@@ -4,9 +4,6 @@ use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use crate::layers::{activation::silu_and_mul, rmsnorm::RMSNorm, rope::RotaryEmbedding};
@@ -83,19 +80,7 @@ pub(crate) fn run_from_env(device: &Device) -> Result<()> {
     }
     let value = serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,"mode":"operator_verification",
         "device":if device.is_cuda(){"cuda:0"}else{"cpu"},"operator_checks":records,"accepting":false,"complete":true});
-    let stage = destination.with_extension("partial");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&stage)?;
-    serde_json::to_writer(&mut file, &value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::hard_link(&stage, &destination)?;
-    std::fs::remove_file(stage)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    super::write_atomic_json(&destination, &value)
 }
 
 fn run_rule(rule: &str, device: &Device) -> Result<(Tensor, Vec<usize>, &'static str)> {

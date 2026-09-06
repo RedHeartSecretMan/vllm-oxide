@@ -122,3 +122,15 @@ def test_summary_is_case_equal_not_step_weighted_and_cannot_authorize_release() 
     assert summary["case_equal_means"]["k_mean"] == 1
     assert summary["case_count"] == 2 and summary["total_steps"] == 10
     assert summary["accepting"] is False
+
+
+def test_free_generation_diagnostics_compare_own_token_streams_not_fixed_predictions() -> None:
+    from golden_gen.layered_accuracy import free_generation_diagnostics
+
+    result = free_generation_diagnostics([1, 2, 3], [1, 4, 3], [1, 2, 5])
+    assert result["reference_candidate"]["first_divergence"] == 1
+    assert result["reference_candidate"]["token_agreement"] == pytest.approx(2 / 3)
+    assert result["reference_baseline"]["first_divergence"] == 2
+    assert result["generated_token_ids"]["candidate"] == [1, 4, 3]
+    assert result["history_mode"] == "each_engine_own_generated_history"
+    assert result["accepting"] is False

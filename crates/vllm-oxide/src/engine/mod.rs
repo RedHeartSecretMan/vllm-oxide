@@ -107,16 +107,14 @@ impl EngineCore {
     #[cfg(feature = "internal-golden")]
     pub(crate) fn step_with_fixed_prefix(
         &mut self,
-        replay: &mut crate::golden_capture::fixed_prefix::ReplaySession,
+        replay: &mut dyn GoldenStepControl,
     ) -> Result<Vec<RequestOutput>> {
         self.step_internal(Some(replay)).map(|(outputs, _)| outputs)
     }
 
     fn step_internal(
         &mut self,
-        #[cfg(feature = "internal-golden")] replay: Option<
-            &mut crate::golden_capture::fixed_prefix::ReplaySession,
-        >,
+        #[cfg(feature = "internal-golden")] replay: Option<&mut dyn GoldenStepControl>,
     ) -> Result<(Vec<RequestOutput>, EngineStepCapture)> {
         let plan = match self.scheduler.plan_step(&mut self.kv_cache_manager) {
             Ok(plan) => plan,
@@ -182,8 +180,8 @@ impl EngineCore {
         let mut result = result;
         #[cfg(feature = "internal-golden")]
         if let Some(replay) = replay {
-            if let Err(error) = replay.record_and_advance(&plan, &mut result, &logits) {
-                return Err(self.cleanup_failed_step(candle_core::Error::Msg(error.to_string())));
+            if let Err(error) = replay.observe_and_advance(&plan, &mut result, &logits) {
+                return Err(self.cleanup_failed_step(error));
             }
         }
         #[cfg(feature = "internal-golden")]
@@ -352,6 +350,17 @@ impl EngineCore {
     pub(crate) fn is_running(&self) -> bool {
         self.scheduler.is_running()
     }
+}
+
+#[cfg(feature = "internal-golden")]
+pub(crate) trait GoldenStepControl {
+    /// Private test control after raw execution, before applying one StepResult.
+    fn observe_and_advance(
+        &mut self,
+        plan: &StepPlan,
+        result: &mut StepResult,
+        logits: &Tensor,
+    ) -> Result<()>;
 }
 
 pub(crate) struct EngineStepCapture {

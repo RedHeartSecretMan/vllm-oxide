@@ -594,6 +594,18 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     assert result["behavior_checks"][0]["checks"]["order"] is True
     assert result["behavior_checks"][1]["checks"]["execution_history"] is True
     assert result["behavior_checks"][2]["checks"]["count"] is True
+    different_host = json.loads((run / entries[2]["primary_receipt"]["path"]).read_text())
+    different_host["runtime"].update(gpu_name="NVIDIA L40", nvidia_driver_version="600.00")
+    different_host_ref = store("different-host.receipt.json", different_host)
+    mismatched_host = json.loads(manifest.read_text())
+    mismatched_host["captures"][2]["primary_receipt"] = different_host_ref
+    mismatched_host_ref = store("different-host.manifest.json", mismatched_host)
+    assert (
+        evaluate_manifest(repo, run / mismatched_host_ref["path"], authoritative=False)[
+            "observation_complete"
+        ]
+        is False
+    )
     false_backend = json.loads((run / entries[0]["primary_receipt"]["path"]).read_text())
     false_backend["engine_evidence"]["attention_backend"] = "FLASH_ATTN"
     false_ref = store("false-reference-backend.receipt.json", false_backend)
@@ -822,6 +834,18 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     accepted = evaluate_manifest(repo, run / approved_manifest["path"], authoritative=True)
     assert accepted["verdict"] == "PASS", accepted
     assert accepted["accepting"] is True
+    moved = json.loads((run / approved_manifest["path"]).read_text())
+    for owner in [*moved["captures"], *moved["operator_checks"], *moved["behavior_checks"]]:
+        for key in list(owner):
+            if not key.endswith("_receipt"):
+                continue
+            receipt_value = json.loads((run / owner[key]["path"]).read_text())
+            receipt_value["runtime"].update(gpu_name="NVIDIA L40", nvidia_driver_version="600.00")
+            owner[key] = store("moved-" + owner[key]["path"], receipt_value)
+    moved_ref = store("moved-environment.manifest.json", moved)
+    moved_result = evaluate_manifest(repo, run / moved_ref["path"], authoritative=True)
+    assert moved_result["verdict"] == "INVALID"
+    assert "runtime differs" in moved_result["reasons"][0]
     assert {p: sha(p) for p in originals} == originals
     accepted_report = store("authoritative-result.json", accepted)
     marker = write_marker(

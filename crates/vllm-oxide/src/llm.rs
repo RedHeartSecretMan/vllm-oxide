@@ -239,7 +239,14 @@ impl LLM {
             {
                 bail!("behavior verification requires an isolated unforced empty generate call");
             }
-            crate::golden_capture::behavior::run_from_env(self)?;
+            crate::golden_capture::behavior::run_from_env(|tokens, params| {
+                let prompts = tokens
+                    .iter()
+                    .cloned()
+                    .map(Prompt::TokenIds)
+                    .collect::<Vec<_>>();
+                self.generate(&prompts, params)
+            })?;
             return Ok(Vec::new());
         }
         #[cfg(feature = "internal-golden")]
@@ -1157,7 +1164,7 @@ mod tests {
     ) -> (LLM, CausalFingerprintControls) {
         let device = Device::Cpu;
         let paged_kv = Arc::new(Mutex::new(
-            PagedKVCache::new(1, 32, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
+            PagedKVCache::new(1, num_blocks, BLOCK_SIZE, 1, 1, DType::F32, &device).unwrap(),
         ));
         let attn_ctx = AttentionContext::new(paged_kv.clone());
         let controls = CausalFingerprintControls {
@@ -1343,6 +1350,50 @@ mod tests {
 
     mod recompute_preemption {
         use super::*;
+
+        #[test]
+        fn mixed_chunked_prefill_and_decode_survive_three_block_pressure() {
+            let prompts = [
+                Prompt::TokenIds(vec![1; 512]),
+                Prompt::TokenIds(vec![2; 255]),
+            ];
+            let params = [
+                deterministic_causal_params(4),
+                deterministic_causal_params(5),
+            ];
+            let mut outcomes = Vec::new();
+            for (label, blocks, max_seqs) in
+                [("low", 3, 2), ("extra_block", 4, 2), ("serial", 3, 1)]
+            {
+                let (mut llm, controls) =
+                    causal_fingerprint_test_harness_with_capacity(128, max_seqs, blocks, true);
+                llm.max_model_len = 768;
+                let result = llm.generate(&prompts, &params);
+                println!("CHUNK_PRESSURE_DIAG label={label} blocks={blocks} max_seqs={max_seqs} result={result:?}");
+                for (step, metadata) in controls.take_metadata().iter().enumerate() {
+                    println!("CHUNK_PRESSURE_DIAG label={label} step={step} q={:?} k={:?} block_table={:?} slots={:?}",
+                        metadata.cu_seqlens_q, metadata.cu_seqlens_k, metadata.block_table, metadata.slot_mapping);
+                }
+                println!(
+                    "CHUNK_PRESSURE_DIAG label={label} free_after={}",
+                    llm.engine.kv_cache_manager.num_free_blocks()
+                );
+                outcomes.push(result);
+            }
+            let extra_block = outcomes[1].as_ref().unwrap();
+            let serial = outcomes[2].as_ref().unwrap();
+            assert_eq!(
+                extra_block.iter().map(|o| &o.token_ids).collect::<Vec<_>>(),
+                serial.iter().map(|o| &o.token_ids).collect::<Vec<_>>()
+            );
+            let low = outcomes[0]
+                .as_ref()
+                .expect("legal low-capacity batch must complete using recompute");
+            assert_eq!(
+                low.iter().map(|o| &o.token_ids).collect::<Vec<_>>(),
+                serial.iter().map(|o| &o.token_ids).collect::<Vec<_>>()
+            );
+        }
 
         #[test]
         fn low_capacity_generation_matches_unpreempted_output_and_completes_waiters() {
@@ -2402,6 +2453,102 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "isolated capture test process failed");
             false
+        }
+
+        #[test]
+        fn public_pressure_geometry_actually_recomputes_generated_history() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::public_pressure_geometry_actually_recomputes_generated_history") { return; }
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let plan = root.path().join("pressure.json");
+            let prompts = vec![vec![1; 512], vec![2; 255]];
+            let limits = [4, 5];
+            std::fs::write(&plan,serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
+                "execution_group_id":"pressure","call_id":"pressure","vocab_size":100,
+                "members":[{"case_id":"a","member_id":"a","prompt":prompts[0],"continuation":vec![3;limits[0]]},
+                    {"case_id":"b","member_id":"b","prompt":prompts[1],"continuation":vec![4;limits[1]]}]}).to_string()).unwrap();
+            std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN", plan);
+            let mut captures = Vec::new();
+            for mode in ["fixed", "control", "control-replay"] {
+                let output = root.path().join(format!("pressure-{mode}.capture.json"));
+                std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT", &output);
+                if mode == "fixed" {
+                    std::env::remove_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CONTROL");
+                } else {
+                    std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CONTROL", "1");
+                }
+                let (mut llm, _) = causal_fingerprint_test_harness_with_capacity(768, 2, 3, true);
+                llm.max_model_len = 768;
+                let result = llm
+                    .generate(
+                        &prompts
+                            .iter()
+                            .cloned()
+                            .map(Prompt::TokenIds)
+                            .collect::<Vec<_>>(),
+                        &limits
+                            .into_iter()
+                            .map(deterministic_causal_params)
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    result.iter().map(|o| o.token_ids.len()).collect::<Vec<_>>(),
+                    limits
+                );
+                let raw: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+                assert_eq!(raw["allocated_cache_blocks"], 3);
+                let recomputed = raw["execution_events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|e| e["members"].as_array().unwrap())
+                    .any(|m| {
+                        m["phase"] == "prefill"
+                            && m["completion_step"].as_u64().unwrap() > 0
+                            && m["positions"][0] == 0
+                    });
+                println!("PRESSURE_GEOMETRY mode={mode} lengths=[512,255] limits={limits:?} token_budget=768 blocks=3 context=768 recomputed={recomputed}");
+                println!(
+                    "PRESSURE_EVENTS {:?}",
+                    raw["execution_events"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|e| e["members"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|m| (
+                                m["request_id"].clone(),
+                                m["completion_step"].clone(),
+                                m["phase"].clone(),
+                                m["positions"].clone()
+                            ))
+                            .collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    recomputed,
+                    "frozen pressure geometry never re-executed generated history"
+                );
+                let recovered = raw["execution_events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|e| e["members"].as_array().unwrap())
+                    .find(|m| {
+                        m["request_id"] == 1 && m["completion_step"] == 1 && m["phase"] == "prefill"
+                    })
+                    .unwrap();
+                assert_eq!(recovered["input_token_ids"][255], result[1].token_ids[0]);
+                captures.push(raw);
+            }
+            assert_eq!(
+                captures[1], captures[2],
+                "fresh unforced structural runs must replay exactly"
+            );
         }
 
         #[test]
