@@ -158,3 +158,28 @@ def compare_operator(profile: OperatorProfile, payload: dict[str, Any]) -> dict[
         worst_coordinate=[int(x) for x in np.unravel_index(np.argmax(error), error.shape)],
         reference_algorithm="fp64-independent-rules-bf16-materialization-v1",
     )
+
+
+def verify_operator_capture(
+    profiles: list[OperatorProfile], raw: dict[str, Any], *, require_cuda: bool
+) -> list[dict[str, Any]]:
+    if (raw.get("protocol"), raw.get("schema_version"), raw.get("mode"), raw.get("complete")) != (
+        "layered-accuracy-v1",
+        1,
+        "operator_verification",
+        True,
+    ):
+        raise ValueError("incomplete/version-mismatched operator capture")
+    if require_cuda and raw.get("device") != "cuda:0":
+        raise ValueError("release operator evidence must execute on CUDA")
+    records = raw.get("operator_checks", [])
+    expected = {p.profile_id for p in profiles}
+    if len(records) != len(expected) or {r.get("profile_id") for r in records} != expected:
+        raise ValueError("missing/duplicate/unexpected operator profile")
+    results = []
+    for profile in profiles:
+        payload = next(r for r in records if r["profile_id"] == profile.profile_id)
+        result = compare_operator(profile, payload)
+        result["fault_checks"] = {}  # A producer's claim is not fault-injection evidence.
+        results.append(result)
+    return results

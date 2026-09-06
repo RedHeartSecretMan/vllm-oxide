@@ -14,6 +14,7 @@ from golden_gen import config
 from golden_gen.fixed_prefix import (
     require_collection_equivalence,
     validate_capture,
+    validate_control_capture,
     validate_execution_events,
 )
 from golden_gen.layered_accuracy import PROTOCOL, Budgets, compare_case
@@ -48,6 +49,15 @@ class CaptureEntry(BaseModel):
     control_receipt: Artifact
 
 
+class AuxiliaryEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    verification_id: str
+    primary: Artifact
+    replay: Artifact
+    primary_receipt: Artifact
+    replay_receipt: Artifact
+
+
 class LayeredManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol: Literal["layered-accuracy-v1"]
@@ -57,8 +67,8 @@ class LayeredManifest(BaseModel):
     policy_sha256: str | None = None
     purpose: Literal["observation", "authoritative"]
     captures: list[CaptureEntry] = Field(min_length=1)
-    operator_checks: list[Artifact] = Field(default_factory=list)
-    behavior_checks: list[Artifact] = Field(default_factory=list)
+    operator_checks: list[AuxiliaryEntry] = Field(default_factory=list)
+    behavior_checks: list[AuxiliaryEntry] = Field(default_factory=list)
 
 
 def _read(root: Path, artifact: Artifact) -> dict[str, Any]:
@@ -217,12 +227,42 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
                 and len({(r["binary_sha256"], r["build_source_id"]) for r in receipts}) != 1
             ):
                 raise ValueError("candidate binary changed across capture replays")
+            setup_rows = []
+            for receipt in receipts:
+                refs = receipt.get("setup_captures", [])
+                if len(refs) != len(case.setup_calls):
+                    raise ValueError("setup capture count differs from the frozen execution group")
+                setup_rows.append(
+                    [
+                        validate_capture(plan, _read(root, Artifact.model_validate(ref)))
+                        for plan, ref in zip(case.setup_calls, refs, strict=True)
+                    ]
+                )
+            for index, setup in enumerate(case.setup_calls):
+                for member in setup.members:
+                    values = [
+                        np.asarray(
+                            [r["logits"] for r in variant[index][member.member_id]],
+                            dtype=np.float32,
+                        )
+                        for variant in setup_rows
+                    ]
+                    if any(not tensor_bits_equal(values[0], value) for value in values[1:]):
+                        raise ValueError("setup calls changed across primary/replay/control owners")
             first, second, control = (
                 _read(root, ref) for ref in (entry.primary, entry.replay, entry.control)
             )
             primary = validate_capture(case.plan, first)
             replay = validate_capture(case.plan, second)
             shared = require_collection_equivalence(case.plan, first, control)
+            from golden_gen.execution_checks import verify_prefix_reuse
+
+            for raw, validated in (
+                (first, primary),
+                (second, replay),
+                (control, validate_control_capture(case.plan, control)),
+            ):
+                verify_prefix_reuse(case, engine, raw, validated)
             mechanisms = validate_execution_events(case.plan, first, primary)
             # Scheduling mechanisms currently describe the Rust execution target;
             # reference records its own actual incremental path without pretending to page/preempt.
@@ -264,8 +304,76 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
                 expected_rows=len(member.continuation),
             )
             numeric.append(comparison)
-    operators = [_read(root, x) for x in manifest.operator_checks]
-    behaviors = [_read(root, x) for x in manifest.behavior_checks]
+    operators = []
+    if len(manifest.operator_checks) > 1:
+        raise ValueError("duplicate operator suite")
+    for auxiliary_entry in manifest.operator_checks:
+        from golden_gen.operator_verification import verify_operator_capture
+
+        if auxiliary_entry.verification_id != "operators":
+            raise ValueError("unknown operator suite")
+        receipts = [
+            _receipt(
+                root, receipt, capture, "candidate", source, registry_sha, "operator_verification"
+            )
+            for receipt, capture in (
+                (auxiliary_entry.primary_receipt, auxiliary_entry.primary),
+                (auxiliary_entry.replay_receipt, auxiliary_entry.replay),
+            )
+        ]
+        if (
+            receipts[0]["driver_pid"] == receipts[1]["driver_pid"]
+            or len({(r["binary_sha256"], r["build_source_id"]) for r in receipts}) != 1
+        ):
+            raise ValueError("operator replay must use fresh processes and the same binary")
+        first, second = _read(root, auxiliary_entry.primary), _read(root, auxiliary_entry.replay)
+        operators = verify_operator_capture(registry.operator_profiles, first, require_cuda=True)
+        verify_operator_capture(registry.operator_profiles, second, require_cuda=True)
+        left, right = first["operator_checks"], second["operator_checks"]
+        for profile in registry.operator_profiles:
+            a, b = (
+                next(r for r in rows if r["profile_id"] == profile.profile_id)
+                for rows in (left, right)
+            )
+            if not tensor_bits_equal(
+                np.asarray(a["values"], dtype=np.float32), np.asarray(b["values"], dtype=np.float32)
+            ):
+                raise ValueError("operator replay is not bit-identical")
+    behaviors = []
+    seen_behavior_ids: set[str] = set()
+    for auxiliary_entry in manifest.behavior_checks:
+        from golden_gen.behavior_verification import compare_behavior
+
+        behavior_case = next(
+            (c for c in registry.behavior_cases if c.case_id == auxiliary_entry.verification_id),
+            None,
+        )
+        if behavior_case is None or auxiliary_entry.verification_id in seen_behavior_ids:
+            raise ValueError("unknown/duplicate public behavior case")
+        seen_behavior_ids.add(auxiliary_entry.verification_id)
+        receipts = [
+            _receipt(root, receipt, capture, "candidate", source, registry_sha, "free_generation")
+            for receipt, capture in (
+                (auxiliary_entry.primary_receipt, auxiliary_entry.primary),
+                (auxiliary_entry.replay_receipt, auxiliary_entry.replay),
+            )
+        ]
+        if (
+            receipts[0]["driver_pid"] == receipts[1]["driver_pid"]
+            or len({(r["binary_sha256"], r["build_source_id"]) for r in receipts}) != 1
+        ):
+            raise ValueError("behavior replay must use fresh processes and the same binary")
+        first, second = _read(root, auxiliary_entry.primary), _read(root, auxiliary_entry.replay)
+        for raw in (first, second):
+            if any(
+                call.get("binding") is not None and call["binding"].get("device") != "cuda:0"
+                for call in raw.get("calls", [])
+            ):
+                raise ValueError("release public behavior must execute on CUDA")
+            compare_behavior(behavior_case, raw)
+        if first != second:
+            raise ValueError("same-engine free generation replay differs")
+        behaviors.append(compare_behavior(behavior_case, first))
     result = release_verdict(
         registry if authoritative else registry.model_copy(update={"numerical_cases": selected}),
         policy,

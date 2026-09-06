@@ -104,6 +104,14 @@ def test_authoritative_pending_budgets_stop_before_opening_manifest_or_holdout(
     assert attempted.returncode == 2
     assert json.loads(attempted.stdout)["verdict"] == "INVALID"
     assert not (tmp_path.parent / "uncreated-layered-run").exists()
+    auxiliary_command = list(attempted.args)
+    auxiliary_command[3] = "collect-aux"
+    auxiliary_command[auxiliary_command.index("--group") + 1] = "unknown"
+    auxiliary_command[auxiliary_command.index("--engine") + 1] = "candidate"
+    rejected = subprocess.run(auxiliary_command, capture_output=True, text=True, check=False)
+    assert rejected.returncode == 2
+    assert "unknown auxiliary verification" in json.loads(rejected.stdout)["reasons"][0]
+    assert not (tmp_path.parent / "uncreated-layered-run").exists()
 
 
 def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observation(
@@ -153,12 +161,27 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                 profile_id="r",
                 operator="rmsnorm",
                 dtype="bfloat16",
-                shape=[1, 2],
-                input_rule="literal-v1",
+                shape=[1, 4],
+                input_rule="materialized_halfway_sum_v1",
                 required_faults=["bad-scale"],
             )
         ],
-        behavior_cases=[dict(case_id="order", required_checks=["order"], scenario={})],
+        behavior_cases=[
+            dict(
+                case_id="order",
+                required_checks=["order"],
+                scenario={
+                    "calls": [
+                        dict(
+                            call_id="first",
+                            prompts=[[1]],
+                            params=[dict(max_tokens=1)],
+                            expected="success",
+                        )
+                    ]
+                },
+            )
+        ],
     )
     (repo / REGISTRY_PATH).write_text(json.dumps(registry))
     (repo / ".dag/definition-index.json").write_text(
@@ -278,6 +301,97 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
             entry[variant] = capref
             entry[variant + "_receipt"] = store(f"{engine}-{variant}-receipt.json", receipt)
         entries.append(entry)
+    auxiliary = dict(verification_id="operators")
+    for n, variant in enumerate(("primary", "replay")):
+        capref = store(
+            f"operators-{variant}.json",
+            dict(
+                protocol="layered-accuracy-v1",
+                schema_version=1,
+                mode="operator_verification",
+                complete=True,
+                accepting=False,
+                device="cuda:0",
+                operator_checks=[
+                    dict(
+                        profile_id="r",
+                        rule_id="materialized_halfway_sum_v1",
+                        input_shape=[1, 4],
+                        input_dtype="bfloat16",
+                        output_shape=[1, 4],
+                        values=[1, 1, 1, 1],
+                    )
+                ],
+            ),
+        )
+        guard = store(
+            f"operators-{variant}-guard.json",
+            dict(
+                child_returncode=0,
+                failure=None,
+                minimum_available_ram_bytes=20 * 1024**3,
+                before=dict(compute_processes=""),
+                after=dict(compute_processes=""),
+                child_pid=200 + n,
+            ),
+        )
+        auxreceipt = {
+            **receipt,
+            "mode": "operator_verification",
+            "capture_sha256": capref["sha256"],
+            "guard": guard,
+            "driver_pid": 200 + n,
+        }
+        auxiliary[variant] = capref
+        auxiliary[variant + "_receipt"] = store(f"operators-{variant}-receipt.json", auxreceipt)
+    behavior = dict(verification_id="order")
+    for n, variant in enumerate(("primary", "replay")):
+        capref = store(
+            f"behavior-{variant}.json",
+            dict(
+                protocol="layered-accuracy-v1",
+                schema_version=1,
+                mode="free_generation",
+                calls=[
+                    dict(
+                        call_id="first",
+                        error=None,
+                        binding=dict(
+                            protocol="layered-accuracy-v1",
+                            schema_version=1,
+                            mode="behavior_binding",
+                            device="cuda:0",
+                            request_ids=[0],
+                            prompt_lengths=[1],
+                            eos_token_ids=[9],
+                            max_model_len=4096,
+                            forcing_enabled=False,
+                        ),
+                        outputs=[dict(request_id=0, token_ids=[7], text="a", finished=True)],
+                    )
+                ],
+            ),
+        )
+        guard = store(
+            f"behavior-{variant}-guard.json",
+            dict(
+                child_returncode=0,
+                failure=None,
+                minimum_available_ram_bytes=20 * 1024**3,
+                before=dict(compute_processes=""),
+                after=dict(compute_processes=""),
+                child_pid=300 + n,
+            ),
+        )
+        auxreceipt = {
+            **receipt,
+            "mode": "free_generation",
+            "capture_sha256": capref["sha256"],
+            "guard": guard,
+            "driver_pid": 300 + n,
+        }
+        behavior[variant] = capref
+        behavior[variant + "_receipt"] = store(f"behavior-{variant}-receipt.json", auxreceipt)
     manifest = run / "manifest.json"
     manifest.write_text(
         json.dumps(
@@ -288,6 +402,8 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                 registry_sha256=registry_sha,
                 purpose="observation",
                 captures=entries,
+                operator_checks=[auxiliary],
+                behavior_checks=[behavior],
             )
         )
     )
@@ -296,5 +412,22 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     assert result["accepting"] is False and result["verdict"] == "INVALID"
     assert result["compared_capture_groups"] == 3
     assert result["numerical_checks"][0]["numerical_checks"]["k_mean"] == 0
+    assert result["operator_checks"][0]["max_abs_error"] == 0
+    assert result["behavior_checks"][0]["checks"]["order"] is True
+    # A receipt cannot smuggle unregistered setup calls into the same owner.
+    manifest_data = json.loads(manifest.read_text())
+    extra_receipt_path = run / entries[2]["primary_receipt"]["path"]
+    original_receipt = extra_receipt_path.read_text()
+    extra_receipt = json.loads(original_receipt)
+    extra_receipt["setup_captures"] = [entries[2]["primary"]]
+    extra_receipt_path.write_text(json.dumps(extra_receipt))
+    manifest_data["captures"][2]["primary_receipt"]["sha256"] = sha(extra_receipt_path)
+    original_manifest = manifest.read_text()
+    manifest.write_text(json.dumps(manifest_data))
+    invalid = evaluate_manifest(repo, manifest, authoritative=False)
+    assert invalid["observation_complete"] is False
+    assert "setup capture count" in invalid["reasons"][0]
+    extra_receipt_path.write_text(original_receipt)
+    manifest.write_text(original_manifest)
     (run / "candidate-replay.json").write_text("{}")
     assert evaluate_manifest(repo, manifest, authoritative=False)["observation_complete"] is False

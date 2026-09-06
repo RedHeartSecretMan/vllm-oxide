@@ -116,6 +116,11 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    #[cfg(feature = "internal-golden")]
+    pub(crate) fn diagnostic_eos_token_ids(&self) -> &[u32] {
+        &self.eos_token_ids
+    }
+
     /// Create a new scheduler with configurable budgets.
     pub fn new(
         max_num_batched_tokens: usize,

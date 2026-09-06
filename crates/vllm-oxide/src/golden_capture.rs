@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const TEMP_DIR_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_TEMP_DIR";
 pub(crate) const DESTINATION_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_DESTINATION";
 pub(crate) const CALL_ID_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_CALL_ID";
+pub(crate) mod behavior;
 mod benchmark;
 pub(crate) mod fixed_prefix;
 pub(crate) mod layer_trace;

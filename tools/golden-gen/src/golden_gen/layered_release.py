@@ -39,6 +39,9 @@ class NumericalCase(BaseModel):
     ] = Field(min_length=1)
     engine_options: dict[str, Any]
     setup_calls: list[ReplayPlan] = Field(default_factory=list)
+    expected_cached_tokens: dict[Literal["reference", "baseline", "candidate"], dict[str, int]] = (
+        Field(default_factory=dict)
+    )
 
 
 class OperatorProfile(BaseModel):
@@ -56,6 +59,7 @@ class BehaviorCase(BaseModel):
     case_id: str = Field(min_length=1)
     required_checks: list[str] = Field(min_length=1)
     scenario: dict[str, Any]
+    engine_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class Registry(BaseModel):
@@ -77,11 +81,13 @@ class Registry(BaseModel):
             raise ValueError("duplicate behavior case")
         seen: dict[str, str] = {}
         for case in self.numerical_cases:
-            for member in case.plan.members:
-                key = json.dumps([member.prompt, member.continuation], separators=(",", ":"))
-                if key in seen and (case.split == "acceptance" or seen[key] == "acceptance"):
-                    raise ValueError("acceptance stream overlaps an observed/calibration stream")
-                seen[key] = case.split
+            for plan in [case.plan, *case.setup_calls]:
+                for member in plan.members:
+                    for step in range(len(member.continuation)):
+                        key = plan.history_sha256(member.member_id, step)
+                        if key in seen and case.split != seen[key]:
+                            raise ValueError("prediction prefix overlaps another registry split")
+                        seen[key] = case.split
             if case.split != "development" and any(
                 m.case_id.startswith(("canonical_", "regression_")) for m in case.plan.members
             ):

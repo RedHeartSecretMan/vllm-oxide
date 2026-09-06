@@ -62,7 +62,7 @@ def test_one_member_failure_or_missing_operator_blocks_the_execution_group() -> 
             numerical_cases=[
                 dict(
                     split="calibration",
-                    required_mechanisms={"candidate":["batch"]},
+                    required_mechanisms={"candidate": ["batch"]},
                     engine_options={},
                     plan=dict(
                         protocol="layered-accuracy-v1",
@@ -121,3 +121,45 @@ def test_one_member_failure_or_missing_operator_blocks_the_execution_group() -> 
     assert release_verdict(registry, policy, cases, [], behaviors)["verdict"] == "INVALID"
     cases[1]["verdict"] = "PASS"
     assert release_verdict(registry, policy, cases, operators, behaviors)["verdict"] == "PASS"
+
+
+def test_registry_rejects_actual_cross_split_prediction_prefix_overlap() -> None:
+    from golden_gen.layered_release import Registry
+
+    data = dict(
+        protocol="layered-accuracy-v1",
+        schema_version=1,
+        numerical_cases=[
+            dict(
+                split=split,
+                required_mechanisms={"candidate": ["prefill"]},
+                engine_options={},
+                plan=dict(
+                    protocol="layered-accuracy-v1",
+                    schema_version=1,
+                    execution_group_id=split,
+                    call_id=split,
+                    vocab_size=100,
+                    members=[
+                        dict(case_id=split, member_id="a", prompt=[7], continuation=continuation)
+                    ],
+                ),
+            )
+            for split, continuation in (("calibration", [8, 9]), ("acceptance", [8, 10]))
+        ],
+        operator_profiles=[
+            dict(
+                profile_id="s",
+                operator="silu",
+                dtype="bfloat16",
+                shape=[1, 2],
+                input_rule="rule",
+                required_faults=["fault"],
+            )
+        ],
+        behavior_cases=[dict(case_id="b", required_checks=["order"], scenario={})],
+    )
+    with pytest.raises(ValueError, match="prediction prefix overlaps"):
+        Registry.model_validate(data)
+    data["numerical_cases"][1]["plan"]["members"][0]["prompt"] = [11]
+    assert Registry.model_validate(data).numerical_cases[1].split == "acceptance"

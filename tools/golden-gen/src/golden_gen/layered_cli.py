@@ -56,6 +56,38 @@ def _artifact(path: Path, root: Path) -> dict[str, str]:
     return dict(path=path.relative_to(root).as_posix(), sha256=sha(path))
 
 
+def _auxiliary_definition(
+    repo: Path, verification_id: str
+) -> tuple[str, dict[str, Any], dict[str, Any], str]:
+    data, digest = definition_document(repo, REGISTRY_PATH)
+    registry = Registry.model_validate(data)
+    if verification_id == "operators":
+        from golden_gen.operator_verification import reference_rule
+
+        for profile in registry.operator_profiles:
+            reference_rule(profile.input_rule)
+        return (
+            "operator_verification",
+            dict(
+                protocol=PROTOCOL,
+                schema_version=1,
+                profiles=[
+                    dict(profile_id=p.profile_id, rule_id=p.input_rule)
+                    for p in registry.operator_profiles
+                ],
+            ),
+            {},
+            digest,
+        )
+    case = next((c for c in registry.behavior_cases if c.case_id == verification_id), None)
+    if case is None:
+        raise ValueError("unknown auxiliary verification")
+    from golden_gen.behavior_verification import BehaviorScenario
+
+    scenario = BehaviorScenario.model_validate(case.scenario)
+    return "free_generation", scenario.model_dump(), case.engine_options, digest
+
+
 def collect_group(
     repo: Path,
     run_dir: Path,
@@ -64,13 +96,19 @@ def collect_group(
     engine: str,
     variant: str,
     binary: Path | None = None,
+    *,
+    auxiliary: bool = False,
 ) -> dict[str, Any]:
     from golden_gen.guard import run_guarded
 
     source = source_identity(repo)
-    _group(
-        repo, group_id
-    )  # Freeze/approval check before creating files or importing a GPU runtime.
+    # Freeze/approval check before creating files or importing a GPU runtime.
+    if auxiliary:
+        _auxiliary_definition(repo, group_id)
+        if engine != "candidate" or variant not in ("primary", "replay"):
+            raise ValueError("auxiliary verification requires candidate primary/replay")
+    else:
+        _group(repo, group_id)
     if engine not in ("reference", "baseline", "candidate") or variant not in (
         "primary",
         "replay",
@@ -90,13 +128,13 @@ def collect_group(
     if not run_dir.resolve().is_relative_to(approved_root) or run_dir.resolve() == approved_root:
         raise ValueError("layered run must use a dedicated ticket artifact directory")
     run_dir.mkdir(mode=0o700, exist_ok=True)
-    output = run_dir / f"{group_id}-{engine}-{variant}"
+    output = run_dir / f"{'aux-' if auxiliary else ''}{group_id}-{engine}-{variant}"
     output.mkdir(mode=0o700)  # never resume or overwrite an incomplete owner
     command = [
         sys.executable,
         "-m",
         "golden_gen.layered_cli",
-        "worker",
+        "worker-aux" if auxiliary else "worker",
         "--repo-root",
         str(repo),
         "--run-dir",
@@ -136,11 +174,99 @@ def collect_group(
 
 def _worker(args: argparse.Namespace) -> None:
     # The outer process owns the guard and logs remain complete even on failure.
-    output = args.run_dir / f"{args.group}-{args.engine}-{args.variant}"
+    auxiliary = args.action == "worker-aux"
+    output = (
+        args.run_dir / f"{'aux-' if auxiliary else ''}{args.group}-{args.engine}-{args.variant}"
+    )
     with (output / "stdout.log").open("x") as stdout, (output / "stderr.log").open("x") as stderr:
         os.dup2(stdout.fileno(), 1)
         os.dup2(stderr.fileno(), 2)
-        _worker_capture(args, output)
+        if auxiliary:
+            _worker_auxiliary(args, output)
+        else:
+            _worker_capture(args, output)
+
+
+def _worker_auxiliary(args: argparse.Namespace, output: Path) -> None:
+    from golden_gen.environment import collect_release_runtime, validate_deterministic_environment
+
+    validate_deterministic_environment(os.environ)
+    source = source_identity(args.repo_root)
+    mode, request, options, registry_sha = _auxiliary_definition(args.repo_root, args.group)
+    if (
+        args.engine != "candidate"
+        or args.variant not in ("primary", "replay")
+        or args.candidate_binary is None
+    ):
+        raise ValueError("auxiliary verification requires a reviewed candidate binary")
+    runtime = collect_release_runtime(args.model_dir, args.repo_root)
+    plan_path, options_path = output / "plan.json", output / "options.json"
+    atomic_json(plan_path, request)
+    atomic_json(options_path, options)
+    completed = subprocess.run(
+        [
+            str(args.candidate_binary),
+            "--repo-root",
+            str(args.repo_root),
+            "--measurement-commit",
+            source["commit"],
+            "--measurement-tree",
+            source["tree"],
+            "--model-path",
+            str(args.model_dir),
+            "--output",
+            str(output / "capture.json"),
+            "--options",
+            str(options_path),
+            "--operator-plan" if mode == "operator_verification" else "--behavior-plan",
+            str(plan_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    print(completed.stdout, end="")
+    print(completed.stderr, end="", file=sys.stderr)
+    completed.check_returncode()
+    evidence = json.loads(completed.stdout)
+    if evidence.get("source") != source or evidence.get("cuda_feature_enabled") is not True:
+        raise ValueError("auxiliary candidate must be a CUDA build of the measured source")
+    registry = Registry.model_validate(definition_document(args.repo_root, REGISTRY_PATH)[0])
+    raw = json.loads((output / "capture.json").read_text())
+    if mode == "operator_verification":
+        from golden_gen.operator_verification import verify_operator_capture
+
+        verify_operator_capture(registry.operator_profiles, raw, require_cuda=True)
+    else:
+        from golden_gen.behavior_verification import compare_behavior
+
+        compare_behavior(next(c for c in registry.behavior_cases if c.case_id == args.group), raw)
+    atomic_json(
+        output / "worker.json",
+        dict(
+            protocol=PROTOCOL,
+            schema_version=1,
+            source=source,
+            registry_sha256=registry_sha,
+            engine="candidate",
+            mode=mode,
+            driver_pid=os.getpid(),
+            capture_sha256=sha(output / "capture.json"),
+            runtime=runtime.model_dump(),
+            engine_evidence=evidence,
+            kernel=config.CANDIDATE_KERNEL_PATH,
+            binary_sha256=sha(args.candidate_binary),
+            build_source_id=evidence["build_source_id"],
+            model=dict(
+                revision=config.MODEL_REVISION,
+                config_sha256=config.MODEL_CONFIG_SHA256,
+                tokenizer_sha256=config.TOKENIZER_SHA256,
+                weights_sha256=config.MODEL_WEIGHTS_SHA256,
+                dtype="bfloat16",
+                vocab_size=config.VOCAB_SIZE,
+            ),
+        ),
+    )
 
 
 def _worker_capture(args: argparse.Namespace, output: Path) -> None:
@@ -271,7 +397,10 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["collect", "worker", "observe", "authoritative"])
+    parser.add_argument(
+        "action",
+        choices=["collect", "worker", "collect-aux", "worker-aux", "observe", "authoritative"],
+    )
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path)
@@ -281,15 +410,15 @@ def main() -> None:
     parser.add_argument("--candidate-binary", type=Path)
     parser.add_argument("--manifest", type=Path)
     args = parser.parse_args()
-    if args.action in ("collect", "worker") and (
+    if args.action in ("collect", "worker", "collect-aux", "worker-aux") and (
         args.model_dir is None or args.group is None or args.engine is None or args.variant is None
     ):
         parser.error("collection requires model-dir, group, engine and variant")
-    if args.action == "worker":
+    if args.action in ("worker", "worker-aux"):
         _worker(args)
         return
     try:
-        if args.action == "collect":
+        if args.action in ("collect", "collect-aux"):
             result = collect_group(
                 args.repo_root,
                 args.run_dir,
@@ -298,6 +427,7 @@ def main() -> None:
                 args.engine,
                 args.variant,
                 args.candidate_binary,
+                auxiliary=args.action == "collect-aux",
             )
         else:
             if args.manifest is None:

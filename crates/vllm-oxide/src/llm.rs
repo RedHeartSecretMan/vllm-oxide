@@ -230,6 +230,19 @@ impl LLM {
             bail!("generate: raw-logit capture and benchmark telemetry are mutually exclusive");
         }
         #[cfg(feature = "internal-golden")]
+        if std::env::var_os(crate::golden_capture::behavior::PLAN_ENV).is_some() {
+            if !prompts.is_empty()
+                || capture.is_some()
+                || benchmark.is_some()
+                || crate::golden_capture::operators::requested()
+                || std::env::var_os(crate::golden_capture::fixed_prefix::PLAN_ENV).is_some()
+            {
+                bail!("behavior verification requires an isolated unforced empty generate call");
+            }
+            crate::golden_capture::behavior::run_from_env(self)?;
+            return Ok(Vec::new());
+        }
+        #[cfg(feature = "internal-golden")]
         if crate::golden_capture::operators::requested() {
             if !prompts.is_empty()
                 || capture.is_some()
@@ -303,6 +316,16 @@ impl LLM {
         for (token_ids, params) in tokenized_prompts.into_iter().zip(sampling_params.iter()) {
             let request_id = self.engine.add_request(token_ids, params.clone());
             request_ids.push(request_id);
+        }
+        #[cfg(feature = "internal-golden")]
+        if let Err(error) = crate::golden_capture::behavior::record_binding(
+            &request_ids,
+            &prompt_lens,
+            self.engine.scheduler.diagnostic_eos_token_ids(),
+            self.max_model_len,
+            &self.device,
+        ) {
+            return Err(self.abort_after_capture_error(error));
         }
         #[cfg(feature = "internal-golden")]
         if let Some(replay) = replay.as_mut() {
@@ -2373,6 +2396,144 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "isolated capture test process failed");
             false
+        }
+
+        #[test]
+        fn behavior_runner_preserves_real_errors_and_repeated_public_outputs() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::behavior_runner_preserves_real_errors_and_repeated_public_outputs") { return; }
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let plan = root.path().join("behavior.json");
+            let output = root.path().join("behavior.capture.json");
+            std::fs::write(&plan,serde_json::to_vec(&serde_json::json!({"calls":[
+                {"call_id":"invalid","prompts":[[1]],"params":[{"max_tokens":1,"temperature":-1.0}],"expected":"error","error_contains":"temperature"},
+                {"call_id":"first","prompts":[[1]],"params":[{"max_tokens":4}],"expected":"success"},
+                {"call_id":"second","prompts":[[1]],"params":[{"max_tokens":2,"ignore_eos":true}],"expected":"success"}
+            ]})).unwrap()).unwrap();
+            std::env::set_var("VLLM_OXIDE_INTERNAL_BEHAVIOR_PLAN", &plan);
+            std::env::set_var("VLLM_OXIDE_INTERNAL_BEHAVIOR_OUTPUT", &output);
+            let mut llm = controlled_logits_test_llm(vec![3]);
+            assert!(llm.generate(&[], &[]).unwrap().is_empty());
+            let capture: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+            assert!(capture["calls"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("temperature"));
+            assert!(capture["calls"][0]["binding"].is_null());
+            assert_eq!(
+                capture["calls"][1]["outputs"][0]["token_ids"],
+                serde_json::json!([3])
+            );
+            assert_eq!(
+                capture["calls"][2]["outputs"][0]["token_ids"],
+                serde_json::json!([3, 3])
+            );
+            assert_eq!(
+                capture["calls"][2]["binding"]["request_ids"],
+                serde_json::json!([1])
+            );
+            assert_eq!(capture["calls"][2]["binding"]["forcing_enabled"], false);
+        }
+
+        #[test]
+        fn behavior_binding_observes_unforced_public_generation_and_resolved_eos() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::behavior_binding_observes_unforced_public_generation_and_resolved_eos") { return; }
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = root.path().join("binding.json");
+            let _environment = EnvironmentRestore::install(&[(
+                "VLLM_OXIDE_INTERNAL_BEHAVIOR_BINDING",
+                Some(path.as_os_str()),
+            )]);
+            let mut llm = controlled_logits_test_llm(vec![3]);
+            let outputs = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[SamplingParams {
+                        max_tokens: 4,
+                        ..SamplingParams::default()
+                    }],
+                )
+                .unwrap();
+            assert_eq!(outputs[0].token_ids, vec![3]);
+            let binding: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(
+                binding["request_ids"],
+                serde_json::json!([outputs[0].request_id])
+            );
+            assert_eq!(binding["eos_token_ids"], serde_json::json!([3]));
+            assert_eq!(binding["forcing_enabled"], false);
+        }
+
+        #[test]
+        fn fixed_prefix_mixed_batch_admits_waiter_and_uses_advanced_kv_history() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::fixed_prefix_mixed_batch_admits_waiter_and_uses_advanced_kv_history") { return; }
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let plan = root.path().join("plan.json");
+            let destination = root.path().join("capture.json");
+            std::fs::write(&plan,serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,"execution_group_id":"waiting","call_id":"call","vocab_size":100,
+                "members":[{"case_id":"short","member_id":"a","prompt":[1],"continuation":[7,8]},
+                    {"case_id":"long","member_id":"b","prompt":[2],"continuation":[9,10,11,12]},
+                    {"case_id":"waiting","member_id":"c","prompt":[3,4],"continuation":[13,14]}]}).to_string()).unwrap();
+            let _environment = EnvironmentRestore::install(&[
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN",
+                    Some(plan.as_os_str()),
+                ),
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT",
+                    Some(destination.as_os_str()),
+                ),
+            ]);
+            let (mut llm, _) = causal_fingerprint_test_harness(128, 2, true);
+            let outputs = llm
+                .generate(
+                    &[
+                        Prompt::TokenIds(vec![1]),
+                        Prompt::TokenIds(vec![2]),
+                        Prompt::TokenIds(vec![3, 4]),
+                    ],
+                    &[
+                        deterministic_causal_params(2),
+                        deterministic_causal_params(4),
+                        deterministic_causal_params(2),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(
+                outputs
+                    .iter()
+                    .map(|o| o.token_ids.clone())
+                    .collect::<Vec<_>>(),
+                vec![vec![7, 8], vec![9, 10, 11, 12], vec![13, 14]]
+            );
+            let capture: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(destination).unwrap()).unwrap();
+            let rows = capture["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), 8);
+            assert_eq!(
+                rows.iter()
+                    .filter(|r| r["member_id"] == "a")
+                    .map(|r| r["predicted_token_id"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![2, 70]
+            );
+            assert!(capture["execution_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    let members = event["members"].as_array().unwrap();
+                    members
+                        .iter()
+                        .any(|m| m["request_id"] == 2 && m["phase"] == "prefill")
+                        && members
+                            .iter()
+                            .any(|m| m["request_id"] == 1 && m["phase"] == "decode")
+                }));
         }
 
         #[test]

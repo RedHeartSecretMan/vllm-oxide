@@ -17,8 +17,8 @@ struct Cli {
     measurement_commit: String,
     #[arg(long)]
     measurement_tree: String,
-    #[arg(long)]
-    plan: PathBuf,
+    #[arg(long, required_unless_present_any = ["operator_plan", "behavior_plan"])]
+    plan: Option<PathBuf>,
     #[arg(long)]
     output: PathBuf,
     #[arg(long)]
@@ -27,6 +27,10 @@ struct Cli {
     setup_plan: Vec<PathBuf>,
     #[arg(long)]
     control: bool,
+    #[arg(long, conflicts_with_all = ["plan", "behavior_plan", "control", "setup_plan"])]
+    operator_plan: Option<PathBuf>,
+    #[arg(long, conflicts_with_all = ["plan", "operator_plan", "control", "setup_plan"])]
+    behavior_plan: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -131,14 +135,14 @@ fn main() -> Result<()> {
         &cli.measurement_tree,
     )?;
     vllm_oxide_test::measurement::validate_running_binary(&cli.repo_root)?;
-    let target = load_plan(&cli.plan)?;
+    let target = cli.plan.as_deref().map(load_plan).transpose()?;
     let setups = cli
         .setup_plan
         .iter()
         .map(|path| load_plan(path))
         .collect::<Result<Vec<_>>>()?;
     let (options, capacity) = engine_options(&cli.options)?;
-    for plan in setups.iter().chain(std::iter::once(&target)) {
+    for plan in setups.iter().chain(target.iter()) {
         if plan.members.iter().any(|m| {
             m.prompt
                 .len()
@@ -156,13 +160,23 @@ fn main() -> Result<()> {
         "VLLM_OXIDE_INTERNAL_GOLDEN_TEMP_DIR",
         "VLLM_OXIDE_INTERNAL_LAYER_TRACE_DIR",
         "VLLM_OXIDE_INTERNAL_BENCHMARK_TEMP_DIR",
+        "VLLM_OXIDE_INTERNAL_OPERATOR_PLAN",
+        "VLLM_OXIDE_INTERNAL_OPERATOR_OUTPUT",
+        "VLLM_OXIDE_INTERNAL_BEHAVIOR_PLAN",
+        "VLLM_OXIDE_INTERNAL_BEHAVIOR_OUTPUT",
+        "VLLM_OXIDE_INTERNAL_BEHAVIOR_BINDING",
     ] {
         if std::env::var_os(name).is_some() {
             bail!("stale private execution environment: {name}");
         }
     }
-    std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN", &cli.plan);
+    if let Some(plan) = &cli.plan {
+        std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN", plan);
+    }
     if let Some(capacity) = capacity {
+        if cli.plan.is_none() {
+            bail!("private KV capacity requires a replay plan");
+        }
         std::env::set_var(
             "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CACHE_BLOCKS",
             capacity.to_string(),
@@ -170,11 +184,39 @@ fn main() -> Result<()> {
     }
     vllm_oxide_test::measurement::validate_release_model(&cli.model_path)?;
     let mut llm = LLM::new(Source::Local(cli.model_path), options)?;
+    if let Some(plan) = cli.operator_plan {
+        std::env::remove_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN");
+        std::env::remove_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CACHE_BLOCKS");
+        std::env::set_var("VLLM_OXIDE_INTERNAL_OPERATOR_PLAN", plan);
+        std::env::set_var("VLLM_OXIDE_INTERNAL_OPERATOR_OUTPUT", &cli.output);
+        llm.generate(&[], &[])?;
+        println!(
+            "{}",
+            serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
+            "source":{"commit":cli.measurement_commit,"tree":cli.measurement_tree},"producer_pid":std::process::id(),
+            "build_source_id":env!("VLLM_OXIDE_BUILD_SOURCE_ID"),"cuda_feature_enabled":cfg!(feature="cuda")})
+        );
+        return Ok(());
+    }
+    if let Some(plan) = cli.behavior_plan {
+        std::env::set_var("VLLM_OXIDE_INTERNAL_BEHAVIOR_PLAN", plan);
+        std::env::set_var("VLLM_OXIDE_INTERNAL_BEHAVIOR_OUTPUT", &cli.output);
+        llm.generate(&[], &[])?;
+        println!(
+            "{}",
+            serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
+            "source":{"commit":cli.measurement_commit,"tree":cli.measurement_tree},"producer_pid":std::process::id(),
+            "build_source_id":env!("VLLM_OXIDE_BUILD_SOURCE_ID"),"cuda_feature_enabled":cfg!(feature="cuda")})
+        );
+        return Ok(());
+    }
+    let target = target.context("fixed-prefix plan missing")?;
+    let target_path = cli.plan.context("fixed-prefix plan path missing")?;
     for (index, (path, plan)) in cli
         .setup_plan
         .iter()
         .zip(&setups)
-        .chain(std::iter::once((&cli.plan, &target)))
+        .chain(std::iter::once((&target_path, &target)))
         .enumerate()
     {
         let is_target = index == setups.len();
@@ -211,7 +253,7 @@ fn main() -> Result<()> {
         "{}",
         serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
         "source":{"commit":cli.measurement_commit,"tree":cli.measurement_tree},
-        "producer_pid":std::process::id(),"build_source_id":env!("VLLM_OXIDE_BUILD_SOURCE_ID")})
+        "producer_pid":std::process::id(),"build_source_id":env!("VLLM_OXIDE_BUILD_SOURCE_ID"),"cuda_feature_enabled":cfg!(feature="cuda")})
     );
     Ok(())
 }
