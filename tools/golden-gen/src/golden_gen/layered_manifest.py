@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
@@ -18,7 +19,7 @@ from golden_gen.fixed_prefix import (
     validate_execution_events,
 )
 from golden_gen.layered_accuracy import PROTOCOL, Budgets, compare_case
-from golden_gen.layered_artifacts import bound_file, sha, source_identity
+from golden_gen.layered_artifacts import bound_file, sha, source_identity, verify_marker
 from golden_gen.layered_release import (
     POLICY_PATH,
     REGISTRY_PATH,
@@ -47,6 +48,8 @@ class CaptureEntry(BaseModel):
     primary_receipt: Artifact
     replay_receipt: Artifact
     control_receipt: Artifact
+    control_replay: Artifact | None = None
+    control_replay_receipt: Artifact | None = None
 
 
 class AuxiliaryEntry(BaseModel):
@@ -69,6 +72,10 @@ class LayeredManifest(BaseModel):
     captures: list[CaptureEntry] = Field(min_length=1)
     operator_checks: list[AuxiliaryEntry] = Field(default_factory=list)
     behavior_checks: list[AuxiliaryEntry] = Field(default_factory=list)
+    calibration_evidence: Artifact | None = None
+    calibration_manifest: Artifact | None = None
+    calibration_marker: Artifact | None = None
+    fault_evidence: Artifact | None = None
 
 
 def _read(root: Path, artifact: Artifact) -> dict[str, Any]:
@@ -154,8 +161,123 @@ def evaluate_manifest(repo: Path, manifest_path: Path, *, authoritative: bool) -
         )
 
 
-def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[str, Any]:
-    source = source_identity(repo)
+def _calibration_provenance(
+    repo: Path, root: Path, manifest: LayeredManifest, registry: Registry, policy: BudgetPolicy
+) -> tuple[dict[str, dict[str, bool | None]], dict[str, Any]]:
+    from golden_gen.operator_faults import evaluate_distribution_fault, evaluate_fault_models
+
+    if (
+        manifest.calibration_evidence is None
+        or manifest.calibration_manifest is None
+        or manifest.fault_evidence is None
+        or manifest.calibration_marker is None
+    ):
+        raise ValueError("approved calibration/fault artifacts are missing")
+    if (
+        manifest.calibration_evidence.sha256 != policy.calibration_evidence_sha256
+        or manifest.fault_evidence.sha256 != policy.fault_evidence_sha256
+    ):
+        raise ValueError("calibration/fault artifacts differ from the approved policy")
+    old = policy.calibration_source
+    if (
+        old is None
+        or set(old) != {"commit", "tree"}
+        or any(re.fullmatch(r"[0-9a-f]{40}", v) is None for v in old.values())
+    ):
+        raise ValueError("invalid calibration source identity")
+    tree = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", old["commit"] + "^{tree}"], text=True
+    ).strip()
+    if tree != old["tree"]:
+        raise ValueError("calibration source tree does not match its commit")
+    marker = verify_marker(bound_file(root, manifest.calibration_marker.model_dump()), old)
+    if (
+        marker["stage"] != "observation"
+        or marker["outputs"][0]["sha256"] != manifest.calibration_evidence.sha256
+        or not any(
+            ref["sha256"] == manifest.calibration_manifest.sha256 for ref in marker["outputs"]
+        )
+    ):
+        raise ValueError("approved calibration is not covered by its original observation marker")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "merge-base",
+            "--is-ancestor",
+            old["commit"],
+            manifest.source["commit"],
+        ],
+        check=True,
+        capture_output=True,
+    )
+    changed = (
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "diff",
+                "--name-only",
+                "-z",
+                old["commit"],
+                manifest.source["commit"],
+                "--",
+            ]
+        )
+        .decode()
+        .split("\0")
+    )
+    allowed = {
+        REGISTRY_PATH,
+        POLICY_PATH,
+        "CONTEXT.md",
+        ".dag/definition-index.json",
+        ".dag/definitions/v0.2.0-github.json",
+    }
+    if any(
+        path and path not in allowed and not (path.startswith("docs/adr/") and path.endswith(".md"))
+        for path in changed
+    ):
+        raise ValueError(
+            "execution source changed since approved calibration; fresh calibration required"
+        )
+    recorded = _read(root, manifest.calibration_evidence)
+    if (
+        recorded.get("source") != old
+        or recorded.get("registry_sha256") != manifest.registry_sha256
+        or recorded.get("manifest_sha256") != manifest.calibration_manifest.sha256
+    ):
+        raise ValueError("approved calibration report identity mismatch")
+    calibration_path = bound_file(root, manifest.calibration_manifest.model_dump())
+    recomputed = _evaluate(repo, calibration_path, authoritative=False, source_override=old)
+    if (
+        recomputed != recorded
+        or not recomputed.get("observation_complete")
+        or recomputed.get("accepting") is not False
+    ):
+        raise ValueError("approved calibration report cannot be reproduced from bound raw evidence")
+    faults = _read(root, manifest.fault_evidence)
+    if (
+        faults.get("source") != old
+        or faults.get("registry_sha256") != manifest.registry_sha256
+        or faults.get("numerical_fault_rule") != "obvious_distribution_swap_v1"
+    ):
+        raise ValueError("fault evidence is not bound to the approved calibration source/registry")
+    return evaluate_fault_models(
+        registry.operator_profiles, faults, policy.operator_budgets
+    ), evaluate_distribution_fault(Budgets(**policy.values) if policy.values is not None else None)
+
+
+def _evaluate(
+    repo: Path,
+    manifest_path: Path,
+    *,
+    authoritative: bool,
+    source_override: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    source = source_identity(repo) if source_override is None else source_override
     registry_data, registry_sha = definition_document(repo, REGISTRY_PATH)
     registry = Registry.model_validate(registry_data)
     policy: BudgetPolicy | None = None
@@ -185,6 +307,15 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
         or manifest.purpose != ("authoritative" if authoritative else "observation")
     ):
         raise ValueError("layered manifest has stale source/registry/policy/purpose")
+    root = manifest_path.parent
+    fault_checks = None
+    distribution_fault = None
+    if authoritative:
+        if policy is None:
+            raise ValueError("approved policy missing")
+        fault_checks, distribution_fault = _calibration_provenance(
+            repo, root, manifest, registry, policy
+        )
     selected = (
         registry.numerical_cases
         if authoritative
@@ -200,9 +331,10 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
     found = [(entry.execution_group_id, entry.engine) for entry in manifest.captures]
     if not expected or len(found) != len(expected) or set(found) != expected:
         raise ValueError("missing/duplicate/unexpected capture group, engine, or sealed subset")
-    root = manifest_path.parent
     numeric = []
     coverage = []
+    execution_captures = {}
+    unforced_captures = {}
     budgets = Budgets(**policy.values) if policy is not None and policy.values is not None else None
     for case in selected:
         by_engine = {}
@@ -220,7 +352,28 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
                     (entry.control_receipt, entry.control, "collection_control"),
                 )
             ]
-            if len({r["driver_pid"] for r in receipts}) != 3:
+            public_control = engine == "candidate" and any(
+                b.mode == "unforced_control"
+                and b.scenario.get("execution_groups") == [case.plan.execution_group_id]
+                for b in registry.behavior_cases
+            )
+            if public_control:
+                if entry.control_replay is None or entry.control_replay_receipt is None:
+                    raise ValueError("required unforced public control replay is missing")
+                receipts.append(
+                    _receipt(
+                        root,
+                        entry.control_replay_receipt,
+                        entry.control_replay,
+                        engine,
+                        source,
+                        registry_sha,
+                        "collection_control",
+                    )
+                )
+            elif entry.control_replay is not None or entry.control_replay_receipt is not None:
+                raise ValueError("unexpected unforced control replay owner")
+            if len({r["driver_pid"] for r in receipts}) != len(receipts):
                 raise ValueError("primary/replay/control must run in separate fresh processes")
             if (
                 engine == "candidate"
@@ -228,17 +381,24 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
             ):
                 raise ValueError("candidate binary changed across capture replays")
             setup_rows = []
-            for receipt in receipts:
+            setup_raws = []
+            for variant_index, receipt in enumerate(receipts):
                 refs = receipt.get("setup_captures", [])
                 if len(refs) != len(case.setup_calls):
                     raise ValueError("setup capture count differs from the frozen execution group")
+                setup_values = [_read(root, Artifact.model_validate(ref)) for ref in refs]
+                setup_raws.append(setup_values)
                 setup_rows.append(
                     [
-                        validate_capture(plan, _read(root, Artifact.model_validate(ref)))
-                        for plan, ref in zip(case.setup_calls, refs, strict=True)
+                        (validate_capture if variant_index < 2 else validate_control_capture)(
+                            plan, raw
+                        )
+                        for plan, raw in zip(case.setup_calls, setup_values, strict=True)
                     ]
                 )
             for index, setup in enumerate(case.setup_calls):
+                for controls in setup_raws[2:]:
+                    require_collection_equivalence(setup, setup_raws[0][index], controls[index])
                 for member in setup.members:
                     values = [
                         np.asarray(
@@ -247,14 +407,43 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
                         )
                         for variant in setup_rows
                     ]
-                    if any(not tensor_bits_equal(values[0], value) for value in values[1:]):
-                        raise ValueError("setup calls changed across primary/replay/control owners")
+                    if not tensor_bits_equal(values[0], values[1]) or (
+                        len(values) == 4 and not tensor_bits_equal(values[2], values[3])
+                    ):
+                        raise ValueError("setup calls changed across same-mode fresh replay owners")
             first, second, control = (
                 _read(root, ref) for ref in (entry.primary, entry.replay, entry.control)
             )
             primary = validate_capture(case.plan, first)
+            if engine == "candidate":
+                execution_captures[case.plan.execution_group_id] = (case, first)
             replay = validate_capture(case.plan, second)
             shared = require_collection_equivalence(case.plan, first, control)
+            if public_control:
+                if entry.control_replay is None:
+                    raise ValueError("unforced replay missing")
+                control_replay = _read(root, entry.control_replay)
+                unforced_left = validate_control_capture(case.plan, control)
+                unforced_right = validate_control_capture(case.plan, control_replay)
+                for member in case.plan.members:
+                    a, b = (
+                        np.asarray([r["logits"] for r in rows[member.member_id]], dtype=np.float32)
+                        for rows in (unforced_left, unforced_right)
+                    )
+                    if not tensor_bits_equal(a, b):
+                        raise ValueError("unforced public fresh replay logits differ")
+                if control.get("public_call") != control_replay.get("public_call") or any(
+                    a.get("public_call") != b.get("public_call")
+                    for a, b in zip(setup_raws[2], setup_raws[3], strict=True)
+                ):
+                    raise ValueError("unforced LLM::generate return values changed on fresh replay")
+                unforced_captures[case.plan.execution_group_id] = (
+                    case,
+                    setup_raws[2],
+                    control,
+                    setup_raws[3],
+                    control_replay,
+                )
             from golden_gen.execution_checks import verify_prefix_reuse
 
             for raw, validated in (
@@ -348,7 +537,11 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
             (c for c in registry.behavior_cases if c.case_id == auxiliary_entry.verification_id),
             None,
         )
-        if behavior_case is None or auxiliary_entry.verification_id in seen_behavior_ids:
+        if (
+            behavior_case is None
+            or behavior_case.mode != "free_generation"
+            or auxiliary_entry.verification_id in seen_behavior_ids
+        ):
             raise ValueError("unknown/duplicate public behavior case")
         seen_behavior_ids.add(auxiliary_entry.verification_id)
         receipts = [
@@ -374,6 +567,46 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
         if first != second:
             raise ValueError("same-engine free generation replay differs")
         behaviors.append(compare_behavior(behavior_case, first))
+    for behavior_case in registry.behavior_cases:
+        if behavior_case.mode == "fixed_prefix_execution" and (
+            authoritative or behavior_case.split == "calibration"
+        ):
+            from golden_gen.execution_checks import compare_execution_behavior
+
+            behaviors.append(compare_execution_behavior(behavior_case, execution_captures))
+        if behavior_case.mode == "unforced_control" and (
+            authoritative or behavior_case.split == "calibration"
+        ):
+            from golden_gen.execution_checks import compare_unforced_control_behavior
+
+            groups = behavior_case.scenario.get("execution_groups", [])
+            if len(groups) != 1 or groups[0] not in unforced_captures:
+                raise ValueError("unforced public behavior capture group missing")
+            group, left_setups, left_control, right_setups, right_control = unforced_captures[
+                groups[0]
+            ]
+            evaluations = []
+            for setups, raw in ((left_setups, left_control), (right_setups, right_control)):
+                if any(
+                    c.get("public_call", {}).get("binding", {}).get("device") != "cuda:0"
+                    for c in [*setups, raw]
+                ):
+                    raise ValueError("unforced public release behavior must execute on CUDA")
+                evaluated = compare_unforced_control_behavior(behavior_case, group, setups, raw)
+                evaluations.append(evaluated)
+            combined = dict(evaluations[0])
+            combined["checks"] = {
+                key: all(e["checks"][key] for e in evaluations)
+                for key in behavior_case.required_checks
+            }
+            combined["evidence_complete"] = all(e["evidence_complete"] for e in evaluations)
+            combined["missing_mechanisms"] = sorted(
+                {m for e in evaluations for m in e["missing_mechanisms"]}
+            )
+            behaviors.append(combined)
+    if fault_checks is not None:
+        for operator in operators:
+            operator["fault_checks"] = fault_checks[operator["profile_id"]]
     result = release_verdict(
         registry if authoritative else registry.model_copy(update={"numerical_cases": selected}),
         policy,
@@ -390,7 +623,13 @@ def _evaluate(repo: Path, manifest_path: Path, *, authoritative: bool) -> dict[s
         observation_complete=not authoritative,
         expected_capture_groups=len(expected),
         compared_capture_groups=len(found),
+        calibration_source=policy.calibration_source if policy is not None else None,
+        distribution_fault=distribution_fault,
     )
+    if distribution_fault is not None and distribution_fault["verdict"] != "FAIL":
+        if result["verdict"] != "INVALID":
+            result["verdict"] = "FAIL"
+        result["reasons"].append("approved_budget_did_not_reject_wrong_distribution_fault")
     # Accurate numerical acceptance is not publication authority or a benchmark result.
     result["accepting"] = authoritative and result["verdict"] == "PASS"
     return result

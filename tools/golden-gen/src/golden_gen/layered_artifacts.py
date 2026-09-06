@@ -65,6 +65,47 @@ def bound_file(root: Path, record: dict[str, Any]) -> Path:
     return path
 
 
+def manifest_artifact_closure(manifest_path: Path, seen: set[Path] | None = None) -> list[Path]:
+    """Hash the complete declared dependency graph without parsing full logit tensors."""
+    visited = set() if seen is None else seen
+    identity = manifest_path.resolve()
+    if identity in visited:
+        raise ValueError("cyclic layered calibration manifest dependency")
+    visited.add(identity)
+    data = json.loads(manifest_path.read_text())
+    if (
+        data.get("protocol") != PROTOCOL
+        or data.get("schema_version") != 1
+        or data.get("purpose") not in ("observation", "authoritative")
+    ):
+        raise ValueError("invalid manifest in layered artifact closure")
+    root = manifest_path.parent
+    paths = [manifest_path]
+    for entry in [
+        *data.get("captures", []),
+        *data.get("operator_checks", []),
+        *data.get("behavior_checks", []),
+    ]:
+        for variant in ("primary", "replay", "control", "control_replay"):
+            if entry.get(variant) is None:
+                continue
+            paths.append(bound_file(root, entry[variant]))
+            receipt_path = bound_file(root, entry[variant + "_receipt"])
+            paths.append(receipt_path)
+            receipt = json.loads(receipt_path.read_text())
+            paths.append(bound_file(root, receipt["guard"]))
+            paths.extend(bound_file(root, ref) for ref in receipt.get("setup_captures", []))
+    for name in ("calibration_evidence", "fault_evidence", "calibration_marker"):
+        if data.get(name) is not None:
+            paths.append(bound_file(root, data[name]))
+    if data.get("calibration_manifest") is not None:
+        paths.extend(
+            manifest_artifact_closure(bound_file(root, data["calibration_manifest"]), visited)
+        )
+    visited.remove(identity)
+    return paths
+
+
 def write_marker(
     root: Path,
     stage: str,
@@ -75,7 +116,11 @@ def write_marker(
     if stage not in ("observation", "authoritative") or not outputs:
         raise ValueError("unsupported or empty layered stage")
     result = json.loads(outputs[0].read_text())
-    if result.get("protocol") != PROTOCOL or result.get("schema_version") != 1:
+    if (
+        result.get("protocol") != PROTOCOL
+        or result.get("schema_version") != 1
+        or result.get("source") != source
+    ):
         raise ValueError("legacy/unknown result cannot create a layered marker")
     accepting = stage == "authoritative"
     if accepting:
@@ -85,11 +130,28 @@ def write_marker(
         raise ValueError("incomplete observation cannot create a completion marker")
     prior = None
     if predecessor is not None:
-        verify_marker(predecessor, source)
-        prior = dict(path=predecessor.relative_to(root).as_posix(), sha256=sha(predecessor))
+        if not accepting:
+            raise ValueError("observation cannot borrow another stage predecessor")
+        prior_source = result.get("calibration_source")
+        if not isinstance(prior_source, dict):
+            raise ValueError("authoritative result lacks approved calibration source")
+        previous = verify_marker(predecessor, prior_source)
+        if previous["stage"] != "observation":
+            raise ValueError("authoritative predecessor must be the approved observation")
+        prior = dict(
+            path=predecessor.relative_to(root).as_posix(),
+            sha256=sha(predecessor),
+            source=prior_source,
+        )
     elif accepting:
         raise ValueError("authoritative marker requires a verified predecessor")
-    records = [dict(path=p.relative_to(root).as_posix(), sha256=sha(p)) for p in outputs]
+    complete_outputs = list(outputs)
+    if len(outputs) > 1:
+        if result.get("manifest_sha256") != sha(outputs[1]):
+            raise ValueError("stage result is not bound to its manifest bytes")
+        complete_outputs.extend(manifest_artifact_closure(outputs[1]))
+    complete_outputs = list(dict.fromkeys(complete_outputs))
+    records = [dict(path=p.relative_to(root).as_posix(), sha256=sha(p)) for p in complete_outputs]
     for record in records:
         bound_file(root, record)
     directory = root / "layered-markers"
@@ -117,11 +179,55 @@ def verify_marker(path: Path, source: dict[str, str]) -> dict[str, Any]:
         or value.get("schema_version") != 1
         or value.get("source") != source
         or not value.get("outputs")
+        or value.get("stage") not in ("observation", "authoritative")
+        or type(value.get("accepting")) is not bool
+        or value["accepting"] != (value["stage"] == "authoritative")
+        or path.is_symlink()
+        or path.name != f"{value.get('stage')}.complete.json"
+        or path.parent.name != "layered-markers"
     ):
         raise ValueError("invalid or stale layered marker identity")
     root = path.parent.parent
     for record in value["outputs"]:
         bound_file(root, record)
-    if value.get("predecessor") is not None:
-        verify_marker(bound_file(root, value["predecessor"]), source)
+    result = json.loads(bound_file(root, value["outputs"][0]).read_text())
+    if (
+        result.get("protocol") != PROTOCOL
+        or result.get("schema_version") != 1
+        or result.get("source") != source
+    ):
+        raise ValueError("marker result protocol/source differs")
+    if len(value["outputs"]) > 1:
+        manifest_path = bound_file(root, value["outputs"][1])
+        if result.get("manifest_sha256") != sha(manifest_path):
+            raise ValueError("marker manifest/result identity mismatch")
+        closure = {p.relative_to(root).as_posix() for p in manifest_artifact_closure(manifest_path)}
+        closure.add(value["outputs"][0]["path"])
+        if (
+            len(value["outputs"]) != len(closure)
+            or {r["path"] for r in value["outputs"]} != closure
+        ):
+            raise ValueError("marker omits or adds declared artifact dependencies")
+    predecessor = value.get("predecessor")
+    if value["stage"] == "observation":
+        if (
+            predecessor is not None
+            or result.get("accepting") is not False
+            or result.get("observation_complete") is not True
+        ):
+            raise ValueError("invalid observation marker/result state")
+    else:
+        if (
+            result.get("accepting") is not True
+            or result.get("verdict") != "PASS"
+            or not isinstance(predecessor, dict)
+        ):
+            raise ValueError("invalid authoritative marker/result state")
+        prior_source = result.get("calibration_source")
+        if not isinstance(prior_source, dict) or predecessor.get("source") != prior_source:
+            raise ValueError("predecessor calibration source was relabeled")
+        prior_path = bound_file(root, predecessor)
+        if json.loads(prior_path.read_text()).get("stage") != "observation":
+            raise ValueError("authoritative predecessor is not an observation")
+        verify_marker(prior_path, prior_source)
     return value

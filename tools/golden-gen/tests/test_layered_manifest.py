@@ -163,7 +163,7 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                 dtype="bfloat16",
                 shape=[1, 4],
                 input_rule="materialized_halfway_sum_v1",
-                required_faults=["bad-scale"],
+                required_faults=["wrong_epsilon"],
             )
         ],
         behavior_cases=[
@@ -180,7 +180,29 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                         )
                     ]
                 },
-            )
+            ),
+            dict(
+                case_id="execution",
+                mode="fixed_prefix_execution",
+                required_checks=["all_complete", "execution_history"],
+                scenario={"execution_groups": ["g"]},
+            ),
+            dict(
+                case_id="public-execution",
+                mode="unforced_control",
+                required_checks=["count", "order", "finished", "stop_policy", "execution_history"],
+                scenario={
+                    "execution_groups": ["g"],
+                    "calls": [
+                        dict(
+                            call_id="c",
+                            prompts=[[1]],
+                            params=[dict(max_tokens=1, ignore_eos=True)],
+                            expected="success",
+                        )
+                    ],
+                },
+            ),
         ],
     )
     (repo / REGISTRY_PATH).write_text(json.dumps(registry))
@@ -216,15 +238,21 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
         )
     ):
         entry = dict(execution_group_id="g", engine=engine)
-        for n, variant in enumerate(("primary", "replay", "control")):
-            mode = "collection_control" if variant == "control" else "fixed_prefix"
+        for n, variant in enumerate(
+            ("primary", "replay", "control", "control_replay")
+            if engine == "candidate"
+            else ("primary", "replay", "control")
+        ):
+            mode = (
+                "collection_control" if variant in ("control", "control_replay") else "fixed_prefix"
+            )
             row = dict(
                 kind="prediction",
                 case_id="new",
                 execution_group_id="g",
                 call_id="c",
                 member_id="a",
-                request_id=7,
+                request_id=0,
                 step=0,
                 history_sha256=plan.history_sha256("a", 0),
                 position=0,
@@ -232,7 +260,7 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                 phase="prefill",
                 row_shape=[config.VOCAB_SIZE],
                 predicted_token_id=0,
-                advance_token_id=0 if variant == "control" else 2,
+                advance_token_id=0 if variant in ("control", "control_replay") else 2,
                 logits=[0.0] * config.VOCAB_SIZE,
             )
             capture = dict(
@@ -250,7 +278,7 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                         token_budget=1,
                         members=[
                             dict(
-                                request_id=7,
+                                request_id=0,
                                 completion_step=0,
                                 sampling_allowed=True,
                                 input_token_ids=[1],
@@ -262,6 +290,36 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                     )
                 ],
             )
+            if engine == "candidate" and mode == "collection_control":
+                capture["public_call"] = dict(
+                    call_id="c",
+                    prompts=[[1]],
+                    params=[
+                        dict(
+                            max_tokens=1,
+                            ignore_eos=True,
+                            temperature=0,
+                            top_k=None,
+                            top_p=None,
+                            presence_penalty=0,
+                            frequency_penalty=0,
+                            repetition_penalty=0,
+                        )
+                    ],
+                    error=None,
+                    binding=dict(
+                        protocol="layered-accuracy-v1",
+                        schema_version=1,
+                        mode="behavior_binding",
+                        forcing_enabled=False,
+                        device="cuda:0",
+                        request_ids=[0],
+                        prompt_lengths=[1],
+                        eos_token_ids=[9],
+                        max_model_len=4096,
+                    ),
+                    outputs=[dict(request_id=0, token_ids=[0], text="a", finished=True)],
+                )
             capref = store(f"{engine}-{variant}.json", capture)
             pid = 100 + 10 * e + n
             guard = store(
@@ -414,20 +472,154 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     assert result["numerical_checks"][0]["numerical_checks"]["k_mean"] == 0
     assert result["operator_checks"][0]["max_abs_error"] == 0
     assert result["behavior_checks"][0]["checks"]["order"] is True
+    assert result["behavior_checks"][1]["checks"]["execution_history"] is True
+    assert result["behavior_checks"][2]["checks"]["count"] is True
     # A receipt cannot smuggle unregistered setup calls into the same owner.
     manifest_data = json.loads(manifest.read_text())
     extra_receipt_path = run / entries[2]["primary_receipt"]["path"]
     original_receipt = extra_receipt_path.read_text()
+    original_manifest = manifest.read_text()
+    for field, bad in (("weights_sha256", "0" * 64), ("vocab_size", config.VOCAB_SIZE - 1)):
+        mismatched = json.loads(original_receipt)
+        mismatched["model"][field] = bad
+        extra_receipt_path.write_text(json.dumps(mismatched))
+        manifest_data["captures"][2]["primary_receipt"]["sha256"] = sha(extra_receipt_path)
+        manifest.write_text(json.dumps(manifest_data))
+        rejected_identity = evaluate_manifest(repo, manifest, authoritative=False)
+        assert rejected_identity["observation_complete"] is False
+        assert "source/model/kernel/mode mismatch" in rejected_identity["reasons"][0]
+    extra_receipt_path.write_text(original_receipt)
+    manifest.write_text(original_manifest)
     extra_receipt = json.loads(original_receipt)
     extra_receipt["setup_captures"] = [entries[2]["primary"]]
     extra_receipt_path.write_text(json.dumps(extra_receipt))
     manifest_data["captures"][2]["primary_receipt"]["sha256"] = sha(extra_receipt_path)
-    original_manifest = manifest.read_text()
     manifest.write_text(json.dumps(manifest_data))
     invalid = evaluate_manifest(repo, manifest, authoritative=False)
     assert invalid["observation_complete"] is False
     assert "setup capture count" in invalid["reasons"][0]
     extra_receipt_path.write_text(original_receipt)
     manifest.write_text(original_manifest)
+    original_replay = (run / "candidate-replay.json").read_text()
     (run / "candidate-replay.json").write_text("{}")
     assert evaluate_manifest(repo, manifest, authoritative=False)["observation_complete"] is False
+    (run / "candidate-replay.json").write_text(original_replay)
+
+    # Synthetic policy/checkpoint and separately materialized measurement owners.
+    # These fixture receipts are test inputs, never real GPU observations.
+    from golden_gen.layered_release import POLICY_PATH, Registry
+    from golden_gen.operator_faults import make_fault_models
+
+    calibration = store("calibration-result.json", result)
+    calibration_manifest = store("calibration-manifest.json", json.loads(manifest.read_text()))
+    from golden_gen.layered_artifacts import verify_marker, write_marker
+
+    calibration_marker_path = write_marker(
+        run, "observation", source, [run / calibration["path"], run / calibration_manifest["path"]]
+    )
+    calibration_marker = dict(
+        path=calibration_marker_path.relative_to(run).as_posix(),
+        sha256=sha(calibration_marker_path),
+    )
+    faults = store(
+        "fault-models.json",
+        {
+            **make_fault_models(Registry.model_validate(registry).operator_profiles),
+            "source": source,
+            "registry_sha256": registry_sha,
+            "numerical_fault_rule": "obvious_distribution_swap_v1",
+        },
+    )
+    policy = dict(
+        protocol="layered-accuracy-v1",
+        schema_version=1,
+        algorithm="fp64-logsoftmax-fsum-underflow-recorded-p95-linear-v1",
+        values=dict(a_mean=0, a_peak=0, delta_mean=0, g_limit=0),
+        operator_budgets={"r": 0},
+        registry_sha256=registry_sha,
+        calibration_source=source,
+        calibration_evidence_sha256=calibration["sha256"],
+        fault_evidence_sha256=faults["sha256"],
+        rationale="CPU fixture only; not release budgets",
+    )
+    (repo / POLICY_PATH).write_text(json.dumps(policy))
+    index = json.loads((repo / ".dag/definition-index.json").read_text())
+    index["inputs"].append(dict(path=POLICY_PATH, blob_oid=git("hash-object", POLICY_PATH)))
+    (repo / ".dag/definition-index.json").write_text(json.dumps(index))
+    git("add", ".")
+    git("commit", "-qm", "synthetic approved policy checkpoint")
+    current_source = dict(commit=git("rev-parse", "HEAD"), tree=git("rev-parse", "HEAD^{tree}"))
+
+    def fresh_entry(old_entry: dict) -> dict:
+        refreshed = dict(old_entry)
+        for variant in ("primary", "replay", "control", "control_replay"):
+            if variant not in old_entry:
+                continue
+            old_capture = old_entry[variant]
+            capture_ref = store(
+                "auth-" + old_capture["path"], json.loads((run / old_capture["path"]).read_text())
+            )
+            receipt_ref = old_entry[variant + "_receipt"]
+            new_receipt = json.loads((run / receipt_ref["path"]).read_text())
+            new_receipt.update(
+                source=current_source,
+                driver_pid=new_receipt["driver_pid"] + 1000,
+                capture_sha256=capture_ref["sha256"],
+            )
+            new_receipt["runtime"]["generator_commit"] = current_source["commit"]
+            old_guard = new_receipt["guard"]
+            guard_data = json.loads((run / old_guard["path"]).read_text())
+            guard_data["child_pid"] = new_receipt["driver_pid"]
+            new_receipt["guard"] = store("auth-" + old_guard["path"], guard_data)
+            refreshed[variant] = capture_ref
+            refreshed[variant + "_receipt"] = store("auth-" + receipt_ref["path"], new_receipt)
+        return refreshed
+
+    approved_manifest = store(
+        "authoritative-manifest.json",
+        dict(
+            protocol="layered-accuracy-v1",
+            schema_version=1,
+            source=current_source,
+            registry_sha256=registry_sha,
+            policy_sha256=sha(repo / POLICY_PATH),
+            purpose="authoritative",
+            captures=[fresh_entry(e) for e in entries],
+            operator_checks=[fresh_entry(auxiliary)],
+            behavior_checks=[fresh_entry(behavior)],
+            calibration_evidence=calibration,
+            calibration_manifest=calibration_manifest,
+            calibration_marker=calibration_marker,
+            fault_evidence=faults,
+        ),
+    )
+    accepted = evaluate_manifest(repo, run / approved_manifest["path"], authoritative=True)
+    assert accepted["verdict"] == "PASS", accepted
+    assert accepted["accepting"] is True
+    accepted_report = store("authoritative-result.json", accepted)
+    marker = write_marker(
+        run,
+        "authoritative",
+        current_source,
+        [run / accepted_report["path"], run / approved_manifest["path"]],
+        calibration_marker_path,
+    )
+    assert verify_marker(marker, current_source)["predecessor"]["source"] == source
+    old_capture = run / entries[2]["primary"]["path"]
+    preserved_capture = old_capture.read_text()
+    old_capture.write_text("{}")
+    assert (
+        evaluate_manifest(repo, run / approved_manifest["path"], authoritative=True)["verdict"]
+        == "INVALID"
+    )
+    old_capture.write_text(preserved_capture)
+    # A new implementation cannot borrow a previously calibrated numeric policy.
+    (repo / "changed_execution.py").write_text("NEW_EXECUTION = True\n")
+    git("add", ".")
+    git("commit", "-qm", "synthetic execution changed after calibration")
+    stale = json.loads((run / approved_manifest["path"]).read_text())
+    stale["source"] = dict(commit=git("rev-parse", "HEAD"), tree=git("rev-parse", "HEAD^{tree}"))
+    stale_ref = store("stale-source-manifest.json", stale)
+    rejected = evaluate_manifest(repo, run / stale_ref["path"], authoritative=True)
+    assert rejected["verdict"] == "INVALID"
+    assert "execution source changed" in rejected["reasons"][0]

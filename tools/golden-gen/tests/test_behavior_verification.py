@@ -57,6 +57,21 @@ def test_public_behavior_uses_admission_order_and_unforced_eos_evidence() -> Non
     wrong = copy.deepcopy(raw)
     wrong["calls"][0]["outputs"][0]["token_ids"] = [9, 8]
     assert compare_behavior(case, wrong)["checks"]["stop_policy"] is False
+    assert compare_behavior(case, wrong)["evidence_complete"] is True
+    same_length = copy.deepcopy(case.scenario)
+    same_length["calls"][0]["params"][0]["max_tokens"] = 2
+    assert (
+        compare_behavior(case.model_copy(update={"scenario": same_length}), raw)["checks"][
+            "resolved_eos_stop"
+        ]
+        is False
+    )
+    assert (
+        compare_behavior(case.model_copy(update={"scenario": same_length}), raw)[
+            "evidence_complete"
+        ]
+        is False
+    )
 
 
 def test_invalid_call_requires_error_and_no_admission_before_next_success() -> None:

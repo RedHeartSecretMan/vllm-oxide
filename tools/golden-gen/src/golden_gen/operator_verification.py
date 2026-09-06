@@ -131,6 +131,12 @@ def reference_rule(rule_id: str) -> dict[str, Any]:
 
 
 def compare_operator(profile: OperatorProfile, payload: dict[str, Any]) -> dict[str, Any]:
+    from golden_gen.operator_inputs import input_definition
+
+    if profile.input_definition and profile.input_definition != input_definition(
+        profile.input_rule
+    ):
+        raise ValueError("operator normative input definition differs from the implemented rule")
     rule = reference_rule(profile.input_rule)
     expected = rule["expected"]
     if (

@@ -230,7 +230,7 @@ fn main() -> Result<()> {
         };
         std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN", path);
         std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT", output);
-        if is_target && cli.control {
+        if cli.control {
             std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CONTROL", "1");
         }
         let prompts = plan

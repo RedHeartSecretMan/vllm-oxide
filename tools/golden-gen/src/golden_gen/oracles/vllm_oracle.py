@@ -77,6 +77,10 @@ def _extract_full_logits(completion: Any, n: int, vocab_size: int) -> NDArray[np
                 f"silent corruption."
             )
         for tok_id, logprob_obj in step_dict.items():
+            if type(tok_id) is not int or not 0 <= tok_id < vocab_size:
+                raise RuntimeError(
+                    f"vLLM raw-logit token ID is outside the declared vocabulary at step {t}"
+                )
             logits[t, tok_id] = logprob_obj.logprob
     return logits
 

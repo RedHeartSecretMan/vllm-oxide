@@ -51,12 +51,17 @@ class OperatorProfile(BaseModel):
     dtype: str = Field(min_length=1)
     shape: list[int] = Field(min_length=1)
     input_rule: str = Field(min_length=1)
+    input_definition: dict[str, Any] = Field(default_factory=dict)
     required_faults: list[str] = Field(min_length=1)
 
 
 class BehaviorCase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     case_id: str = Field(min_length=1)
+    mode: Literal["free_generation", "fixed_prefix_execution", "unforced_control"] = (
+        "free_generation"
+    )
+    split: Literal["development", "calibration", "acceptance"] = "calibration"
     required_checks: list[str] = Field(min_length=1)
     scenario: dict[str, Any]
     engine_options: dict[str, Any] = Field(default_factory=dict)
@@ -69,6 +74,17 @@ class Registry(BaseModel):
     numerical_cases: list[NumericalCase] = Field(min_length=1)
     operator_profiles: list[OperatorProfile] = Field(min_length=1)
     behavior_cases: list[BehaviorCase] = Field(min_length=1)
+    case_sources: dict[str, Any] = Field(default_factory=dict)
+    literal_sources: dict[str, Any] = Field(default_factory=dict)
+    member_prompt_literals: dict[str, Any] = Field(default_factory=dict)
+    fault_matrix: list[dict[str, Any]] = Field(default_factory=list)
+    behavior_check_definitions: dict[str, str] = Field(default_factory=dict)
+    engine_option_semantics: dict[str, Any] = Field(default_factory=dict)
+    expected_counts: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    protocol_rules: dict[str, str] = Field(default_factory=dict)
+    auxiliary_operators: dict[str, Any] = Field(default_factory=dict)
+    tokenizer_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    legacy_manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def unique_cases(self) -> Self:
@@ -233,6 +249,8 @@ def release_verdict(
             if evidence is None:
                 continue
             checks = evidence.get("checks", {})
+            if evidence.get("evidence_complete") is False:
+                reasons.append("incomplete_behavior_coverage")
             if set(checks) != set(behavior_case.required_checks) or any(
                 type(v) is not bool for v in checks.values()
             ):

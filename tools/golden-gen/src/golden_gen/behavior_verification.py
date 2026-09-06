@@ -38,6 +38,8 @@ class BehaviorScenario(BaseModel):
 
 
 def compare_behavior(case: BehaviorCase, raw: dict[str, Any]) -> dict[str, Any]:
+    if case.mode != "free_generation":
+        raise ValueError("fixed-prefix execution cannot masquerade as free generation")
     scenario = BehaviorScenario.model_validate(case.scenario)
     if (raw.get("protocol"), raw.get("schema_version"), raw.get("mode")) != (
         PROTOCOL,
@@ -60,6 +62,7 @@ def compare_behavior(case: BehaviorCase, raw: dict[str, Any]) -> dict[str, Any]:
         True,
     )
     eos_observed = False
+    eos_policy_violation = False
     errors_observed = False
     next_id = 0
     for expected, actual in zip(scenario.calls, calls, strict=True):
@@ -114,7 +117,10 @@ def compare_behavior(case: BehaviorCase, raw: dict[str, Any]) -> dict[str, Any]:
                 valid &= not any(t in eos for t in tokens[:-1])
                 valid &= bool(tokens) and (tokens[-1] in eos or len(tokens) == params.max_tokens)
                 checks["stop_policy"] &= valid
-                eos_observed |= valid and bool(tokens) and tokens[-1] in eos
+                eos_observed |= (
+                    valid and bool(tokens) and tokens[-1] in eos and len(tokens) < params.max_tokens
+                )
+                eos_policy_violation |= not valid and any(t in eos for t in tokens)
     checks["resolved_eos_stop"] = eos_observed
     checks["rejected_before_admission"] &= errors_observed
     checks["contextual_error"] &= errors_observed
@@ -123,8 +129,13 @@ def compare_behavior(case: BehaviorCase, raw: dict[str, Any]) -> dict[str, Any]:
         or not set(case.required_checks) <= checks.keys()
     ):
         raise ValueError("unsupported/duplicate public behavior check")
+    complete = (
+        "resolved_eos_stop" not in case.required_checks or eos_observed or eos_policy_violation
+    )
     return {
         "protocol": PROTOCOL,
         "case_id": case.case_id,
+        "evidence_complete": complete,
+        "missing_mechanisms": [] if complete else ["resolved_eos_stop"],
         "checks": {key: checks[key] for key in case.required_checks},
     }

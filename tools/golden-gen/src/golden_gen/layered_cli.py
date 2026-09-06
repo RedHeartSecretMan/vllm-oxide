@@ -13,7 +13,7 @@ from typing import Any
 from golden_gen import config
 from golden_gen.fixed_prefix import validate_capture, validate_control_capture
 from golden_gen.layered_accuracy import PROTOCOL
-from golden_gen.layered_artifacts import atomic_json, sha, source_identity, write_marker
+from golden_gen.layered_artifacts import atomic_json, bound_file, sha, source_identity, write_marker
 from golden_gen.layered_manifest import evaluate_manifest
 from golden_gen.layered_release import (
     POLICY_PATH,
@@ -82,6 +82,20 @@ def _auxiliary_definition(
     case = next((c for c in registry.behavior_cases if c.case_id == verification_id), None)
     if case is None:
         raise ValueError("unknown auxiliary verification")
+    if case.mode != "free_generation":
+        raise ValueError("execution behavior is derived from its guarded numerical groups")
+    if case.split == "acceptance":
+        values, _ = definition_document(repo, POLICY_PATH)
+        policy = BudgetPolicy.model_validate(values)
+        if (
+            policy.values is None
+            or policy.registry_sha256 != digest
+            or any(
+                policy.operator_budgets.get(p.profile_id) is None
+                for p in registry.operator_profiles
+            )
+        ):
+            raise ValueError("budgets_pending: independent behavior acceptance remains sealed")
     from golden_gen.behavior_verification import BehaviorScenario
 
     scenario = BehaviorScenario.model_validate(case.scenario)
@@ -113,8 +127,11 @@ def collect_group(
         "primary",
         "replay",
         "control",
+        "control-replay",
     ):
         raise ValueError("invalid layered collector engine/variant")
+    if variant == "control-replay" and engine != "candidate":
+        raise ValueError("public control replay is candidate-only")
     if (
         not group_id
         or any(
@@ -277,7 +294,7 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
     source = source_identity(args.repo_root)
     group, registry_sha = _group(args.repo_root, args.group)
     runtime = collect_release_runtime(args.model_dir, args.repo_root)
-    control = args.variant == "control"
+    control = args.variant in ("control", "control-replay")
     evidence: dict[str, Any] = {}
     setup_paths = []
     if args.engine == "candidate":
@@ -314,7 +331,7 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
         print(completed.stdout, end="")
         print(completed.stderr, end="", file=sys.stderr)
         evidence = json.loads(completed.stdout)
-        if evidence["source"] != source:
+        if evidence["source"] != source or evidence.get("cuda_feature_enabled") is not True:
             raise ValueError("candidate build source metadata mismatch")
         capture = json.loads((output / "capture.json").read_text())
     else:
@@ -333,7 +350,7 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
         try:
             for index, setup in enumerate(group.setup_calls):
                 path = output / f"setup-{index}.capture.json"
-                atomic_json(path, collector(setup, oracle))
+                atomic_json(path, collector(setup, oracle, control=control))
                 setup_paths.append(path)
             capture = collector(group.plan, oracle, control=control)
             if args.engine == "baseline":
@@ -406,7 +423,7 @@ def main() -> None:
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--group")
     parser.add_argument("--engine", choices=["reference", "baseline", "candidate"])
-    parser.add_argument("--variant", choices=["primary", "replay", "control"])
+    parser.add_argument("--variant", choices=["primary", "replay", "control", "control-replay"])
     parser.add_argument("--candidate-binary", type=Path)
     parser.add_argument("--manifest", type=Path)
     args = parser.parse_args()
@@ -439,7 +456,10 @@ def main() -> None:
             if result.get("observation_complete") or result.get("accepting"):
                 source = source_identity(args.repo_root)
                 prior = (
-                    args.run_dir / "layered-markers/observation.complete.json"
+                    bound_file(
+                        args.manifest.parent,
+                        json.loads(args.manifest.read_text())["calibration_marker"],
+                    )
                     if authoritative
                     else None
                 )

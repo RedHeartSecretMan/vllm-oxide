@@ -329,7 +329,13 @@ impl LLM {
         }
         #[cfg(feature = "internal-golden")]
         if let Some(replay) = replay.as_mut() {
-            if let Err(error) = replay.bind_requests(&request_ids, replay_cache_blocks) {
+            if let Err(error) = replay.bind_requests(
+                &request_ids,
+                replay_cache_blocks,
+                self.engine.scheduler.diagnostic_eos_token_ids(),
+                self.max_model_len,
+                &self.device,
+            ) {
                 return Err(self.abort_after_capture_error(error));
             }
         }
@@ -422,10 +428,6 @@ impl LLM {
         }
 
         let elapsed = start.elapsed();
-        #[cfg(feature = "internal-golden")]
-        if let Some(replay) = replay.take() {
-            replay.finish(&completed_outputs)?;
-        }
         let mut results =
             order_request_outputs(&request_ids, completed_outputs).with_context(|| {
                 format!(
@@ -460,6 +462,10 @@ impl LLM {
             );
         }
 
+        #[cfg(feature = "internal-golden")]
+        if let Some(replay) = replay.take() {
+            replay.finish(&results)?;
+        }
         #[cfg(feature = "internal-golden")]
         if let Some(capture) = capture.take() {
             capture
@@ -2662,9 +2668,20 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(control[0].token_ids, vec![42, 42]);
+            let returned_text = control[0].text.clone();
             let control: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(control_path).unwrap()).unwrap();
             assert_eq!(control["mode"], "collection_control");
+            assert_eq!(
+                control["public_call"]["outputs"][0]["token_ids"],
+                serde_json::json!([42, 42])
+            );
+            assert_eq!(control["public_call"]["outputs"][0]["text"], returned_text);
+            assert_eq!(control["public_call"]["binding"]["forcing_enabled"], false);
+            assert_eq!(
+                control["public_call"]["binding"]["request_ids"],
+                serde_json::json!([0])
+            );
             assert_eq!(control["rows"][0]["logits"], capture["rows"][0]["logits"]);
         }
 

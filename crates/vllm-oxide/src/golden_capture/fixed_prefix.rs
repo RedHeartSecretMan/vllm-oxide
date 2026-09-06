@@ -49,6 +49,8 @@ pub(crate) struct ReplaySession {
     destination: PathBuf,
     rows: usize,
     execution_events: Vec<serde_json::Value>,
+    public_params: Vec<serde_json::Value>,
+    public_binding: Option<serde_json::Value>,
 }
 
 impl ReplaySession {
@@ -137,6 +139,9 @@ impl ReplaySession {
         write!(file, "{prefix},\"rows\":[")?;
         let next_rows = vec![0; plan.members.len()];
         let advances = vec![Vec::new(); plan.members.len()];
+        let public_params=params.iter().map(|p|serde_json::json!({"max_tokens":p.max_tokens,"ignore_eos":p.ignore_eos,
+            "temperature":p.temperature,"top_k":p.top_k,"top_p":p.top_p,"presence_penalty":p.presence_penalty,
+            "frequency_penalty":p.frequency_penalty,"repetition_penalty":p.repetition_penalty})).collect();
         Ok(Some(Self {
             plan,
             request_ids: Vec::new(),
@@ -149,10 +154,19 @@ impl ReplaySession {
             destination,
             rows: 0,
             execution_events: Vec::new(),
+            public_params,
+            public_binding: None,
         }))
     }
 
-    pub(crate) fn bind_requests(&mut self, ids: &[usize], cache_blocks: usize) -> Result<()> {
+    pub(crate) fn bind_requests(
+        &mut self,
+        ids: &[usize],
+        cache_blocks: usize,
+        eos: &[u32],
+        max_model_len: usize,
+        device: &candle_core::Device,
+    ) -> Result<()> {
         if !self.request_ids.is_empty()
             || ids.len() != self.plan.members.len()
             || ids.iter().collect::<HashSet<_>>().len() != ids.len()
@@ -162,6 +176,11 @@ impl ReplaySession {
         }
         self.request_ids = ids.to_vec();
         self.cache_blocks = Some(cache_blocks);
+        self.public_binding = Some(
+            serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
+            "mode":"behavior_binding","request_ids":ids,"prompt_lengths":self.plan.members.iter().map(|m|m.prompt.len()).collect::<Vec<_>>(),
+            "eos_token_ids":eos,"max_model_len":max_model_len,"device":if device.is_cuda(){"cuda:0"}else{"cpu"},"forcing_enabled":!self.control}),
+        );
         Ok(())
     }
 
@@ -281,6 +300,14 @@ impl ReplaySession {
         }
         self.file.write_all(b"],\"execution_events\":")?;
         serde_json::to_writer(&mut self.file, &self.execution_events)?;
+        self.file.write_all(b",\"public_call\":")?;
+        serde_json::to_writer(
+            &mut self.file,
+            &serde_json::json!({"call_id":self.plan.call_id,
+            "prompts":self.plan.members.iter().map(|m|&m.prompt).collect::<Vec<_>>(),"params":self.public_params,
+            "binding":self.public_binding.context("missing public request binding")?,"error":null,
+            "outputs":outputs.iter().map(|o|serde_json::json!({"request_id":o.request_id,"token_ids":o.token_ids,"text":o.text,"finished":o.finished})).collect::<Vec<_>>()}),
+        )?;
         writeln!(
             self.file,
             ",\"allocated_cache_blocks\":{},\"complete\":true}}",

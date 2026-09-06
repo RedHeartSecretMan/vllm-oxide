@@ -66,3 +66,32 @@ def test_operator_capture_recomputes_error_and_cannot_turn_cpu_into_gpu_evidence
     assert result[0]["fault_checks"] == {}  # Missing fault evidence is never inferred.
     with pytest.raises(ValueError, match="CUDA"):
         verify_operator_capture([profile], {**raw, "device": "cpu"}, require_cuda=True)
+
+
+def test_declared_operator_input_is_not_overridden_by_a_matching_rule_id() -> None:
+    from golden_gen.layered_release import OperatorProfile
+    from golden_gen.operator_inputs import input_definition
+    from golden_gen.operator_verification import compare_operator
+
+    definition = input_definition("materialized_halfway_sum_v1")
+    definition["epsilon"] = 0.1
+    profile = OperatorProfile(
+        profile_id="rms",
+        operator="rmsnorm",
+        dtype="bfloat16",
+        shape=[1, 4],
+        input_rule="materialized_halfway_sum_v1",
+        input_definition=definition,
+        required_faults=["wrong_epsilon"],
+    )
+    with pytest.raises(ValueError, match="normative input definition"):
+        compare_operator(
+            profile,
+            dict(
+                rule_id=profile.input_rule,
+                input_shape=[1, 4],
+                input_dtype="bfloat16",
+                output_shape=[1, 4],
+                values=[1, 1, 1, 1],
+            ),
+        )

@@ -48,6 +48,14 @@ def test_vllm_short_logprobs_fail_instead_of_zero_padding():
         _extract_full_logits(completion, n=2, vocab_size=1)
 
 
+def test_vllm_full_count_does_not_allow_negative_vocabulary_identity_alias():
+    completion = SimpleNamespace(
+        logprobs=[{0: SimpleNamespace(logprob=1.0), -1: SimpleNamespace(logprob=2.0)}]
+    )
+    with pytest.raises(RuntimeError, match="token ID"):
+        _extract_full_logits(completion, n=1, vocab_size=2)
+
+
 def test_oracle_construction_pins_tokenizer_dtype_eager_and_non_fallback_kernels():
     reference = reference_model_kwargs()
     baseline = baseline_engine_kwargs()
