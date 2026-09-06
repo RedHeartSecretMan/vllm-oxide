@@ -182,6 +182,27 @@ fn allocate_kv_cache_with_available_memory(
         gpu_memory_utilization,
         max_model_len,
     )?;
+    #[cfg(feature = "internal-golden")]
+    let plan = {
+        let mut plan = plan;
+        if let Some(value) = std::env::var_os("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CACHE_BLOCKS") {
+            if std::env::var_os(crate::golden_capture::fixed_prefix::PLAN_ENV).is_none() {
+                bail!("private cache capacity requires a fixed-prefix plan");
+            }
+            let blocks: usize = value
+                .to_str()
+                .context("private cache capacity is not UTF-8")?
+                .parse()
+                .context("private cache capacity is not a positive integer")?;
+            let required = max_model_len.div_ceil(cache.geometry().block_size);
+            if blocks == 0 || blocks < required || blocks > plan.num_blocks {
+                bail!("private cache capacity must fit the declared context and available budget");
+            }
+            plan.num_blocks = blocks;
+            plan.pool_bytes = blocks * plan.bytes_per_block;
+        }
+        plan
+    };
     let allocation_bytes = plan.num_blocks * plan.bytes_per_block;
     cache.allocate(plan.num_blocks, device).map_err(|error| {
         anyhow!(

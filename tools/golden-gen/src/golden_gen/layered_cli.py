@@ -1,0 +1,342 @@
+"""Separate layered workflow. Every GPU owner is a fresh guarded worker process."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from golden_gen import config
+from golden_gen.fixed_prefix import validate_capture, validate_control_capture
+from golden_gen.layered_accuracy import PROTOCOL
+from golden_gen.layered_artifacts import atomic_json, sha, source_identity, write_marker
+from golden_gen.layered_manifest import evaluate_manifest
+from golden_gen.layered_release import (
+    POLICY_PATH,
+    REGISTRY_PATH,
+    BudgetPolicy,
+    NumericalCase,
+    Registry,
+    definition_document,
+)
+
+
+def _group(repo: Path, group_id: str) -> tuple[NumericalCase, str]:
+    data, digest = definition_document(repo, REGISTRY_PATH)
+    registry = Registry.model_validate(data)
+    group = next(
+        (g for g in registry.numerical_cases if g.plan.execution_group_id == group_id), None
+    )
+    if group is None:
+        raise ValueError("execution group is absent from the approved registry")
+    if group.split == "acceptance":
+        values, _ = definition_document(repo, POLICY_PATH)
+        policy = BudgetPolicy.model_validate(values)
+        if (
+            policy.values is None
+            or policy.registry_sha256 != digest
+            or any(
+                policy.operator_budgets.get(p.profile_id) is None
+                for p in registry.operator_profiles
+            )
+        ):
+            raise ValueError("budgets_pending: independent acceptance inputs remain sealed")
+    if group.plan.vocab_size != config.VOCAB_SIZE or any(
+        p.vocab_size != config.VOCAB_SIZE for p in group.setup_calls
+    ):
+        raise ValueError("release replay requires the full pinned vocabulary")
+    return group, digest
+
+
+def _artifact(path: Path, root: Path) -> dict[str, str]:
+    return dict(path=path.relative_to(root).as_posix(), sha256=sha(path))
+
+
+def collect_group(
+    repo: Path,
+    run_dir: Path,
+    model: Path,
+    group_id: str,
+    engine: str,
+    variant: str,
+    binary: Path | None = None,
+) -> dict[str, Any]:
+    from golden_gen.guard import run_guarded
+
+    source = source_identity(repo)
+    _group(
+        repo, group_id
+    )  # Freeze/approval check before creating files or importing a GPU runtime.
+    if engine not in ("reference", "baseline", "candidate") or variant not in (
+        "primary",
+        "replay",
+        "control",
+    ):
+        raise ValueError("invalid layered collector engine/variant")
+    if (
+        not group_id
+        or any(
+            c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+            for c in group_id
+        )
+        or group_id in (".", "..")
+    ):
+        raise ValueError("unsafe execution group identifier")
+    approved_root = Path("/tmp/vllm-oxide-dag-v0.2.0/t45-artifacts")
+    if not run_dir.resolve().is_relative_to(approved_root) or run_dir.resolve() == approved_root:
+        raise ValueError("layered run must use a dedicated ticket artifact directory")
+    run_dir.mkdir(mode=0o700, exist_ok=True)
+    output = run_dir / f"{group_id}-{engine}-{variant}"
+    output.mkdir(mode=0o700)  # never resume or overwrite an incomplete owner
+    command = [
+        sys.executable,
+        "-m",
+        "golden_gen.layered_cli",
+        "worker",
+        "--repo-root",
+        str(repo),
+        "--run-dir",
+        str(run_dir),
+        "--model-dir",
+        str(model),
+        "--group",
+        group_id,
+        "--engine",
+        engine,
+        "--variant",
+        variant,
+    ]
+    if binary is not None:
+        command.extend(["--candidate-binary", str(binary)])
+    guard_path = output / "guard.json"
+    run_guarded(command, guard_path)
+    guard = json.loads(guard_path.read_text())
+    if guard["after"]["compute_processes"]:
+        raise ValueError("GPU owner left an active compute process")
+    metadata = json.loads((output / "worker.json").read_text())
+    if metadata["source"] != source or metadata["driver_pid"] != guard["child_pid"]:
+        raise ValueError("worker metadata does not belong to this guarded source/process")
+    metadata["guard"] = _artifact(guard_path, run_dir)
+    atomic_json(output / "receipt.json", metadata)
+    return dict(
+        protocol=PROTOCOL,
+        schema_version=1,
+        accepting=False,
+        execution_group_id=group_id,
+        engine=engine,
+        variant=variant,
+        capture=_artifact(output / "capture.json", run_dir),
+        receipt=_artifact(output / "receipt.json", run_dir),
+    )
+
+
+def _worker(args: argparse.Namespace) -> None:
+    # The outer process owns the guard and logs remain complete even on failure.
+    output = args.run_dir / f"{args.group}-{args.engine}-{args.variant}"
+    with (output / "stdout.log").open("x") as stdout, (output / "stderr.log").open("x") as stderr:
+        os.dup2(stdout.fileno(), 1)
+        os.dup2(stderr.fileno(), 2)
+        _worker_capture(args, output)
+
+
+def _worker_capture(args: argparse.Namespace, output: Path) -> None:
+    from golden_gen.environment import collect_release_runtime, validate_deterministic_environment
+    from golden_gen.fixed_prefix_oracles import capture_baseline, capture_reference
+
+    validate_deterministic_environment(os.environ)
+    source = source_identity(args.repo_root)
+    group, registry_sha = _group(args.repo_root, args.group)
+    runtime = collect_release_runtime(args.model_dir, args.repo_root)
+    control = args.variant == "control"
+    evidence: dict[str, Any] = {}
+    setup_paths = []
+    if args.engine == "candidate":
+        if args.candidate_binary is None:
+            raise ValueError("candidate collection requires an already-built reviewed binary")
+        plan_path, options_path = output / "plan.json", output / "options.json"
+        atomic_json(plan_path, group.plan.model_dump())
+        atomic_json(options_path, group.engine_options)
+        command = [
+            str(args.candidate_binary),
+            "--repo-root",
+            str(args.repo_root),
+            "--measurement-commit",
+            source["commit"],
+            "--measurement-tree",
+            source["tree"],
+            "--model-path",
+            str(args.model_dir),
+            "--plan",
+            str(plan_path),
+            "--output",
+            str(output / "capture.json"),
+            "--options",
+            str(options_path),
+        ]
+        for index, setup in enumerate(group.setup_calls):
+            path = output / f"setup-{index}.plan.json"
+            atomic_json(path, setup.model_dump())
+            command.extend(["--setup-plan", str(path)])
+            setup_paths.append(output / f"setup-{index}.capture.json")
+        if control:
+            command.append("--control")
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        print(completed.stdout, end="")
+        print(completed.stderr, end="", file=sys.stderr)
+        evidence = json.loads(completed.stdout)
+        if evidence["source"] != source:
+            raise ValueError("candidate build source metadata mismatch")
+        capture = json.loads((output / "capture.json").read_text())
+    else:
+        if args.engine == "reference":
+            from golden_gen.oracles.transformers_oracle import TransformersOracle
+
+            oracle: Any = TransformersOracle(args.model_dir)
+            collector = capture_reference
+        else:
+            from golden_gen.oracles.vllm_oracle import VllmOracle
+
+            oracle = VllmOracle(
+                args.model_dir, fixed_prefix=True, execution_options=group.engine_options
+            )
+            collector = capture_baseline
+        try:
+            for index, setup in enumerate(group.setup_calls):
+                path = output / f"setup-{index}.capture.json"
+                atomic_json(path, collector(setup, oracle))
+                setup_paths.append(path)
+            capture = collector(group.plan, oracle, control=control)
+            if args.engine == "baseline":
+                evidence["worker_states"] = [x.model_dump() for x in oracle.protocol_evidence()]
+            else:
+                import torch
+
+                evidence.update(
+                    deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
+                    warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
+                    attention_backend="SDPBackend.MATH",
+                )
+            atomic_json(output / "capture.json", capture)
+        finally:
+            oracle.close()
+    (validate_control_capture if control else validate_capture)(group.plan, capture)
+    if (
+        args.engine == "candidate"
+        and "test_kv_blocks" in group.engine_options
+        and capture.get("allocated_cache_blocks") != group.engine_options["test_kv_blocks"]
+    ):
+        raise ValueError("candidate did not use the requested private KV capacity")
+    if (
+        args.engine == "baseline"
+        and "baseline_blocks" in group.engine_options
+        and capture.get("allocated_cache_blocks") != group.engine_options["baseline_blocks"]
+    ):
+        raise ValueError("baseline did not use its declared KV capacity")
+    metadata = dict(
+        protocol=PROTOCOL,
+        schema_version=1,
+        source=source,
+        registry_sha256=registry_sha,
+        engine=args.engine,
+        mode="collection_control" if control else "fixed_prefix",
+        driver_pid=os.getpid(),
+        capture_sha256=sha(output / "capture.json"),
+        runtime=runtime.model_dump(),
+        engine_evidence=evidence,
+        kernel={
+            "reference": config.REFERENCE_KERNEL_PATH,
+            "baseline": config.BASELINE_KERNEL_PATH,
+            "candidate": config.CANDIDATE_KERNEL_PATH,
+        }[args.engine],
+        model=dict(
+            revision=config.MODEL_REVISION,
+            config_sha256=config.MODEL_CONFIG_SHA256,
+            tokenizer_sha256=config.TOKENIZER_SHA256,
+            weights_sha256=config.MODEL_WEIGHTS_SHA256,
+            dtype="bfloat16",
+            vocab_size=config.VOCAB_SIZE,
+        ),
+        setup_captures=[_artifact(p, args.run_dir) for p in setup_paths],
+    )
+    if args.engine == "candidate":
+        metadata.update(
+            binary_sha256=sha(args.candidate_binary), build_source_id=evidence["build_source_id"]
+        )
+    atomic_json(output / "worker.json", metadata)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["collect", "worker", "observe", "authoritative"])
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--model-dir", type=Path)
+    parser.add_argument("--group")
+    parser.add_argument("--engine", choices=["reference", "baseline", "candidate"])
+    parser.add_argument("--variant", choices=["primary", "replay", "control"])
+    parser.add_argument("--candidate-binary", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    args = parser.parse_args()
+    if args.action in ("collect", "worker") and (
+        args.model_dir is None or args.group is None or args.engine is None or args.variant is None
+    ):
+        parser.error("collection requires model-dir, group, engine and variant")
+    if args.action == "worker":
+        _worker(args)
+        return
+    try:
+        if args.action == "collect":
+            result = collect_group(
+                args.repo_root,
+                args.run_dir,
+                args.model_dir,
+                args.group,
+                args.engine,
+                args.variant,
+                args.candidate_binary,
+            )
+        else:
+            if args.manifest is None:
+                parser.error("comparison requires --manifest")
+            authoritative = args.action == "authoritative"
+            result = evaluate_manifest(args.repo_root, args.manifest, authoritative=authoritative)
+            output = args.run_dir / f"{args.action}.json"
+            atomic_json(output, result)
+            if result.get("observation_complete") or result.get("accepting"):
+                source = source_identity(args.repo_root)
+                prior = (
+                    args.run_dir / "layered-markers/observation.complete.json"
+                    if authoritative
+                    else None
+                )
+                write_marker(
+                    args.run_dir,
+                    "authoritative" if authoritative else "observation",
+                    source,
+                    [output, args.manifest],
+                    prior,
+                )
+        print(json.dumps(result, sort_keys=True))
+        if args.action == "authoritative" and result.get("verdict") != "PASS":
+            raise SystemExit(2)
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        print(
+            json.dumps(
+                dict(
+                    protocol=PROTOCOL,
+                    schema_version=1,
+                    verdict="INVALID",
+                    accepting=False,
+                    reasons=[str(error)],
+                )
+            )
+        )
+        raise SystemExit(2) from error
+
+
+if __name__ == "__main__":
+    main()

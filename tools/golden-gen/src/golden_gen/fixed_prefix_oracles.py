@@ -6,15 +6,26 @@ from typing import Any
 
 import numpy as np
 
-from golden_gen.fixed_prefix import ReplayPlan, validate_capture
+from golden_gen.fixed_prefix import (
+    ReplayPlan,
+    history_hash,
+    validate_capture,
+    validate_control_capture,
+)
 from golden_gen.replay import tensor_bits_equal
 
 
 def prediction_row(
-    plan: ReplayPlan, member_id: str, request_id: int, step: int, logits: list[float], phase: str
+    plan: ReplayPlan,
+    member_id: str,
+    request_id: int,
+    step: int,
+    logits: list[float],
+    phase: str,
+    control_history: list[int] | None = None,
 ) -> dict[str, Any]:
     member = next(m for m in plan.members if m.member_id == member_id)
-    history = plan.history(member_id, step)
+    history = plan.history(member_id, step) if control_history is None else control_history
     predicted = max(range(len(logits)), key=lambda token: logits[token])
     return dict(
         kind="prediction",
@@ -24,13 +35,13 @@ def prediction_row(
         member_id=member_id,
         request_id=request_id,
         step=step,
-        history_sha256=plan.history_sha256(member_id, step),
+        history_sha256=history_hash(history),
         position=len(history) - 1,
         effective_length=len(history),
         phase=phase,
         row_shape=[len(logits)],
         predicted_token_id=predicted,
-        advance_token_id=member.continuation[step],
+        advance_token_id=member.continuation[step] if control_history is None else predicted,
         logits=logits,
     )
 
@@ -38,11 +49,12 @@ def prediction_row(
 class ReferenceForcer:
     """HF saves next_token_logits *after* processors: never modify its input."""
 
-    def __init__(self, plan: ReplayPlan) -> None:
+    def __init__(self, plan: ReplayPlan, *, control: bool = False) -> None:
         self.plan = plan
         self.prompt_width = max(len(m.prompt) for m in plan.members)
         self.steps = max(len(m.continuation) for m in plan.members)
         self.rows: list[dict[str, Any]] = []
+        self.control = control
 
     def __call__(self, input_ids: Any, scores: Any) -> Any:
         step = input_ids.shape[1] - self.prompt_width
@@ -59,6 +71,15 @@ class ReferenceForcer:
                 forced[index, 0] = 0.0
                 continue
             expected = self.plan.history(member.member_id, step)
+            if self.control:
+                expected = [
+                    *member.prompt,
+                    *[
+                        r["advance_token_id"]
+                        for r in self.rows
+                        if r["member_id"] == member.member_id
+                    ],
+                ]
             left_padding = self.prompt_width - len(member.prompt)
             if input_ids[index, left_padding:].tolist() != expected:
                 raise ValueError("reference consumed a different frozen history")
@@ -69,21 +90,23 @@ class ReferenceForcer:
                 step,
                 scores[index].float().cpu().tolist(),
                 "prefill" if step == 0 else "decode",
+                expected if self.control else None,
             )
             self.rows.append(row)
-            forced[index] = float("-inf")
-            forced[index, member.continuation[step]] = 0.0
+            if not self.control:
+                forced[index] = float("-inf")
+                forced[index, member.continuation[step]] = 0.0
         return forced
 
 
-def capture_reference(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
+def capture_reference(plan: ReplayPlan, oracle: Any, *, control: bool = False) -> dict[str, Any]:
     """One real generate call with incremental KV, never per-step re-prefill."""
     import copy
 
     import torch
     from transformers import LogitsProcessorList
 
-    forcer = ReferenceForcer(plan)
+    forcer = ReferenceForcer(plan, control=control)
     width = forcer.prompt_width
     pad = oracle.tokenizer.pad_token_id
     ids = torch.tensor(
@@ -150,10 +173,9 @@ def capture_reference(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
                 logits_processor=LogitsProcessorList([forcer]),
             )
         for index, member in enumerate(plan.members):
-            if (
-                result.sequences[index, width : width + len(member.continuation)].cpu().tolist()
-                != member.continuation
-            ):
+            if result.sequences[index, width : width + len(member.continuation)].cpu().tolist() != [
+                r["advance_token_id"] for r in forcer.rows if r["member_id"] == member.member_id
+            ]:
                 raise ValueError("reference did not advance the exact frozen stream")
         for row in forcer.rows:
             saved = result.logits[row["step"]][row["request_id"]].float().cpu().tolist()
@@ -166,7 +188,7 @@ def capture_reference(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
     capture = dict(
         protocol=plan.protocol,
         schema_version=1,
-        mode="fixed_prefix",
+        mode="collection_control" if control else "fixed_prefix",
         ignore_eos=True,
         execution_group_id=plan.execution_group_id,
         call_id=plan.call_id,
@@ -174,11 +196,11 @@ def capture_reference(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
         execution_events=events,
         complete=True,
     )
-    validate_capture(plan, capture)
+    (validate_control_capture if control else validate_capture)(plan, capture)
     return capture
 
 
-def capture_baseline(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
+def capture_baseline(plan: ReplayPlan, oracle: Any, *, control: bool = False) -> dict[str, Any]:
     from vllm import SamplingParams
 
     from golden_gen.oracles.vllm_oracle import _extract_full_logits
@@ -193,7 +215,11 @@ def capture_baseline(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
             max_tokens=len(m.continuation),
             ignore_eos=True,
             logprobs=-1,
-            extra_args={"fixed_prefix_plan": plan.model_dump(), "fixed_prefix_member": m.member_id},
+            extra_args={
+                "fixed_prefix_plan": plan.model_dump(),
+                "fixed_prefix_member": m.member_id,
+                "fixed_prefix_control": control,
+            },
         )
         for m in plan.members
     ]
@@ -206,7 +232,8 @@ def capture_baseline(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
         if list(output.prompt_token_ids) != member.prompt or len(output.outputs) != 1:
             raise ValueError("baseline fixed replay prompt/candidate count mismatch")
         completion = output.outputs[0]
-        if list(completion.token_ids) != member.continuation:
+        member_rows = [r for r in rows if r["member_id"] == member.member_id]
+        if list(completion.token_ids) != [r["advance_token_id"] for r in member_rows]:
             raise ValueError("baseline did not advance the complete frozen stream")
         raw = _extract_full_logits(completion, len(member.continuation), plan.vocab_size)
         member_rows = [r for r in rows if r["member_id"] == member.member_id]
@@ -221,13 +248,15 @@ def capture_baseline(plan: ReplayPlan, oracle: Any) -> dict[str, Any]:
     capture = dict(
         protocol=plan.protocol,
         schema_version=1,
-        mode="fixed_prefix",
+        mode="collection_control" if control else "fixed_prefix",
         ignore_eos=True,
         execution_group_id=plan.execution_group_id,
         call_id=plan.call_id,
         rows=rows,
         execution_events=evidence[0]["execution_events"],
+        allocated_cache_blocks=evidence[0]["allocated_cache_blocks"],
+        cache_block_size=evidence[0]["cache_block_size"],
         complete=True,
     )
-    validate_capture(plan, capture)
+    (validate_control_capture if control else validate_capture)(plan, capture)
     return capture

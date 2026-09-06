@@ -15,6 +15,7 @@ use crate::{RequestOutput, SamplingParams};
 
 pub(crate) const PLAN_ENV: &str = "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN";
 pub(crate) const OUTPUT_ENV: &str = "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT";
+pub(crate) const CONTROL_ENV: &str = "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CONTROL";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +41,9 @@ pub(crate) struct ReplaySession {
     plan: Plan,
     request_ids: Vec<usize>,
     next_rows: Vec<usize>,
+    advances: Vec<Vec<u32>>,
+    control: bool,
+    cache_blocks: Option<usize>,
     file: File,
     stage: PathBuf,
     destination: PathBuf,
@@ -53,7 +57,15 @@ impl ReplaySession {
         params: &[SamplingParams],
     ) -> Result<Option<Self>> {
         let (request, destination) = (std::env::var_os(PLAN_ENV), std::env::var_os(OUTPUT_ENV));
+        let control = match std::env::var(CONTROL_ENV) {
+            Ok(value) if value == "1" => true,
+            Err(std::env::VarError::NotPresent) => false,
+            _ => bail!("fixed-prefix control flag must be absent or exactly 1"),
+        };
         if request.is_none() && destination.is_none() {
+            if control {
+                bail!("orphaned fixed-prefix control flag");
+            }
             return Ok(None);
         }
         let request = request.context("fixed-prefix plan is missing")?;
@@ -118,15 +130,20 @@ impl ReplaySession {
             .mode(0o600)
             .open(&stage)?;
         let header = serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
-            "execution_group_id":plan.execution_group_id,"call_id":plan.call_id,"mode":"fixed_prefix","ignore_eos":true});
+            "execution_group_id":plan.execution_group_id,"call_id":plan.call_id,
+            "mode":if control {"collection_control"}else{"fixed_prefix"},"ignore_eos":true});
         let mut prefix = serde_json::to_string(&header)?;
         prefix.pop();
         write!(file, "{prefix},\"rows\":[")?;
         let next_rows = vec![0; plan.members.len()];
+        let advances = vec![Vec::new(); plan.members.len()];
         Ok(Some(Self {
             plan,
             request_ids: Vec::new(),
             next_rows,
+            advances,
+            control,
+            cache_blocks: None,
             file,
             stage,
             destination,
@@ -135,14 +152,16 @@ impl ReplaySession {
         }))
     }
 
-    pub(crate) fn bind_requests(&mut self, ids: &[usize]) -> Result<()> {
+    pub(crate) fn bind_requests(&mut self, ids: &[usize], cache_blocks: usize) -> Result<()> {
         if !self.request_ids.is_empty()
             || ids.len() != self.plan.members.len()
             || ids.iter().collect::<HashSet<_>>().len() != ids.len()
+            || cache_blocks == 0
         {
             bail!("fixed request binding mismatch");
         }
         self.request_ids = ids.to_vec();
+        self.cache_blocks = Some(cache_blocks);
         Ok(())
     }
 
@@ -181,14 +200,14 @@ impl ReplaySession {
                 .context("unbound fixed request")?;
             let member = &self.plan.members[member_index];
             let step = self.next_rows[member_index];
-            let advance = *member
+            let frozen_advance = *member
                 .continuation
                 .get(step)
                 .context("fixed-prefix execution exceeded frozen rows")?;
             let history: Vec<u32> = member
                 .prompt
                 .iter()
-                .chain(&member.continuation[..step])
+                .chain(&self.advances[member_index])
                 .copied()
                 .collect();
             if planned.completion_step != step
@@ -214,6 +233,11 @@ impl ReplaySession {
             if predicted as usize != greedy {
                 bail!("raw predicted token violates greedy tie contract");
             }
+            let advance = if self.control {
+                predicted
+            } else {
+                frozen_advance
+            };
             let mut digest = Sha256::new();
             for token in &history {
                 digest.update(token.to_le_bytes());
@@ -229,7 +253,10 @@ impl ReplaySession {
             }
             serde_json::to_writer(&mut self.file, &row)?;
             self.file.flush()?;
-            executed.sampled_token = Some(advance);
+            if !self.control {
+                executed.sampled_token = Some(advance);
+            }
+            self.advances[member_index].push(advance);
             self.next_rows[member_index] += 1;
             self.rows += 1;
         }
@@ -246,7 +273,7 @@ impl ReplaySession {
                 .find(|o| o.request_id == self.request_ids[index])
                 .context("fixed output request missing")?;
             if self.next_rows[index] != member.continuation.len()
-                || output.token_ids != member.continuation
+                || output.token_ids != self.advances[index]
                 || !output.finished
             {
                 bail!("fixed-prefix output/row completeness mismatch");
@@ -254,7 +281,11 @@ impl ReplaySession {
         }
         self.file.write_all(b"],\"execution_events\":")?;
         serde_json::to_writer(&mut self.file, &self.execution_events)?;
-        self.file.write_all(b",\"complete\":true}\n")?;
+        writeln!(
+            self.file,
+            ",\"allocated_cache_blocks\":{},\"complete\":true}}",
+            self.cache_blocks.context("missing actual cache capacity")?
+        )?;
         self.file.sync_all()?;
         std::fs::hard_link(&self.stage, &self.destination)?;
         std::fs::remove_file(&self.stage)?;

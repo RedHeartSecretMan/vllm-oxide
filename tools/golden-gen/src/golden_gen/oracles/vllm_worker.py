@@ -91,7 +91,12 @@ class DeterministicWorker(Worker):  # type: ignore[misc]
                 rows.extend(processor.rows)
                 processor.rows = []
         events, self._fixed_events = self._fixed_events, []
-        return dict(rows=rows, execution_events=events)
+        return dict(
+            rows=rows,
+            execution_events=events,
+            allocated_cache_blocks=self.model_runner.kv_cache_config.num_blocks,
+            cache_block_size=self.vllm_config.cache_config.block_size,
+        )
 
     def release_worker_evidence(self, phase: str) -> dict[str, Any]:
         layers = [

@@ -15,6 +15,10 @@ from golden_gen.layered_accuracy import PROTOCOL
 Token = Annotated[int, Field(strict=True, ge=0, le=4294967295)]
 
 
+def history_hash(tokens: list[int]) -> str:
+    return hashlib.sha256(struct.pack(f"<{len(tokens)}I", *tokens)).hexdigest()
+
+
 class ReplayMember(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     member_id: str = Field(min_length=1)
@@ -51,7 +55,7 @@ class ReplayPlan(BaseModel):
     def history_sha256(self, member_id: str, step: int) -> str:
         """Version 1 history hash: concatenated little-endian unsigned 32-bit IDs."""
         tokens = self.history(member_id, step)
-        return hashlib.sha256(struct.pack(f"<{len(tokens)}I", *tokens)).hexdigest()
+        return history_hash(tokens)
 
 
 def validate_capture(plan: ReplayPlan, capture: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -135,6 +139,10 @@ def validate_execution_events(
             raise ValueError("execution token budget differs from actual inputs")
         if len(event["members"]) > 1:
             mechanisms.add("batch")
+        if any(s["request_id"] not in seen_requests for s in event["members"]) and any(
+            s["request_id"] in seen_requests and s["phase"] == "decode" for s in event["members"]
+        ):
+            mechanisms.add("waiting_admission")
         event_requests: set[int] = set()
         for item in event["members"]:
             request = item["request_id"]
@@ -191,15 +199,9 @@ def validate_execution_events(
     return mechanisms
 
 
-def require_collection_equivalence(
-    plan: ReplayPlan, forced: dict[str, Any], control: dict[str, Any]
-) -> dict[str, int]:
-    """Unforced controls prove raw preservation only on their actual shared histories.
-
-    Diverged control suffixes never enter model numerical verification. Controls
-    have their own explicit mode and cannot be passed as fixed-prefix evidence.
-    """
-    fixed = validate_capture(plan, forced)
+def validate_control_capture(
+    plan: ReplayPlan, control: dict[str, Any]
+) -> dict[str, list[dict[str, Any]]]:
     if control.get("mode") != "collection_control":
         raise ValueError("collection equivalence requires an explicitly unforced control")
     members = []
@@ -220,9 +222,17 @@ def require_collection_equivalence(
         )
     # Reuse structural validation against the control's *actual* history, not
     # against the frozen continuation. The on-disk control is never relabeled.
-    actual = validate_capture(
+    return validate_capture(
         plan.model_copy(update={"members": members}), {**control, "mode": "fixed_prefix"}
     )
+
+
+def require_collection_equivalence(
+    plan: ReplayPlan, forced: dict[str, Any], control: dict[str, Any]
+) -> dict[str, int]:
+    """Compare only actual shared histories; a control is never fixed-prefix evidence."""
+    fixed = validate_capture(plan, forced)
+    actual = validate_control_capture(plan, control)
     matched = {}
     for member in plan.members:
         count = 0

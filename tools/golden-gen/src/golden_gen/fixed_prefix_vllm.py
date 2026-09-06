@@ -12,13 +12,15 @@ from golden_gen.fixed_prefix_oracles import prediction_row
 
 class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
     def __init__(self, vllm_config: Any, device: Any, is_pin_memory: bool) -> None:
-        self.state: dict[int, tuple[ReplayPlan, str, list[int]]] = {}
+        self.state: dict[int, tuple[ReplayPlan, str, list[int], bool]] = {}
         self.execution: dict[int, dict[str, Any]] = {}
         self.rows: list[dict[str, Any]] = []
 
     @classmethod
     def validate_params(cls, params: Any) -> None:
         extra = params.extra_args or {}
+        if type(extra.get("fixed_prefix_control", False)) is not bool:
+            raise ValueError("invalid vLLM fixed-prefix control flag")
         if "fixed_prefix_plan" not in extra:
             return
         plan = ReplayPlan.model_validate(extra["fixed_prefix_plan"])
@@ -59,7 +61,7 @@ class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
             member = next(m for m in plan.members if m.member_id == member_id)
             if prompt != member.prompt:
                 raise ValueError("vLLM admitted prompt differs from frozen input")
-            self.state[index] = (plan, member_id, output)
+            self.state[index] = (plan, member_id, output, extra.get("fixed_prefix_control", False))
         for source, destination, direction in batch_update.moved:
             first, second = self.state.pop(source, None), self.state.pop(destination, None)
             if first is not None:
@@ -71,7 +73,7 @@ class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
         if not self.state:
             return logits
         forced = logits.clone()
-        for index, (plan, member_id, output) in self.state.items():
+        for index, (plan, member_id, output, control) in self.state.items():
             execution = self.execution.get(index)
             if execution is None:
                 raise ValueError("vLLM forcing lacks actual model execution metadata")
@@ -81,9 +83,11 @@ class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
             step = len(output)
             member = next(m for m in plan.members if m.member_id == member_id)
             history = plan.history(member_id, step)
+            if control:
+                history = [*member.prompt, *output]
             start, end = execution["positions"]
             if (
-                output != member.continuation[:step]
+                (not control and output != member.continuation[:step])
                 or execution["kv_length"] != len(history)
                 or end != len(history)
                 or execution["input_token_ids"] != history[start:end]
@@ -94,9 +98,16 @@ class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
                 raise ValueError("vLLM full vocabulary capture mismatch")
             self.rows.append(
                 prediction_row(
-                    plan, member_id, execution["request_id"], step, raw, execution["phase"]
+                    plan,
+                    member_id,
+                    execution["request_id"],
+                    step,
+                    raw,
+                    execution["phase"],
+                    history if control else None,
                 )
             )
-            forced[index] = float("-inf")
-            forced[index, member.continuation[step]] = 0.0
+            if not control:
+                forced[index] = float("-inf")
+                forced[index, member.continuation[step]] = 0.0
         return forced

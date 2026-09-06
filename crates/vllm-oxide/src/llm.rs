@@ -80,6 +80,7 @@ pub struct LLM {
     _resolved_model: ResolvedModel,
     _paged_kv: Arc<Mutex<PagedKVCache>>,
     device: Device,
+    max_model_len: usize,
 }
 
 fn build_resolved_model(
@@ -189,6 +190,7 @@ impl LLM {
             _resolved_model: resolved_model,
             _paged_kv: attn_ctx.paged_kv,
             device,
+            max_model_len: options.max_model_len,
         })
     }
 
@@ -227,6 +229,18 @@ impl LLM {
         if capture.is_some() && benchmark.is_some() {
             bail!("generate: raw-logit capture and benchmark telemetry are mutually exclusive");
         }
+        #[cfg(feature = "internal-golden")]
+        if crate::golden_capture::operators::requested() {
+            if !prompts.is_empty()
+                || capture.is_some()
+                || benchmark.is_some()
+                || std::env::var_os(crate::golden_capture::fixed_prefix::PLAN_ENV).is_some()
+            {
+                bail!("operator verification requires an isolated empty generate call");
+            }
+            crate::golden_capture::operators::run_from_env(&self.device)?;
+            return Ok(Vec::new());
+        }
         if prompts.is_empty() {
             #[cfg(feature = "internal-golden")]
             if benchmark.is_some() {
@@ -247,6 +261,23 @@ impl LLM {
             .iter()
             .map(|prompt| tokenize_prompt(prompt, &self.tokenizer))
             .collect::<Result<Vec<_>>>()?;
+        for (position, (tokens, params)) in
+            tokenized_prompts.iter().zip(sampling_params).enumerate()
+        {
+            if tokens.is_empty() {
+                bail!("generate: prompt[{position}] must not be empty");
+            }
+            if tokens
+                .len()
+                .checked_add(params.max_tokens)
+                .map_or(true, |length| length > self.max_model_len)
+            {
+                bail!(
+                    "generate: prompt[{position}] context budget exceeds max_model_len {}",
+                    self.max_model_len
+                );
+            }
+        }
         #[cfg(feature = "internal-golden")]
         let mut replay = crate::golden_capture::fixed_prefix::ReplaySession::from_env(
             &tokenized_prompts,
@@ -256,6 +287,15 @@ impl LLM {
         if replay.is_some() && (capture.is_some() || benchmark.is_some()) {
             bail!("fixed-prefix, legacy capture and benchmark modes are mutually exclusive");
         }
+        #[cfg(feature = "internal-golden")]
+        let replay_cache_blocks = if replay.is_some() {
+            self._paged_kv
+                .lock()
+                .map_err(|error| anyhow!("cache identity: {error}"))?
+                .num_blocks()
+        } else {
+            0
+        };
         let prompt_lens = tokenized_prompts.iter().map(Vec::len).collect::<Vec<_>>();
         let mut request_ids = Vec::with_capacity(prompts.len());
         #[cfg(feature = "internal-golden")]
@@ -266,7 +306,7 @@ impl LLM {
         }
         #[cfg(feature = "internal-golden")]
         if let Some(replay) = replay.as_mut() {
-            if let Err(error) = replay.bind_requests(&request_ids) {
+            if let Err(error) = replay.bind_requests(&request_ids, replay_cache_blocks) {
                 return Err(self.abort_after_capture_error(error));
             }
         }
@@ -949,6 +989,7 @@ mod tests {
             _resolved_model: resolved_model,
             _paged_kv: paged_kv,
             device,
+            max_model_len: 4096,
         }
     }
 
@@ -1901,6 +1942,46 @@ mod tests {
         }
 
         #[test]
+        fn empty_prompt_is_rejected_without_consuming_request_identity() {
+            let mut llm = test_llm();
+            assert!(llm
+                .generate(
+                    &[Prompt::TokenIds(vec![])],
+                    &[deterministic_causal_params(1)]
+                )
+                .is_err());
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[deterministic_causal_params(1)],
+                )
+                .unwrap();
+            assert_eq!(output[0].request_id, 0);
+        }
+
+        #[test]
+        fn context_budget_is_rejected_before_any_request_is_admitted() {
+            let mut llm = test_llm();
+            let error = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1; 4096])],
+                    &[deterministic_causal_params(1)],
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("context budget"));
+            assert_eq!(llm.engine.scheduler.num_waiting(), 0);
+            assert_eq!(llm.engine.scheduler.num_running(), 0);
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1; 4095])],
+                    &[deterministic_causal_params(1)],
+                )
+                .unwrap();
+            assert_eq!(output[0].request_id, 0);
+            assert_eq!(output[0].token_ids.len(), 1);
+        }
+
+        #[test]
         fn max_tokens_counts_only_completion_tokens() {
             let mut llm = controlled_logits_test_llm(Vec::new());
             let output = llm
@@ -2295,6 +2376,64 @@ mod tests {
         }
 
         #[test]
+        fn private_operator_verification_runs_real_cpu_operators_without_generation() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::private_operator_verification_runs_real_cpu_operators_without_generation") { return; }
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let plan = root.path().join("operators.json");
+            let output = root.path().join("result.json");
+            std::fs::write(&plan,serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
+                "profiles":[{"profile_id":"rms","rule_id":"materialized_halfway_sum_v1"},
+                {"profile_id":"silu","rule_id":"gate_2_up_0.515625_v1"},
+                {"profile_id":"sampler","rule_id":"unique_and_multiway_max_with_filter_penalties_v1"}]}).to_string()).unwrap();
+            let _environment = EnvironmentRestore::install(&[
+                ("VLLM_OXIDE_INTERNAL_OPERATOR_PLAN", Some(plan.as_os_str())),
+                (
+                    "VLLM_OXIDE_INTERNAL_OPERATOR_OUTPUT",
+                    Some(output.as_os_str()),
+                ),
+            ]);
+            let mut llm = test_llm();
+            assert!(llm.generate(&[], &[]).unwrap().is_empty());
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap();
+            assert_eq!(value["device"], "cpu");
+            assert_eq!(
+                value["operator_checks"][0]["values"],
+                serde_json::json!([1.0, 1.0, 1.0, 1.0])
+            );
+            assert_eq!(
+                value["operator_checks"][1]["values"],
+                serde_json::json!([0.90625])
+            );
+            assert_eq!(
+                value["operator_checks"][2]["values"],
+                serde_json::json!([7.0, 12.0, 29.0])
+            );
+            assert!(!llm.engine.is_running());
+        }
+
+        #[test]
+        fn fixed_prefix_capacity_cap_keeps_real_warmup_and_one_cache_allocation() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::fixed_prefix_capacity_cap_keeps_real_warmup_and_one_cache_allocation") { return; }
+            let flag = OsString::from("1");
+            let _environment = EnvironmentRestore::install(&[
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CACHE_BLOCKS",
+                    Some(flag.as_os_str()),
+                ),
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN",
+                    Some(flag.as_os_str()),
+                ),
+            ]);
+            let llm = cache_aware_test_llm(true);
+            let cache = llm._paged_kv.lock().unwrap();
+            assert_eq!(cache.num_blocks(), 1);
+            assert_eq!(cache.allocation_count(), 1);
+        }
+
+        #[test]
         fn fixed_prefix_advances_frozen_tokens_without_changing_raw_prediction() {
             if !enter_isolated_test("llm::tests::internal_golden_capture::fixed_prefix_advances_frozen_tokens_without_changing_raw_prediction") { return; }
             let temp = tempfile::tempdir().unwrap();
@@ -2343,6 +2482,29 @@ mod tests {
                 capture["execution_events"][1]["members"][0]["phase"],
                 "decode"
             );
+            let control_path = temp.path().join("control.json");
+            let control_flag = OsString::from("1");
+            let _control_env = EnvironmentRestore::install(&[
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT",
+                    Some(control_path.as_os_str()),
+                ),
+                (
+                    "VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CONTROL",
+                    Some(control_flag.as_os_str()),
+                ),
+            ]);
+            let control = test_llm()
+                .generate(
+                    &[Prompt::TokenIds(vec![1])],
+                    &[deterministic_causal_params(2)],
+                )
+                .unwrap();
+            assert_eq!(control[0].token_ids, vec![42, 42]);
+            let control: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(control_path).unwrap()).unwrap();
+            assert_eq!(control["mode"], "collection_control");
+            assert_eq!(control["rows"][0]["logits"], capture["rows"][0]["logits"]);
         }
 
         #[test]

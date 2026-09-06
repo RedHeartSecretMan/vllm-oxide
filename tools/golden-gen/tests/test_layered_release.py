@@ -62,7 +62,7 @@ def test_one_member_failure_or_missing_operator_blocks_the_execution_group() -> 
             numerical_cases=[
                 dict(
                     split="calibration",
-                    required_mechanisms=["batch"],
+                    required_mechanisms={"candidate":["batch"]},
                     engine_options={},
                     plan=dict(
                         protocol="layered-accuracy-v1",

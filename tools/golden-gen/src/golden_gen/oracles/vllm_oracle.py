@@ -91,7 +91,13 @@ class VllmOracle:
 
     name = "vllm"
 
-    def __init__(self, model_dir: Path, *, fixed_prefix: bool = False) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        *,
+        fixed_prefix: bool = False,
+        execution_options: dict[str, Any] | None = None,
+    ) -> None:
         source = str(validate_release_model(model_dir))
         import torch
         from vllm import LLM
@@ -102,6 +108,16 @@ class VllmOracle:
         self.fixed_prefix = fixed_prefix
         if fixed_prefix:
             contract["logits_processors"] = ["golden_gen.fixed_prefix_vllm:FixedPrefixProcessor"]
+            for name in ("max_model_len", "max_num_batched_tokens", "max_num_seqs"):
+                if execution_options is not None and name in execution_options:
+                    contract[name] = execution_options[name]
+            contract["enable_chunked_prefill"] = True
+            contract["enable_prefix_caching"] = True
+            if execution_options is not None and "baseline_blocks" in execution_options:
+                contract["block_size"] = 16
+                contract["num_gpu_blocks_override"] = execution_options["baseline_blocks"]
+        elif execution_options is not None:
+            raise ValueError("legacy baseline does not accept layered execution options")
         self.llm = LLM(**contract)
         self._worker_ready = self._worker_evidence("ready")
 

@@ -22,16 +22,20 @@ class NumericalCase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     split: Literal["development", "calibration", "acceptance"]
     plan: ReplayPlan
-    required_mechanisms: list[
-        Literal[
-            "prefill",
-            "decode",
-            "batch",
-            "chunked_prefill",
-            "prefix_hit",
-            "recompute",
-            "decode_cross_page",
-        ]
+    required_mechanisms: dict[
+        Literal["reference", "baseline", "candidate"],
+        list[
+            Literal[
+                "prefill",
+                "decode",
+                "batch",
+                "chunked_prefill",
+                "prefix_hit",
+                "recompute",
+                "decode_cross_page",
+                "waiting_admission",
+            ]
+        ],
     ] = Field(min_length=1)
     engine_options: dict[str, Any]
     setup_calls: list[ReplayPlan] = Field(default_factory=list)

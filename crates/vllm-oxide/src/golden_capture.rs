@@ -24,6 +24,7 @@ pub(crate) const CALL_ID_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_CALL_ID";
 mod benchmark;
 pub(crate) mod fixed_prefix;
 pub(crate) mod layer_trace;
+pub(crate) mod operators;
 pub(crate) use benchmark::BenchmarkSession;
 #[cfg(test)]
 use benchmark::{BenchmarkConfig, BENCHMARK_DESTINATION_ENV};

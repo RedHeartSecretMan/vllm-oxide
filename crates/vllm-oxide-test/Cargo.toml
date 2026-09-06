@@ -22,6 +22,10 @@ name = "vllm-oxide-observe"
 path = "src/bin/observe.rs"
 
 [[bin]]
+name = "vllm-oxide-fixed-prefix"
+path = "src/bin/fixed_prefix.rs"
+
+[[bin]]
 name = "vllm-oxide-verify-bundle"
 path = "src/bin/verify_bundle.rs"
 
