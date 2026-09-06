@@ -63,6 +63,14 @@ def _p95(values: list[float]) -> float:
     return ordered[lo] + (ordered[hi] - ordered[lo]) * (position - lo)
 
 
+def _top5(logits: NDArray[np.float64]) -> list[int]:
+    count = min(5, len(logits))
+    cutoff = np.partition(logits, len(logits) - count)[len(logits) - count]
+    above = np.flatnonzero(logits > cutoff).tolist()
+    tied = np.flatnonzero(logits == cutoff)[: count - len(above)].tolist()
+    return sorted(above + tied, key=lambda token: (-logits[token], token))
+
+
 def compare_case(
     reference: NDArray[Any],
     candidate: NDArray[Any],
@@ -91,6 +99,7 @@ def compare_case(
         if type(predicted) is not int or not 0 <= predicted < shape[1]:
             raise ValueError("prediction token ID is outside the vocabulary")
         error = np.abs(ref - rust)
+        reference_top5, candidate_top5 = _top5(ref), _top5(rust)
         rows.append(
             dict(
                 step=step,
@@ -109,6 +118,9 @@ def compare_case(
                 reference_greedy_token_id=int(np.argmax(ref)),
                 max_logit_error=float(error.max()),
                 worst_token_id=int(np.argmax(error)),
+                reference_top5_ids=reference_top5,
+                candidate_top5_ids=candidate_top5,
+                top5_overlap_count=len(set(reference_top5) & set(candidate_top5)),
             )
         )
     drs = [r["d_r"] for r in rows]
@@ -163,3 +175,23 @@ def compare_case(
             else "FAIL"
         )
     return result
+
+
+def summarize_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    if not cases or len({c["case_id"] for c in cases}) != len(cases):
+        raise ValueError("case-equal summary requires unique nonempty cases")
+    means = {
+        key: _mean([c["numerical_checks"][key] for c in cases])
+        for key in ("k_mean", "k_peak", "e_mean", "tv_mean")
+    }
+    means["g_peak"] = _mean([c["behavior_checks"]["g_peak"] for c in cases])
+    if any(not math.isfinite(v) for v in means.values()):
+        raise ValueError("nonfinite case summary")
+    return dict(
+        averaging="case_equal",
+        accepting=False,
+        case_count=len(cases),
+        total_steps=sum(len(c["rows"]) for c in cases),
+        case_equal_means=means,
+        case_steps=[dict(case_id=c["case_id"], steps=len(c["rows"])) for c in cases],
+    )

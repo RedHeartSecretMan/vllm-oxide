@@ -18,7 +18,7 @@ from golden_gen.fixed_prefix import (
     validate_control_capture,
     validate_execution_events,
 )
-from golden_gen.layered_accuracy import PROTOCOL, Budgets, compare_case
+from golden_gen.layered_accuracy import PROTOCOL, Budgets, compare_case, summarize_cases
 from golden_gen.layered_artifacts import bound_file, sha, source_identity, verify_marker
 from golden_gen.layered_release import (
     POLICY_PATH,
@@ -123,6 +123,36 @@ def _receipt(
     runtime = RuntimeInfo.model_validate(value["runtime"])
     if runtime.evidence_mode != "release" or runtime.generator_commit != source["commit"]:
         raise ValueError("capture runtime is synthetic or belongs to another source")
+    evidence = value.get("engine_evidence", {})
+    if engine == "reference":
+        if (
+            evidence.get("deterministic_algorithms") is not True
+            or evidence.get("warn_only") is not False
+            or evidence.get("attention_backend") != "SDPBackend.MATH"
+        ):
+            raise ValueError("reference lacks actual deterministic MATH backend evidence")
+    elif engine == "baseline":
+        from golden_gen.worker_determinism import BaselineWorkerEvidence
+
+        states = [
+            BaselineWorkerEvidence.model_validate(record)
+            for record in evidence.get("worker_states", [])
+        ]
+        if (
+            len(states) != 2
+            or [s.phase for s in states] != ["ready", "complete"]
+            or states[0].pid != states[1].pid
+            or any(s.expected_attention_layers != 28 for s in states)
+        ):
+            raise ValueError("baseline worker lifecycle/backend evidence is incomplete")
+    elif (
+        evidence.get("source") != source
+        or evidence.get("cuda_feature_enabled") is not True
+        or evidence.get("build_source_id") != value.get("build_source_id")
+        or type(evidence.get("producer_pid")) is not int
+        or evidence["producer_pid"] <= 0
+    ):
+        raise ValueError("candidate lacks actual CUDA build/process evidence")
     guard = json.loads(bound_file(root, value["guard"]).read_text())
     if (
         guard.get("child_returncode") != 0
@@ -164,6 +194,7 @@ def evaluate_manifest(repo: Path, manifest_path: Path, *, authoritative: bool) -
 def _calibration_provenance(
     repo: Path, root: Path, manifest: LayeredManifest, registry: Registry, policy: BudgetPolicy
 ) -> tuple[dict[str, dict[str, bool | None]], dict[str, Any]]:
+    from golden_gen.layered_faults import verify_global_fault_evidence
     from golden_gen.operator_faults import evaluate_distribution_fault, evaluate_fault_models
 
     if (
@@ -265,9 +296,14 @@ def _calibration_provenance(
         or faults.get("numerical_fault_rule") != "obvious_distribution_swap_v1"
     ):
         raise ValueError("fault evidence is not bound to the approved calibration source/registry")
+    if not verify_global_fault_evidence(repo, calibration_path, registry, old, faults):
+        raise ValueError("a required structural/identity/argmax fault was not detected")
     return evaluate_fault_models(
         registry.operator_profiles, faults, policy.operator_budgets
-    ), evaluate_distribution_fault(Budgets(**policy.values) if policy.values is not None else None)
+    ), evaluate_distribution_fault(
+        Budgets(**policy.values) if policy.values is not None else None,
+        faults["numerical_fault_definition"],
+    )
 
 
 def _evaluate(
@@ -300,6 +336,37 @@ def _evaluate(
             raise ValueError("budget approval provenance is incomplete or targets another registry")
     # Do not read even the manifest's capture paths before the budget gate above.
     manifest = LayeredManifest.model_validate_json(manifest_path.read_text())
+    from golden_gen.layered_inventory import frozen_owner_inventory, owner_key
+
+    inventory = frozen_owner_inventory(registry, authoritative=authoritative)
+    declared_keys = {owner_key(owner) for owner in inventory}
+    found_owners = []
+    for capture_entry in manifest.captures:
+        for variant in ("primary", "replay", "control"):
+            found_owners.append(
+                ("execution_group", capture_entry.execution_group_id, capture_entry.engine, variant)
+            )
+        if capture_entry.control_replay is not None:
+            found_owners.append(
+                (
+                    "execution_group",
+                    capture_entry.execution_group_id,
+                    capture_entry.engine,
+                    "control-replay",
+                )
+            )
+    for auxiliary_entry in manifest.operator_checks:
+        found_owners.extend(
+            ("operator_suite", auxiliary_entry.verification_id, "candidate", v)
+            for v in ("primary", "replay")
+        )
+    for auxiliary_entry in manifest.behavior_checks:
+        found_owners.extend(
+            ("standalone_behavior", auxiliary_entry.verification_id, "candidate", v)
+            for v in ("primary", "replay")
+        )
+    if len(found_owners) != len(declared_keys) or set(found_owners) != declared_keys:
+        raise ValueError("manifest does not cover the exact frozen unique owner inventory")
     if (
         manifest.source != source
         or manifest.registry_sha256 != registry_sha
@@ -603,6 +670,13 @@ def _evaluate(
             combined["missing_mechanisms"] = sorted(
                 {m for e in evaluations for m in e["missing_mechanisms"]}
             )
+            combined["verdict"] = (
+                "INVALID"
+                if not combined["evidence_complete"]
+                else "PASS"
+                if all(combined["checks"].values())
+                else "FAIL"
+            )
             behaviors.append(combined)
     if fault_checks is not None:
         for operator in operators:
@@ -620,12 +694,21 @@ def _evaluate(
         policy_sha256=policy_sha,
         manifest_sha256=sha(manifest_path),
         coverage=coverage,
-        observation_complete=not authoritative,
+        observation_complete=not authoritative
+        and all(b.get("evidence_complete", True) for b in behaviors),
         expected_capture_groups=len(expected),
         compared_capture_groups=len(found),
+        expected_unique_owners=len(inventory),
+        validated_unique_owners=len(found_owners),
+        case_equal_summary=summarize_cases(numeric),
         calibration_source=policy.calibration_source if policy is not None else None,
         distribution_fault=distribution_fault,
     )
+    if (
+        any(b.get("evidence_complete") is False for b in behaviors)
+        and "incomplete_behavior_coverage" not in result["reasons"]
+    ):
+        result["reasons"].append("incomplete_behavior_coverage")
     if distribution_fault is not None and distribution_fault["verdict"] != "FAIL":
         if result["verdict"] != "INVALID":
             result["verdict"] = "FAIL"

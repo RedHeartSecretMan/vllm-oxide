@@ -10,7 +10,84 @@ This harness generates **golden fixture files** for the vllm-oxide project with
 vLLM supplies same-prefix calibration observations and can never override a
 reference failure or select acceptance thresholds automatically.
 
-## Prerequisites
+## Layered accuracy protocol (new workflow)
+
+`python -m golden_gen.layered_cli --help` is the versioned
+`layered-accuracy-v1` entrypoint. L0 means operator verification, L1 model
+numerical verification, and L2 decoding/public behavior verification. The
+schema fields are `operator_checks`, `numerical_checks`, and `behavior_checks`.
+The sections below labeled **legacy** retain their old L1=token/L2=logits meaning;
+their manifests, markers, tolerances and release actions cannot satisfy this protocol.
+
+The new reader requires clean source identity and tracked Definition/index binding
+for `docs/validation/layered-accuracy-cases.json` and
+`docs/validation/layered-accuracy-budgets.json`. Pending budgets are `INVALID`,
+not defaults. The old 28 cases are development inputs, not a fresh holdout.
+Every member is a separate numerical case; an execution group only batches them.
+
+This is a CPU-prepared measurement workflow, **not release acceptance**. No GPU
+command should run before its separate stage authorization. Use the prepared,
+locked runtime with `PYTHONHASHSEED=0`, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, and HF,
+Transformers, uv and Cargo offline settings established before process startup.
+All GPU owners are serial fresh processes under the 16 GiB available-RAM guard.
+The candidate binary must already be built from the reviewed source; collection
+never invokes Cargo or installs dependencies.
+
+The frozen unique-owner inventory supplies the `--group`, `--engine` and
+`--variant` values. The supported stages are:
+
+- `collect`: one fixed-history owner (`primary`/`replay`) or unforced owner
+  (`control`/candidate-only `control-replay`), with `--model-dir` and, for the
+  candidate, `--candidate-binary`.
+- `collect-aux`: one candidate operator suite (`--group operators`) or a
+  standalone public behavior case, with `primary` or `replay`.
+- `assemble-observation`: hash and assemble every declared calibration and
+  auxiliary owner. `--manifest` names the output manifest. Assembly alone is
+  nonaccepting and creates no success marker.
+- `observe`: validate raw data, replays, actual mechanisms and ownership against
+  that manifest. Only complete observations receive an observation marker;
+  incomplete/invalid evidence exits 2. Unknown numeric budgets remain `INVALID`
+  even when observation collection is complete.
+- `faults`: CPU-only isolated fault models based on a complete calibration
+  `--manifest`, written to `--output`. Normal input files are hard-linked read-only
+  into private temporary mirrors; mutations are written to fresh filenames, never
+  into shared inodes. Original artifact hashes are rechecked after simulation.
+- `assemble-authoritative`: available only after budget approval; additionally
+  requires `--calibration-evidence`, `--calibration-manifest`,
+  `--calibration-marker`, and `--fault-evidence` inside the run root.
+- `authoritative`: independently reproduce approved calibration/fault evidence
+  and assess fresh measurements. Every case's absolute mean/peak KL, paired mean
+  KL excess over vLLM, and reference choice loss are independent gates. TV and
+  top-5 overlap are diagnostics; the summary is case-equal, never token-weighted.
+
+All stages also take `--repo-root` and `--run-dir`. Keep original calibration
+artifacts in a subdirectory of the overall run root; authoritative owners use new
+directories, so the original source/marker is not relabeled or overwritten.
+Markers rehash the full declared capture/receipt/guard/setup dependency graph.
+Definition-only approval changes may bridge calibration to fresh measurements;
+execution-source changes require fresh calibration. Old markers are never inputs.
+
+Fixed replay records exactly T predictions for prompt+continuation[:t], with a
+separate predicted and advance token. Recording the final advance does not claim
+another forward. Controls advance only their own raw greedy predictions. Public
+prefix/cache-pressure/waiting cases also retain the actual ordered/detokenized
+`LLM::generate` return values and use a separate control replay. Their owners are
+shared with collection-equivalence evidence and counted once, not twice. Merely
+relabeling forced rows never establishes public behavior coverage.
+
+No early resolved EOS means missing required coverage (`INVALID`), not a diagnosis
+of model inaccuracy or an EOS-state-machine bug. Emitting EOS and violating the
+stop/length policy is a behavior `FAIL`. Do not select replacement holdout prompts
+after seeing acceptance outcomes.
+
+The new CLI deliberately exposes no tag, release, upload or publication action.
+Numerical acceptance is not publication authority: performance evidence, release
+report, bundle/clean-consumer verification, final review and explicit publication
+authorization remain separate requirements. CPU tests do not establish GPU
+numerical accuracy. Dense raw inventories need substantially more disk space than
+the legacy corpus; budget storage from the frozen row inventory before collection.
+
+## Legacy workflow prerequisites
 
 - Linux with one NVIDIA sm_89 GPU and no unrelated CUDA compute process
 - At least 32 GiB host RAM; every GPU-owning stage stops below 16 GiB available
@@ -21,7 +98,7 @@ reference failure or select acceptance thresholds automatically.
 - About 12 GiB free disk on a fresh host; the current release keeps all machine
   evidence below `/tmp/vllm-oxide-dag-v0.2.0/t45-artifacts`
 
-## Release workflow
+## Legacy same-prefix release workflow
 
 `tools/validate-release.sh` exposes separately invocable, content-marked stages:
 

@@ -56,6 +56,34 @@ def _artifact(path: Path, root: Path) -> dict[str, str]:
     return dict(path=path.relative_to(root).as_posix(), sha256=sha(path))
 
 
+def run_candidate_capture(command: list[str]) -> dict[str, Any]:
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    print(completed.stdout, end="")
+    print(completed.stderr, end="", file=sys.stderr)
+    completed.check_returncode()
+    value = json.loads(completed.stdout)
+    if not isinstance(value, dict):
+        raise ValueError("candidate metadata must be a JSON object")
+    return value
+
+
+def _registered_owner(
+    repo: Path, group_id: str, engine: str, variant: str, auxiliary: bool
+) -> None:
+    from golden_gen.layered_inventory import frozen_owner_inventory, owner_key
+
+    registry = Registry.model_validate(definition_document(repo, REGISTRY_PATH)[0])
+    kind = (
+        ("operator_suite" if group_id == "operators" else "standalone_behavior")
+        if auxiliary
+        else "execution_group"
+    )
+    if (kind, group_id, engine, variant) not in {
+        owner_key(o) for o in frozen_owner_inventory(registry, authoritative=True)
+    }:
+        raise ValueError("collector owner is absent from the frozen inventory")
+
+
 def _auxiliary_definition(
     repo: Path, verification_id: str
 ) -> tuple[str, dict[str, Any], dict[str, Any], str]:
@@ -132,6 +160,7 @@ def collect_group(
         raise ValueError("invalid layered collector engine/variant")
     if variant == "control-replay" and engine != "candidate":
         raise ValueError("public control replay is candidate-only")
+    _registered_owner(repo, group_id, engine, variant, auxiliary)
     if (
         not group_id
         or any(
@@ -173,7 +202,11 @@ def collect_group(
     if guard["after"]["compute_processes"]:
         raise ValueError("GPU owner left an active compute process")
     metadata = json.loads((output / "worker.json").read_text())
-    if metadata["source"] != source or metadata["driver_pid"] != guard["child_pid"]:
+    if (
+        metadata["source"] != source
+        or metadata["driver_pid"] != guard["child_pid"]
+        or source_identity(repo) != source
+    ):
         raise ValueError("worker metadata does not belong to this guarded source/process")
     metadata["guard"] = _artifact(guard_path, run_dir)
     atomic_json(output / "receipt.json", metadata)
@@ -192,6 +225,7 @@ def collect_group(
 def _worker(args: argparse.Namespace) -> None:
     # The outer process owns the guard and logs remain complete even on failure.
     auxiliary = args.action == "worker-aux"
+    _registered_owner(args.repo_root, args.group, args.engine, args.variant, auxiliary)
     output = (
         args.run_dir / f"{'aux-' if auxiliary else ''}{args.group}-{args.engine}-{args.variant}"
     )
@@ -220,7 +254,7 @@ def _worker_auxiliary(args: argparse.Namespace, output: Path) -> None:
     plan_path, options_path = output / "plan.json", output / "options.json"
     atomic_json(plan_path, request)
     atomic_json(options_path, options)
-    completed = subprocess.run(
+    evidence = run_candidate_capture(
         [
             str(args.candidate_binary),
             "--repo-root",
@@ -237,15 +271,8 @@ def _worker_auxiliary(args: argparse.Namespace, output: Path) -> None:
             str(options_path),
             "--operator-plan" if mode == "operator_verification" else "--behavior-plan",
             str(plan_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+        ]
     )
-    print(completed.stdout, end="")
-    print(completed.stderr, end="", file=sys.stderr)
-    completed.check_returncode()
-    evidence = json.loads(completed.stdout)
     if evidence.get("source") != source or evidence.get("cuda_feature_enabled") is not True:
         raise ValueError("auxiliary candidate must be a CUDA build of the measured source")
     registry = Registry.model_validate(definition_document(args.repo_root, REGISTRY_PATH)[0])
@@ -327,10 +354,7 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
             setup_paths.append(output / f"setup-{index}.capture.json")
         if control:
             command.append("--control")
-        completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(completed.stdout, end="")
-        print(completed.stderr, end="", file=sys.stderr)
-        evidence = json.loads(completed.stdout)
+        evidence = run_candidate_capture(command)
         if evidence["source"] != source or evidence.get("cuda_feature_enabled") is not True:
             raise ValueError("candidate build source metadata mismatch")
         capture = json.loads((output / "capture.json").read_text())
@@ -416,7 +440,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=["collect", "worker", "collect-aux", "worker-aux", "observe", "authoritative"],
+        choices=[
+            "collect",
+            "worker",
+            "collect-aux",
+            "worker-aux",
+            "assemble-observation",
+            "assemble-authoritative",
+            "faults",
+            "observe",
+            "authoritative",
+        ],
     )
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -426,6 +460,14 @@ def main() -> None:
     parser.add_argument("--variant", choices=["primary", "replay", "control", "control-replay"])
     parser.add_argument("--candidate-binary", type=Path)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--output", type=Path)
+    for name in (
+        "calibration-evidence",
+        "calibration-manifest",
+        "calibration-marker",
+        "fault-evidence",
+    ):
+        parser.add_argument("--" + name, type=Path)
     args = parser.parse_args()
     if args.action in ("collect", "worker", "collect-aux", "worker-aux") and (
         args.model_dir is None or args.group is None or args.engine is None or args.variant is None
@@ -445,6 +487,52 @@ def main() -> None:
                 args.variant,
                 args.candidate_binary,
                 auxiliary=args.action == "collect-aux",
+            )
+        elif args.action == "faults":
+            from golden_gen.layered_faults import generate_fault_evidence
+
+            if args.manifest is None:
+                parser.error("faults requires a complete calibration --manifest")
+            evidence = generate_fault_evidence(args.repo_root, args.manifest)
+            output = args.output or args.run_dir / "fault-evidence.json"
+            if output.parent.resolve() != args.run_dir.resolve():
+                raise ValueError("fault output must remain inside its dedicated run root")
+            atomic_json(output, evidence)
+            result = dict(
+                protocol=PROTOCOL,
+                schema_version=1,
+                accepting=False,
+                fault_observation_complete=True,
+                evidence=_artifact(output, args.run_dir),
+            )
+        elif args.action in ("assemble-observation", "assemble-authoritative"):
+            from golden_gen.layered_workflow import assemble_manifest
+
+            names = (
+                "calibration_evidence",
+                "calibration_manifest",
+                "calibration_marker",
+                "fault_evidence",
+            )
+            calibration = {
+                name: getattr(args, name) for name in names if getattr(args, name) is not None
+            }
+            prepared = assemble_manifest(
+                args.repo_root,
+                args.run_dir,
+                authoritative=args.action == "assemble-authoritative",
+                calibration=calibration or None,
+            )
+            output = args.manifest or args.run_dir / "manifest.json"
+            if output.parent.resolve() != args.run_dir.resolve():
+                raise ValueError("assembled manifest must be rooted beside its owner artifacts")
+            atomic_json(output, prepared)
+            result = dict(
+                protocol=PROTOCOL,
+                schema_version=1,
+                accepting=False,
+                assembly_complete=True,
+                manifest=_artifact(output, args.run_dir),
             )
         else:
             if args.manifest is None:
@@ -472,6 +560,8 @@ def main() -> None:
                 )
         print(json.dumps(result, sort_keys=True))
         if args.action == "authoritative" and result.get("verdict") != "PASS":
+            raise SystemExit(2)
+        if args.action == "observe" and not result.get("observation_complete"):
             raise SystemExit(2)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         print(

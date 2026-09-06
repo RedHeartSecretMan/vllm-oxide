@@ -91,10 +91,15 @@ def compare_execution_behavior(
         or not set(case.required_checks) <= checks.keys()
     ):
         raise ValueError("unknown execution behavior check")
+    missing = [key for key in case.required_checks if not checks[key]]
     return dict(
         protocol="layered-accuracy-v1",
         case_id=case.case_id,
         mode="fixed_prefix_execution",
+        accepting=False,
+        evidence_complete=not missing,
+        missing_mechanisms=missing,
+        verdict="INVALID" if missing else "PASS",
         checks={key: checks[key] for key in case.required_checks},
     )
 
@@ -213,5 +218,12 @@ def compare_unforced_control_behavior(
     missing = [key for key in case.required_checks if key in execution and not execution[key]]
     result["evidence_complete"] &= not missing
     result["missing_mechanisms"].extend(missing)
+    result["verdict"] = (
+        "INVALID"
+        if not result["evidence_complete"]
+        else "PASS"
+        if all(result["checks"].values())
+        else "FAIL"
+    )
     result.update(mode="unforced_control", actual_call_count=len(actual_calls))
     return result

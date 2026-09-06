@@ -87,3 +87,38 @@ def test_arithmetic_floor_underflow_and_invalid_rows_are_explicit() -> None:
     ):
         with pytest.raises(ValueError):
             compare_case(bad, bad, bad, [0])
+
+
+def test_top5_diagnostics_use_token_ids_and_lowest_id_ties_without_a_new_gate() -> None:
+    from golden_gen.layered_accuracy import compare_case
+
+    reference = np.zeros((1, 6), dtype=np.float32)
+    candidate = np.array([[1, 2, 3, 4, 5, 6]], dtype=np.float32)
+    result = compare_case(reference, candidate, reference, [5])
+    assert result["rows"][0]["reference_top5_ids"] == [0, 1, 2, 3, 4]
+    assert result["rows"][0]["candidate_top5_ids"] == [5, 4, 3, 2, 1]
+    assert result["rows"][0]["top5_overlap_count"] == 4
+    assert result["behavior_checks"]["g_peak"] == 0
+
+
+def test_summary_is_case_equal_not_step_weighted_and_cannot_authorize_release() -> None:
+    from golden_gen.layered_accuracy import summarize_cases
+
+    cases = [
+        dict(
+            case_id="short",
+            rows=[{}],
+            numerical_checks=dict(k_mean=2, k_peak=2, e_mean=1, tv_mean=0.5),
+            behavior_checks=dict(g_peak=3),
+        ),
+        dict(
+            case_id="long",
+            rows=[{}] * 9,
+            numerical_checks=dict(k_mean=0, k_peak=0, e_mean=0, tv_mean=0),
+            behavior_checks=dict(g_peak=0),
+        ),
+    ]
+    summary = summarize_cases(cases)
+    assert summary["case_equal_means"]["k_mean"] == 1
+    assert summary["case_count"] == 2 and summary["total_steps"] == 10
+    assert summary["accepting"] is False

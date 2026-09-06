@@ -205,6 +205,86 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
             ),
         ],
     )
+    inventory = [
+        dict(
+            kind="execution_group",
+            execution_group_id="g",
+            engine=e,
+            variant=v,
+            target_rows=1,
+            setup_calls=0,
+            setup_rows=0,
+        )
+        for e in ("reference", "baseline", "candidate")
+        for v in (
+            ("primary", "replay", "control", "control-replay")
+            if e == "candidate"
+            else ("primary", "replay", "control")
+        )
+    ]
+    inventory += [
+        dict(
+            kind="standalone_behavior",
+            verification_id="order",
+            engine="candidate",
+            variant=v,
+            calls=1,
+        )
+        for v in ("primary", "replay")
+    ]
+    registry["expected_counts"] = {
+        "calibration": {"owner_inventory": inventory, "unique_gpu_owners": 12}
+    }
+    registry["auxiliary_operators"] = {
+        "owner_inventory": [
+            dict(kind="operator_suite", verification_id="operators", engine="candidate", variant=v)
+            for v in ("primary", "replay")
+        ]
+    }
+    distribution_definition = dict(
+        vocab_size=2,
+        steps=1,
+        token_ids=[0, 1],
+        reference_logits=[[10.0, 0.0]],
+        candidate_logits=[[0.0, 10.0]],
+        baseline_logits=[[10.0, 0.0]],
+        input_dtype="float32",
+        predicted_token_ids=[1],
+        analysis_temperature=1,
+        raw_greedy_temperature=0,
+    )
+    registry["fault_matrix"] = [
+        dict(fault_id=name, input_definition=definition)
+        for name, definition in (
+            ("wrong_weights_identity", {"mutation": "model.weights_sha256 to 64 zeroes"}),
+            ("wrong_vocabulary_identity", {"mutation": "model.vocab_size 151936 to 151935"}),
+            (
+                "wrong_prefix_history_or_missing_rows",
+                {"mutations": ["zero history hash", "remove final row"]},
+            ),
+            (
+                "negative_token_id_alias",
+                dict(
+                    vocab_size=2,
+                    rows=1,
+                    input_dtype="float32",
+                    valid_raw_logit_map={"0": 1.0, "1": 2.0},
+                ),
+            ),
+            (
+                "wrong_raw_argmax",
+                dict(
+                    vocab_size=2,
+                    steps=1,
+                    reference_logits=[[1.0, 1.0]],
+                    candidate_logits=[[2.0, 1.0]],
+                    baseline_logits=[[1.0, 1.0]],
+                    predicted_token_ids=[1],
+                ),
+            ),
+            ("obvious_distribution_swap_v1", distribution_definition),
+        )
+    ]
     (repo / REGISTRY_PATH).write_text(json.dumps(registry))
     (repo / ".dag/definition-index.json").write_text(
         json.dumps(
@@ -356,6 +436,46 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
             )
             if engine == "candidate":
                 receipt.update(binary_sha256="d" * 64, build_source_id="e" * 40)
+                receipt["engine_evidence"] = dict(
+                    source=source,
+                    producer_pid=pid + 20000,
+                    build_source_id="e" * 40,
+                    cuda_feature_enabled=True,
+                )
+            elif engine == "reference":
+                receipt["engine_evidence"] = dict(
+                    deterministic_algorithms=True,
+                    warn_only=False,
+                    attention_backend="SDPBackend.MATH",
+                )
+            else:
+                receipt["engine_evidence"] = dict(
+                    worker_states=[
+                        dict(
+                            phase=phase,
+                            pid=pid + 10000,
+                            worker_class="golden_gen.oracles.vllm_worker.DeterministicWorker",
+                            before_cuda=dict(enabled=True, warn_only=False, cuda_initialized=False),
+                            current=dict(enabled=True, warn_only=False, cuda_initialized=True),
+                            attention=[
+                                dict(
+                                    layer=f"model.layers.{i}.self_attn.attn",
+                                    backend="FLASH_ATTN",
+                                    flash_attn_version=2,
+                                )
+                                for i in range(28)
+                            ],
+                            expected_attention_layers=28,
+                            dtype="torch.bfloat16",
+                            seed=0,
+                            tensor_parallel_size=1,
+                            enforce_eager=True,
+                            compilation_mode="NONE",
+                            cudagraph_mode="NONE",
+                        )
+                        for phase in ("ready", "complete")
+                    ]
+                )
             entry[variant] = capref
             entry[variant + "_receipt"] = store(f"{engine}-{variant}-receipt.json", receipt)
         entries.append(entry)
@@ -474,6 +594,81 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     assert result["behavior_checks"][0]["checks"]["order"] is True
     assert result["behavior_checks"][1]["checks"]["execution_history"] is True
     assert result["behavior_checks"][2]["checks"]["count"] is True
+    false_backend = json.loads((run / entries[0]["primary_receipt"]["path"]).read_text())
+    false_backend["engine_evidence"]["attention_backend"] = "FLASH_ATTN"
+    false_ref = store("false-reference-backend.receipt.json", false_backend)
+    false_manifest = json.loads(manifest.read_text())
+    false_manifest["captures"][0]["primary_receipt"] = false_ref
+    false_manifest_ref = store("false-reference-backend.manifest.json", false_manifest)
+    assert (
+        evaluate_manifest(repo, run / false_manifest_ref["path"], authoritative=False)[
+            "observation_complete"
+        ]
+        is False
+    )
+    import shutil
+    import sys
+
+    for entry in entries:
+        for variant in ("primary", "replay", "control", "control_replay"):
+            if variant not in entry:
+                continue
+            directory = run / f"g-{entry['engine']}-{variant.replace('_', '-')}"
+            directory.mkdir()
+            shutil.copyfile(run / entry[variant]["path"], directory / "capture.json")
+            shutil.copyfile(run / entry[variant + "_receipt"]["path"], directory / "receipt.json")
+    for entry in (auxiliary, behavior):
+        for variant in ("primary", "replay"):
+            directory = run / f"aux-{entry['verification_id']}-candidate-{variant}"
+            directory.mkdir()
+            shutil.copyfile(run / entry[variant]["path"], directory / "capture.json")
+            shutil.copyfile(run / entry[variant + "_receipt"]["path"], directory / "receipt.json")
+    assembled = run / "assembled-manifest.json"
+    cli = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "golden_gen.layered_cli",
+            "assemble-observation",
+            "--repo-root",
+            str(repo),
+            "--run-dir",
+            str(run),
+            "--manifest",
+            str(assembled),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cli.returncode == 0, cli.stderr + cli.stdout
+    assert json.loads(cli.stdout)["accepting"] is False
+    assert evaluate_manifest(repo, assembled, authoritative=False)["observation_complete"] is True
+    missing_owner = json.loads(manifest.read_text())
+    missing_owner["behavior_checks"] = []
+    missing_owner_ref = store("missing-owner-manifest.json", missing_owner)
+    incomplete = evaluate_manifest(repo, run / missing_owner_ref["path"], authoritative=False)
+    assert incomplete["observation_complete"] is False
+    assert "owner inventory" in incomplete["reasons"][0]
+    invalid_observe = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "golden_gen.layered_cli",
+            "observe",
+            "--repo-root",
+            str(repo),
+            "--run-dir",
+            str(run),
+            "--manifest",
+            str(run / missing_owner_ref["path"]),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert invalid_observe.returncode == 2
+    assert not (run / "layered-markers/observation.complete.json").exists()
     # A receipt cannot smuggle unregistered setup calls into the same owner.
     manifest_data = json.loads(manifest.read_text())
     extra_receipt_path = run / entries[2]["primary_receipt"]["path"]
@@ -507,8 +702,8 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
 
     # Synthetic policy/checkpoint and separately materialized measurement owners.
     # These fixture receipts are test inputs, never real GPU observations.
-    from golden_gen.layered_release import POLICY_PATH, Registry
-    from golden_gen.operator_faults import make_fault_models
+    from golden_gen.layered_faults import generate_fault_evidence
+    from golden_gen.layered_release import POLICY_PATH
 
     calibration = store("calibration-result.json", result)
     calibration_manifest = store("calibration-manifest.json", json.loads(manifest.read_text()))
@@ -521,15 +716,44 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
         path=calibration_marker_path.relative_to(run).as_posix(),
         sha256=sha(calibration_marker_path),
     )
+    from golden_gen.layered_artifacts import manifest_artifact_closure
+
+    originals = {p: sha(p) for p in manifest_artifact_closure(run / calibration_manifest["path"])}
     faults = store(
         "fault-models.json",
-        {
-            **make_fault_models(Registry.model_validate(registry).operator_profiles),
-            "source": source,
-            "registry_sha256": registry_sha,
-            "numerical_fault_rule": "obvious_distribution_swap_v1",
-        },
+        generate_fault_evidence(repo, run / calibration_manifest["path"]),
     )
+    assert (
+        json.loads((run / faults["path"]).read_text())["structured_checks"][
+            "wrong_weights_identity"
+        ]["detected"]
+        is True
+    )
+    fault_cli = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "golden_gen.layered_cli",
+            "faults",
+            "--repo-root",
+            str(repo),
+            "--run-dir",
+            str(run),
+            "--manifest",
+            str(run / calibration_manifest["path"]),
+            "--output",
+            str(run / "cli-faults.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert fault_cli.returncode == 0, fault_cli.stderr + fault_cli.stdout
+    assert json.loads(fault_cli.stdout)["accepting"] is False
+    assert json.loads((run / "cli-faults.json").read_text()) == json.loads(
+        (run / faults["path"]).read_text()
+    )
+    assert {p: sha(p) for p in originals} == originals
     policy = dict(
         protocol="layered-accuracy-v1",
         schema_version=1,
@@ -567,6 +791,8 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                 capture_sha256=capture_ref["sha256"],
             )
             new_receipt["runtime"]["generator_commit"] = current_source["commit"]
+            if new_receipt["engine"] == "candidate":
+                new_receipt["engine_evidence"]["source"] = current_source
             old_guard = new_receipt["guard"]
             guard_data = json.loads((run / old_guard["path"]).read_text())
             guard_data["child_pid"] = new_receipt["driver_pid"]
@@ -596,6 +822,7 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     accepted = evaluate_manifest(repo, run / approved_manifest["path"], authoritative=True)
     assert accepted["verdict"] == "PASS", accepted
     assert accepted["accepting"] is True
+    assert {p: sha(p) for p in originals} == originals
     accepted_report = store("authoritative-result.json", accepted)
     marker = write_marker(
         run,

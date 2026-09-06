@@ -136,6 +136,12 @@ def compare_behavior(case: BehaviorCase, raw: dict[str, Any]) -> dict[str, Any]:
         "protocol": PROTOCOL,
         "case_id": case.case_id,
         "evidence_complete": complete,
+        "accepting": False,
+        "verdict": "INVALID"
+        if not complete
+        else "PASS"
+        if all(checks[key] for key in case.required_checks)
+        else "FAIL",
         "missing_mechanisms": [] if complete else ["resolved_eos_stop"],
         "checks": {key: checks[key] for key in case.required_checks},
     }

@@ -185,10 +185,44 @@ def evaluate_fault_models(
     return result
 
 
-def evaluate_distribution_fault(budgets: Budgets | None) -> dict[str, Any]:
+def evaluate_distribution_fault(
+    budgets: Budgets | None, definition: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Frozen two-token wrong-distribution model; values are stimuli, never budgets."""
-    reference = np.array([[10.0, 0.0]], dtype=np.float32)
-    wrong = np.array([[0.0, 10.0]], dtype=np.float32)
-    result = compare_case(reference, wrong, reference, [1], budgets)
+    if definition is None:
+        definition = dict(
+            vocab_size=2,
+            steps=1,
+            token_ids=[0, 1],
+            reference_logits=[[10.0, 0.0]],
+            candidate_logits=[[0.0, 10.0]],
+            baseline_logits=[[10.0, 0.0]],
+            input_dtype="float32",
+            predicted_token_ids=[1],
+            analysis_temperature=1,
+            raw_greedy_temperature=0,
+        )
+    reference, wrong, baseline = (
+        np.asarray(definition[key], dtype=np.float32)
+        for key in ("reference_logits", "candidate_logits", "baseline_logits")
+    )
+    if (
+        (
+            definition.get("vocab_size"),
+            definition.get("steps"),
+            definition.get("token_ids"),
+            definition.get("input_dtype"),
+            definition.get("analysis_temperature"),
+            definition.get("raw_greedy_temperature"),
+        )
+        != (2, 1, [0, 1], "float32", 1, 0)
+        or reference.shape != (1, 2)
+        or not np.array_equal(wrong, reference[:, ::-1])
+        or not np.array_equal(baseline, reference)
+        or not reference[0, 0] > reference[0, 1]
+        or definition.get("predicted_token_ids") != [1]
+    ):
+        raise ValueError("wrong-distribution fault does not match its declared column swap")
+    result = compare_case(reference, wrong, baseline, definition["predicted_token_ids"], budgets)
     result.update(mode="isolated_cpu_fault_model", fault_id="obvious_distribution_swap_v1")
     return result

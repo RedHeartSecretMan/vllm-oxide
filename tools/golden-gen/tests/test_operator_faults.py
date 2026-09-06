@@ -161,3 +161,26 @@ def test_obvious_distribution_fault_records_all_four_actual_budget_responses() -
     assert rejected["behavior_checks"]["choice_loss_passed"] is False
     # Excessively permissive synthetic budgets demonstrate failed detection, not success.
     assert evaluate_distribution_fault(Budgets(20, 20, 20, 20))["verdict"] == "PASS"
+
+
+def test_distribution_fault_strength_comes_from_its_frozen_input_definition() -> None:
+    from golden_gen.operator_faults import evaluate_distribution_fault
+
+    definition = dict(
+        vocab_size=2,
+        steps=1,
+        token_ids=[0, 1],
+        reference_logits=[[5.0, 0.0]],
+        candidate_logits=[[0.0, 5.0]],
+        baseline_logits=[[5.0, 0.0]],
+        input_dtype="float32",
+        predicted_token_ids=[1],
+        analysis_temperature=1,
+        raw_greedy_temperature=0,
+    )
+    assert evaluate_distribution_fault(None, definition)["behavior_checks"]["g_peak"] == 5
+    definition["candidate_logits"] = [[5.0, 0.0]]
+    import pytest
+
+    with pytest.raises(ValueError):
+        evaluate_distribution_fault(None, definition)
