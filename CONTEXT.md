@@ -128,7 +128,7 @@ _Avoid_: engine config, runtime options.
 ## Correctness
 
 **Golden fixture**:
-A content-addressed `.safetensors` file produced by the Python harness (`tools/golden-gen/`) running two oracle engines (transformers + vLLM) on fixed prompts. Used for L1 (token-sequence exact match) and L2 (logits tensor comparison) validation of the Rust engine. Published only inside a `Golden asset bundle`, never as an individual asset or in git mainline.
+A content-addressed model-output record for a fixed input and oracle identity under one validation protocol. It supplies numerical and token evidence through the `Golden asset bundle`, rather than acting as an unversioned expected answer.
 _Avoid_: reference output, expected output, snapshot, oracle output.
 
 **Golden asset bundle**:
@@ -140,15 +140,15 @@ The authoritative correctness target: Transformers BF16 with `output_logits=True
 _Avoid_: ground truth, canonical engine, expected engine.
 
 **Baseline oracle**:
-The vLLM BF16 run used as calibration and investigation evidence for numerical policy. It is not a second correctness oracle and cannot turn a reference mismatch into a pass.
+The vLLM BF16 implementation whose distance from the `Reference oracle` defines the engineering comparison baseline. Its paired numerical results may supply an additional budgeted gate, but cannot waive an absolute reference or behavior failure.
 _Avoid_: secondary oracle, calibration oracle.
 
 **Tolerance policy**:
-The versioned, dtype- and kernel-specific numerical acceptance policy derived from observed same-prefix error distributions and recorded with its evidence and rationale.
+The approved, versioned operator and model error budgets for a fixed dtype, kernel scope and corpus. It separates absolute reference compatibility, paired baseline comparison and reference-relative token preference.
 _Avoid_: hidden tolerance, pass-until-green threshold.
 
 **Calibration observation**:
-A non-accepting, zero-threshold run that records complete same-prefix numerical distributions and root-cause evidence before any tolerance is approved. It can propose a policy but can never satisfy the release gate.
+A non-accepting measurement of same-prefix numerical distributions and diagnostic evidence before the corresponding budgets are approved. Observation completion is not release acceptance.
 _Avoid_: calibration pass, auto-tuned tolerance, baseline acceptance.
 
 **Performance baseline**:
@@ -159,13 +159,37 @@ _Avoid_: benchmark gate, performance SLA, vLLM parity claim.
 The committed Markdown record that binds the exact environment, kernels, corpus, approved tolerance, comparison totals, performance samples, limitations, and two release-asset hashes for `goldens-v0.2`. It is release evidence, not a third release asset.
 _Avoid_: release manifest, benchmark artifact, extra golden asset.
 
-**Near-tie classification (L1)**:
-A reference-token mismatch classified from the relevant same-prefix candidate logits under the versioned `Tolerance policy`. It is an explicit result, never a skipped comparison or a classification borrowed from the baseline oracle.
+**Operator verification (L0)**:
+The validation of individual numerical operators and discrete execution-state invariants under controlled inputs and independent references. It is a verification tier, not a Transformer layer index.
+_Avoid_: layer-zero model trace, whole-model accuracy pass.
+
+**Model numerical verification (L1)**:
+The comparison of complete model predictions conditioned on identical token histories under the approved absolute and paired-baseline budgets. It includes logit and probability-distribution evidence, not an L1 norm.
+_Avoid_: token-only L1, full-model proof from one layer.
+
+**Decoding and behavior verification (L2)**:
+The validation of predicted token choices and public generation outcomes under the approved reference-choice and engine-behavior contracts. It is not an L2 norm or an unversioned promise of identical cross-kernel strings.
+_Avoid_: logits-only L2, token match as complete numerical proof.
+
+**Near-tie classification (L2)**:
+A differing token choice evaluated against the reference's preference under the versioned `Tolerance policy`. It is an explicit result, never a skipped comparison or a classification borrowed from the baseline oracle.
 _Avoid_: near-tie skip, epsilon skip, close-call skip.
 
-**Same-prefix comparison (L2)**:
-L2 compares logits only while the generated prefix matches the reference and stops at the first divergence. Later rows are excluded because their causal histories differ; the divergence itself remains an explicit result rather than a silent skip.
+**Same-prefix comparison**:
+A numerical comparison whose corresponding predictions have identical causal token histories. Different-history outputs are not comparable rows, whether the histories arose from free generation or controlled replay.
 _Avoid_: prefix-aware L2, context-aware comparison.
+
+**Fixed-prefix replay**:
+A run whose continuation token stream is fixed independently of each implementation's predicted choices. It preserves shared histories while exercising the actual incremental engine path.
+_Avoid_: forced prediction, repeated prefill as decode.
+
+**Predicted token**:
+The choice produced from an implementation's unmodified logits and declared sampling policy. In fixed-prefix replay it is distinct from the token used to advance the history.
+_Avoid_: forced token as model output evidence.
+
+**Advance token**:
+The frozen continuation token appended to the logical history during fixed-prefix replay. It names the controlled history, not the model's original preference.
+_Avoid_: predicted token, raw argmax.
 
 **Release gate vs CI gate**:
 CI (every push, CPU-only) runs property tests → "CI green". Release gate (pre-release, manual, GPU) runs golden comparison → "numerically validated". These are explicitly different — the repo README must document that CI green ≠ validated.

@@ -1,5 +1,7 @@
 # Bind goldens-v0.2 calibration and performance evidence
 
+Historical numerical protocol: [ADR-0015](0015-layered-accuracy-validation.md) replaces its layer numbering, evidence split and numerical acceptance rules for new release validation. Unreplaced identity, integrity, resource and publication constraints remain binding; old artifacts keep their original interpretation.
+
 Ticket #45 must turn GPU observations into release evidence without recreating the legacy loop of raising a tolerance until the same data passes. Its issue fixes the required outcomes, but not the exact oracle kernels, empirical approval boundary, benchmark formulas, report ownership, or candidate-bound publication order. Those choices change what counts as acceptance and therefore belong to the DAG Definition.
 
 ## Pinned generation environment
