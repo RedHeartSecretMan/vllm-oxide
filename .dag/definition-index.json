@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "dcbcc3e6160275cd746f2b4855fae7bce9a79ac3"
+      "blob_oid": "576ca4a7953bf45829fe42ff96c09177b2ebb71e"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -55,19 +55,27 @@
     },
     {
       "path": "docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md",
-      "blob_oid": "bef7c52daf594fbd9a7929d9e63d5ba0670fe915"
+      "blob_oid": "2f369777a3fbfd8edb67f8ef2f7485dbb1087d6d"
     },
     {
       "path": "docs/adr/0013-bf16-cross-kernel-calibration-ceilings.md",
-      "blob_oid": "154c3df03bc41568a913ceb6c8f09460a5f1af0f"
+      "blob_oid": "adf84dd0d8e6790727e67caa5ceda14002937aec"
     },
     {
       "path": "docs/adr/0014-goldens-v0.2-empirical-tolerance-policy.md",
-      "blob_oid": "ca3e26970336cebc45a3afa23bcb25d4fadc1b20"
+      "blob_oid": "e1c4e6c5c423b62bf5acc98fbc6a6d01b0e68f7f"
+    },
+    {
+      "path": "docs/adr/0015-layered-accuracy-validation.md",
+      "blob_oid": "386f1467de8d062a59e6dd6a5d2613cb3242be6f"
     },
     {
       "path": "docs/releases/goldens-v0.2-calibration-observation.json",
       "blob_oid": "f61e289b43ded163d00d659c08a530f8fbe6a9b8"
+    },
+    {
+      "path": "docs/validation/layered-accuracy-contract.md",
+      "blob_oid": "b9f2128540b22d9ea23ea78ef591b551b21d1bc5"
     }
   ]
 }
