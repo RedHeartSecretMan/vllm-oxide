@@ -226,4 +226,3 @@ KL 理论上非负。仅对 [-1e-12,0) 内的微小计算舍入值归零，并�
 ADR-0012 未被本文件替代的模型/权重/tokenizer/环境身份、资源保护、确定性、真实性及发布流程仍有效。旧 56-fixture 固定数、四个校准/四个 holdout 分割和旧容差只属于历史协议；新协议以已冻结 registry 的完整预期清单计数，而不是取消计数。新的 collector、schema、prompt 或数值代码必须先冻结测量提交并产生自己的数据；旧 O/P/M 工件不能因 ancestry 存在就改标为新协议。
 
 所有成功阶段均需原子、完整输出 marker 和前驱/源身份验证；阈值未知的观测 completion 与 release PASS 必须是不同状态。发布仍需 L0/L1/L2 全通过、性能记录、证据报告、bundle/clean consumer 验证，最终 evidence-only 候选的完整复审及单独的 tag/release/asset 权限。资产仍仅为 manifest 和 archive，报告不是第三资产；CPU CI 不等于 GPU 验收。此检查点不提供发布权限。
-
