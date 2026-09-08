@@ -4,7 +4,13 @@ import json
 
 import pytest
 
-from golden_gen.publication import verify_publication
+from golden_gen.publication import prepare_publication, verify_publication
+
+
+def test_legacy_publication_cannot_prepare_a_new_release(tmp_path):
+    with pytest.raises(ValueError, match="layered-accuracy-v1"):
+        prepare_publication(tmp_path / "repo", tmp_path / "run", "a" * 40)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_publication_asserts_tag_exact_assets_notes_and_downloaded_bytes(tmp_path):

@@ -638,6 +638,16 @@ impl Scheduler {
         }
     }
 
+    fn running_token_count(sequence: &Sequence, budget: usize) -> usize {
+        match Self::sequence_phase(sequence) {
+            SequencePhase::Prefill => sequence
+                .prefill_target_tokens()
+                .saturating_sub(sequence.num_cached_tokens)
+                .min(budget),
+            SequencePhase::Decode => usize::from(budget > 0),
+        }
+    }
+
     fn schedule_running(&mut self, token_budget: usize) {
         let mut scheduled_tokens = 0;
         for sequence in &mut self.running {
@@ -646,13 +656,7 @@ impl Scheduler {
             if budget == 0 {
                 continue;
             }
-            let num_tokens = match Self::sequence_phase(sequence) {
-                SequencePhase::Prefill => sequence
-                    .prefill_target_tokens()
-                    .saturating_sub(sequence.num_cached_tokens)
-                    .min(budget),
-                SequencePhase::Decode => 1,
-            };
+            let num_tokens = Self::running_token_count(sequence, budget);
             sequence.num_scheduled_tokens = num_tokens;
             sequence.is_prefill = sequence.num_cached_tokens.saturating_add(num_tokens)
                 < sequence.prefill_target_tokens();
@@ -767,18 +771,9 @@ impl Scheduler {
                 .running
                 .iter()
                 .filter(|sequence| {
-                    if budget == 0 {
-                        return false;
-                    }
-                    if Self::sequence_phase(sequence) == SequencePhase::Prefill {
-                        budget = budget.saturating_sub(
-                            sequence.prefill_target_tokens() - sequence.num_cached_tokens,
-                        );
-                        false
-                    } else {
-                        budget -= 1;
-                        true
-                    }
+                    let tokens = Self::running_token_count(sequence, budget);
+                    budget -= tokens;
+                    tokens > 0 && Self::sequence_phase(sequence) == SequencePhase::Decode
                 })
                 .collect::<Vec<_>>();
             if kv_mgr.can_append_batch(&decode_batch) {

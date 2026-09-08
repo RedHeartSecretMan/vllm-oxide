@@ -81,6 +81,9 @@ stop/length policy is a behavior `FAIL`. Do not select replacement holdout promp
 after seeing acceptance outcomes.
 
 The new CLI deliberately exposes no tag, release, upload or publication action.
+The old shell `authoritative`/`publish` stages and direct publication preparation
+are disabled: they cannot consume layered evidence. A reviewed layered adapter
+for performance/report/bundle/clean-consumer/publication remains unfinished.
 Numerical acceptance is not publication authority: performance evidence, release
 report, bundle/clean-consumer verification, final review and explicit publication
 authorization remain separate requirements. CPU tests do not establish GPU

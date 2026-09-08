@@ -4,17 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from pathlib import Path
 
-from golden_gen.schema import Manifest
-
 ASSETS = ("goldens-v0.2.tar.gz", "manifest.json")
-REPORT = "docs/releases/goldens-v0.2.md"
-
-
-def _git(repo: Path, *args: str) -> bytes:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
 
 
 def _sha(path: Path) -> str:
@@ -23,57 +15,11 @@ def _sha(path: Path) -> str:
 
 
 def prepare_publication(repo: Path, run_root: Path, candidate: str) -> Path:
-    """Require the exact clean evidence-only candidate before any tag/release write."""
-    if _git(repo, "rev-parse", "HEAD").decode().strip() != candidate:
-        raise ValueError("publication HEAD differs from the frozen candidate")
-    if _git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
-        raise ValueError("publication candidate worktree is dirty")
-    bundle = run_root / "bundle/goldens-v0.2"
-    manifest = Manifest.from_json(bundle / "manifest.json")
-    measurements = [
-        value.split(":", 1)[1]
-        for value in manifest.tolerance_policy.evidence
-        if value.startswith("measurement-commit:")
-    ]
-    trees = [
-        value.split(":", 1)[1]
-        for value in manifest.tolerance_policy.evidence
-        if value.startswith("measurement-tree:")
-    ]
-    if len(measurements) != 1 or len(trees) != 1:
-        raise ValueError("manifest does not bind one measurement commit and tree")
-    measured = measurements[0]
-    if _git(repo, "rev-parse", f"{measured}^{{tree}}").decode().strip() != trees[0]:
-        raise ValueError("measurement tree differs from its commit")
-    _git(repo, "merge-base", "--is-ancestor", measured, candidate)
-    changed = set(
-        _git(repo, "diff", "--name-only", "-z", f"{measured}..{candidate}").split(b"\0")
-    ) - {b""}
-    if changed != {REPORT.encode()}:
-        raise ValueError("final candidate must change only the committed release evidence report")
-    report = (run_root / "report/goldens-v0.2.md").read_bytes()
-    if _git(repo, "show", f"{candidate}:{REPORT}") != report:
-        raise ValueError("committed report differs from the frozen stage report")
-    for name in ASSETS:
-        digest = _sha(bundle / name)
-        if f"- `{name}`: `{digest}`".encode() not in report:
-            raise ValueError(f"report does not bind the final asset bytes: {name}")
-    if _sha(bundle / ASSETS[0]) != manifest.archive.sha256:
-        raise ValueError("bundle archive does not match the manifest")
-    benchmark = json.loads((run_root / "benchmark/benchmark.json").read_bytes())
-    if benchmark["measurement_commit"] != measured or benchmark["measurement_tree"] != trees[0]:
-        raise ValueError("benchmark and approved manifest measure different source identities")
-    notes = run_root / "publish/release-notes.md"
-    repository = "https://github.com/RedHeartSecretMan/vllm-oxide"
-    with notes.open("xb") as output:
-        output.write(
-            (
-                f"Measured commit: [{measured}]({repository}/commit/{measured})\n\n"
-                f"Final tagged commit: [{candidate}]({repository}/tree/{candidate})\n\n"
-            ).encode()
-            + report
-        )
-    return notes
+    """Reject the superseded publisher before reading evidence or writing notes."""
+    raise ValueError(
+        "legacy publication is disabled: layered-accuracy-v1 requires a reviewed "
+        "L0/L1/L2 publication adapter; historical manifests cannot authorize a new release"
+    )
 
 
 def verify_publication(run_root: Path, candidate: str, *, downloaded: bool = False) -> None:

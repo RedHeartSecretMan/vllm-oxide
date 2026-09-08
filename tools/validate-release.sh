@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail-closed, separately invocable goldens-v0.2 stages (ADR-0012).
+# Historical ADR-0012 tooling. New acceptance uses ADR-0015.
 
 set -euo pipefail
 
@@ -21,6 +21,13 @@ if [[ "$STAGE" == "publish" && "${VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH:-}" != "golden
     echo "ERROR: publish requires separate VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2 authority" >&2
     exit 3
 fi
+
+case "$STAGE" in
+    authoritative|publish)
+        echo "ERROR: legacy $STAGE is disabled; layered-accuracy-v1 requires complete L0/L1/L2 evidence and a reviewed publication adapter" >&2
+        exit 3
+        ;;
+esac
 
 case "$STAGE" in
     env|generate|calibrate|observe|authoritative|benchmark|report|bundle|verify-local|publish|verify) ;;

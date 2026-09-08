@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[3] / "tools/validate-release.sh"
 
 
@@ -69,3 +71,17 @@ if command == "observe":
     assert result.returncode == 7, result.stderr.decode()
     assert log.read_text().splitlines() == ["verify-stage-marker", "guard"]
     assert not (run / "markers/observe.complete.json").exists()
+
+
+@pytest.mark.parametrize("stage", ["authoritative", "publish"])
+def test_legacy_release_stages_reject_before_loading_runtime(tmp_path, stage):
+    result = subprocess.run(
+        ["bash", str(SCRIPT), stage, str(tmp_path / "no-run")],
+        env={**os.environ, "VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH": "goldens-v0.2"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "layered-accuracy-v1" in result.stderr
+    assert list(tmp_path.iterdir()) == []

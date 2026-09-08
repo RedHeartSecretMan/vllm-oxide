@@ -253,40 +253,19 @@ cargo test
 
 ### 第二层：发布门禁（手动，GPU）
 
-发布门禁验证 Rust 引擎的数值输出是否与黄金夹具匹配。它需要一张 sm_89 GPU、固定模型快照和经过审查的 ADR-0012 环境，并通过可独立恢复的阶段逐步执行；`publish` 始终需要单独授权。
+现行发布协议为 [ADR-0015](docs/adr/0015-layered-accuracy-validation.md) 和[分层精度契约](docs/validation/layered-accuracy-contract.md)。入口是 `python -m golden_gen.layered_cli`，操作说明见[分层验证流程](tools/golden-gen/README.md#layered-accuracy-protocol-new-workflow)。用例定义和数值预算必须通过独立检查点；缺少定义、预算待定或证据不完整时均为 INVALID。
 
-```bash
-# 创建新的 evidence run；后续阶段使用同一 run root 分别调用。
-./tools/validate-release.sh env \
-    /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id> \
-    /path/to/Qwen3-0.6B
-```
+| 层级 | 必需证据 |
+|------|----------|
+| L0 | 算子数值验证及精确的执行状态不变量 |
+| L1 | 相同冻结历史的完整 logits，以 FP64 计算 KL；同时限制绝对 mean/peak 和相对 vLLM 的配对平均额外 KL |
+| L2 | 参考端选择损失，以及真实自由生成的公开行为和独立重放 |
 
-**验证内容：**
+参考预言机为固定 PyTorch SDPA MATH 后端的 Transformers BF16。基线预言机为 FlashAttention 后端的 vLLM BF16；其配对平均 KL 构成额外门槛，不能豁免参考失败。固定前缀回放保留所有规定的预测行，包括预测 token 分叉后的行；自由生成的分叉和一致率单独诊断，不计算不同历史之间的验收 KL。
 
-| 层级         | 验证对象                    | 验证方式                                                                                                                                       |
-| ------------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| **L1** | 贪心解码 token 参考匹配 | 接受参考 token，或按 manifest 中显式且版本化的容差策略、使用相同前缀下 expected/actual candidate logits 得出的 near-tie 分类。 |
-| **L2** | 相同前缀 logits 张量比较 | 按版本化绝对容差比较原始采样前 logits，包含首个 divergence 的同因果前缀行；随后停止并排除所有不同因果前缀的行。 |
-| **L3** | 每层激活值（调试用）        | v0.2.0 中仍为骨架，不属于发布比较。                                                                                                            |
+旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议。旧 authoritative 和 publication 入口已禁止新发布工作，既有工件保留原身份和原判定。分层验收还需接入性能证据、提交的发布报告、双资产 bundle 和干净消费者验证，之后才能启用发布；这部分适配器尚未实现。
 
-黄金夹具由 `tools/golden-gen/`（Python）生成，运行两个预言机引擎：
-
-- **参考预言机**：Transformers 4.57.6 / PyTorch 2.10 BF16，
-  `output_logits=True`，强制 SDPA math backend
-- **基线预言机**：vLLM 0.18.1 BF16、eager FlashAttention-2，仅作为校准证据
-
-扩展后的 schema-v4 manifest 记录模型/分词器哈希、运行时与 wheel 身份、三条 kernel path、
-`v0.2.0` / `goldens-v0.2` 兼容关系、确定性夹具归档身份，
-并将版本化容差策略与基线校准观察分开记录。首轮四例 candidate observation 永远不能通过；
-只有经过审查的 Definition checkpoint 才能授权读取 holdout。基线证据不能覆盖参考预言机失败。
-
-`goldens-v0.2` GitHub Release 严格只有 `manifest.json` 与
-`goldens-v0.2.tar.gz` 两个资产。夹具只存在于经过 checksum 验证的归档内，
-不会作为单独资产上传，也不进入 git。完整策略见
-[ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md)、
-[ADR-0010](docs/adr/0010-golden-release-asset-contract.md) 与
-[ADR-0012](docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md)。
+CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最终 `goldens-v0.2` 仍按 [ADR-0010](docs/adr/0010-golden-release-asset-contract.md) 仅包含 `manifest.json` 与 `goldens-v0.2.tar.gz` 两个资产。
 
 ### CI 绿色与数值验证
 

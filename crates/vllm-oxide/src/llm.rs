@@ -2463,6 +2463,106 @@ mod tests {
         }
 
         #[test]
+        fn public_prefix_and_waiting_geometries_replay_actual_mechanisms() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::public_prefix_and_waiting_geometries_replay_actual_mechanisms") { return; }
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            for scenario in ["prefix", "waiting"] {
+                let (prompts, limits, budget) = if scenario == "prefix" {
+                    let full = vec![1; 513];
+                    let mut partial = vec![1; 256];
+                    partial.extend(vec![2; 257]);
+                    (vec![full, partial], vec![4, 4], 1024)
+                } else {
+                    (vec![vec![1], vec![2], vec![3; 257]], vec![2, 8, 3], 128)
+                };
+                let mut captures = Vec::new();
+                for mode in ["fixed", "control", "control-replay"] {
+                    let (mut llm, _) = causal_fingerprint_test_harness(budget, 2, true);
+                    std::env::remove_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN");
+                    std::env::remove_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT");
+                    std::env::remove_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CONTROL");
+                    if scenario == "prefix" {
+                        llm.generate(
+                            &[Prompt::TokenIds(prompts[0].clone())],
+                            &[deterministic_causal_params(1)],
+                        )
+                        .unwrap();
+                    }
+                    let plan = root.path().join(format!("{scenario}-{mode}.plan.json"));
+                    let destination = root.path().join(format!("{scenario}-{mode}.capture.json"));
+                    let members = prompts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, prompt)| {
+                            serde_json::json!({"case_id":i.to_string(),"member_id":i.to_string(),
+                            "prompt":prompt,"continuation":vec![7;limits[i]]})
+                        })
+                        .collect::<Vec<_>>();
+                    std::fs::write(
+                        &plan,
+                        serde_json::json!({"protocol":"layered-accuracy-v1",
+                        "schema_version":1,"execution_group_id":scenario,"call_id":scenario,
+                        "vocab_size":100,"members":members})
+                        .to_string(),
+                    )
+                    .unwrap();
+                    std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN", &plan);
+                    std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_OUTPUT", &destination);
+                    if mode != "fixed" {
+                        std::env::set_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_CONTROL", "1");
+                    }
+                    let outputs = llm
+                        .generate(
+                            &prompts
+                                .iter()
+                                .cloned()
+                                .map(Prompt::TokenIds)
+                                .collect::<Vec<_>>(),
+                            &limits
+                                .iter()
+                                .copied()
+                                .map(deterministic_causal_params)
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap();
+                    assert_eq!(llm.engine.kv_cache_manager.num_free_blocks(), 32);
+                    for (i, output) in outputs.iter().enumerate() {
+                        assert_eq!(output.request_id, i + usize::from(scenario == "prefix"));
+                        assert_eq!(output.token_ids.len(), limits[i]);
+                        assert!(output.finished);
+                    }
+                    let capture: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(destination).unwrap()).unwrap();
+                    let events = capture["execution_events"].as_array().unwrap();
+                    if scenario == "prefix" {
+                        assert_eq!(
+                            events[0]["members"][0]["cached_range"],
+                            serde_json::json!([0, 512])
+                        );
+                        assert_eq!(
+                            events[0]["members"][1]["cached_range"],
+                            serde_json::json!([0, 256])
+                        );
+                    } else {
+                        assert!(events.iter().any(|event| {
+                            let members = event["members"].as_array().unwrap();
+                            members
+                                .iter()
+                                .any(|m| m["request_id"] == 2 && m["phase"] == "prefill")
+                                && members
+                                    .iter()
+                                    .any(|m| m["request_id"] == 1 && m["phase"] == "decode")
+                        }));
+                    }
+                    println!("PUBLIC_GEOMETRY scenario={scenario} mode={mode} lengths={:?} limits={limits:?} token_budget={budget} mechanism=PASS", prompts.iter().map(Vec::len).collect::<Vec<_>>());
+                    captures.push(capture);
+                }
+                assert_eq!(captures[1], captures[2]);
+            }
+        }
+
+        #[test]
         fn public_pressure_geometry_actually_recomputes_generated_history() {
             if !enter_isolated_test("llm::tests::internal_golden_capture::public_pressure_geometry_actually_recomputes_generated_history") { return; }
             let root = tempfile::tempdir().unwrap();

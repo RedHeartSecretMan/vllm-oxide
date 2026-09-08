@@ -254,42 +254,19 @@ Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation,
 
 ### Tier 2: Release gate (manual, GPU)
 
-The release gate validates the Rust engine's numerical output against golden fixtures. It requires one sm_89 GPU, the pinned model snapshot, and the reviewed ADR-0012 environment. Run it through the independently resumable stages; `publish` remains separately authorized.
+The current release protocol is [ADR-0015](docs/adr/0015-layered-accuracy-validation.md) and the [layered accuracy contract](docs/validation/layered-accuracy-contract.md). Its entrypoint is `python -m golden_gen.layered_cli`; see the [workflow instructions](tools/golden-gen/README.md#layered-accuracy-protocol-new-workflow). Case definitions and numerical budgets require reviewed checkpoints. Missing definitions, pending budgets or incomplete evidence remain INVALID.
 
-```bash
-# Start a fresh evidence run; invoke later stages one at a time.
-./tools/validate-release.sh env \
-    /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id> \
-    /path/to/Qwen3-0.6B
-```
+| Layer | Required evidence |
+|-------|-------------------|
+| L0 | Operator numerical checks and exact execution-state invariants |
+| L1 | Full-logit FP64 KL on identical frozen histories: absolute mean/peak limits and paired mean excess over vLLM |
+| L2 | Reference-choice loss, plus real unforced public generation and independent replay |
 
-**What it checks:**
+The Reference oracle is Transformers BF16 with the fixed PyTorch SDPA MATH backend. The Baseline oracle is vLLM BF16 with FlashAttention; its paired mean KL contributes an additional gate and cannot waive a reference failure. Fixed-prefix replay preserves all declared prediction rows, including after a predicted-token divergence. Free-generation divergence and agreement are separate diagnostics, never different-history KL evidence.
 
-| Layer | What | How |
-|-------|------|-----|
-| **L1** | Greedy token-sequence reference match | Accepts the reference token or an explicit near-tie classification from the same-prefix expected/actual candidate logits under the versioned Tolerance policy. |
-| **L2** | Same-prefix logits tensor comparison | Compares raw pre-sampling logits under the versioned absolute tolerance through the first divergent token, then excludes every later row because its causal prefix differs. |
-| **L3** | Per-layer activations (debug) | Skeleton in v0.2.0; not a release comparison. |
+The old ADR-0012 schema-v4 manifests, L1=token/L2=logits terminology and `validate-release.sh` workflow are historical. The old authoritative and publication entrypoints now reject new release work. Existing artifacts retain their original identities and verdicts. Layered acceptance must later be connected to performance evidence, the committed release report, the two-asset bundle and clean-consumer verification before publication can be enabled; that adapter is not implemented yet.
 
-Golden fixtures are produced by `tools/golden-gen/` (Python), which runs two oracle engines:
-
-- **Reference oracle**: Transformers 4.57.6 / PyTorch 2.10 BF16,
-  `output_logits=True`, mandatory SDPA math backend
-- **Baseline oracle**: vLLM 0.18.1 BF16, eager FlashAttention-2, calibration
-  evidence only
-
-The extended schema-v4 manifest records exact model/tokenizer hashes, runtime and
-wheel identities, all three kernel paths, `v0.2.0` / `goldens-v0.2`
-compatibility, archive identity, and the versioned Tolerance policy separately
-from baseline calibration observations. Baseline evidence cannot override a
-reference-oracle failure. The first four-case candidate observation is always
-non-accepting; only a reviewed Definition checkpoint can authorize holdout access.
-
-The `goldens-v0.2` GitHub Release has exactly two assets: `manifest.json` and
-`goldens-v0.2.tar.gz`. Fixtures appear only inside that checksum-verified archive,
-never as individual assets or in git. See [ADR-0005](docs/adr/0005-golden-generation-correctness-strategy.md)
-and [ADR-0010](docs/adr/0010-golden-release-asset-contract.md), plus the
-calibration/performance protocol in [ADR-0012](docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md).
+No GPU collection or publication is implied by CPU tests. GPU stages and publication require their own authorization. The eventual `goldens-v0.2` release retains exactly `manifest.json` and `goldens-v0.2.tar.gz` under [ADR-0010](docs/adr/0010-golden-release-asset-contract.md).
 
 ### CI green vs numerically validated
 
