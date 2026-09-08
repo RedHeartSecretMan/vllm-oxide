@@ -4,6 +4,7 @@ import json
 
 from golden_gen.layered_artifacts import sha
 from golden_gen.release_cpu import PRESSURE, gate_commands
+from golden_gen.release_performance import FIXED_OPTIONS, FIXED_SAMPLING
 from tests.test_layered_manifest import (
     test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observation,
 )
@@ -101,10 +102,23 @@ def complete_release_inputs(tmp_path):
             ref = store(
                 performance / (call + ".telemetry.json"),
                 dict(
-                    format="vllm-oxide-internal-benchmark-json-v1",
-                    schema_version=1,
+                    format="vllm-oxide-internal-benchmark-json-v2",
+                    schema_version=2,
                     call_id=call,
                     request_ids=list(range(count)),
+                    binding=dict(
+                        prompt_token_ids=[[2]] * count,
+                        sampling_params=[FIXED_SAMPLING] * count,
+                        engine_options=FIXED_OPTIONS,
+                        device="cuda:0",
+                        fresh_request_ids=True,
+                        cold_prefix_state=True,
+                    ),
+                    sampled_token_ids=[[0] * 64 for _ in range(count)],
+                    outputs=[
+                        dict(request_id=r, token_ids=[0] * 64, text="synthetic", finished=True)
+                        for r in range(count)
+                    ],
                     complete=True,
                     telemetry=telemetry,
                 ),
@@ -134,6 +148,10 @@ def complete_release_inputs(tmp_path):
                 )
             )
         workloads[workload] = dict(
+            discarded_warm_outputs=[
+                dict(request_id=r, token_ids=[0] * 64, text="synthetic", finished=True)
+                for r in range(count)
+            ],
             repetitions=repetitions,
             headline_prefill_tokens_per_second=count * 1e8,
             headline_decode_tokens_per_second=count * 1e8,

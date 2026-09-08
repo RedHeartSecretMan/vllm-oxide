@@ -75,6 +75,8 @@ pub enum Prompt {
 /// The composition root: owns the engine core, tokenizer, and shared
 /// `PagedKVCache`. Constructed via `LLM::new`; generate via `LLM::generate`.
 pub struct LLM {
+    #[cfg(feature = "internal-golden")]
+    benchmark_enforce_eager: bool,
     engine: EngineCore,
     tokenizer: HFTokenizer,
     _resolved_model: ResolvedModel,
@@ -185,6 +187,8 @@ impl LLM {
         );
 
         Ok(Self {
+            #[cfg(feature = "internal-golden")]
+            benchmark_enforce_eager: options.enforce_eager,
             engine,
             tokenizer,
             _resolved_model: resolved_model,
@@ -317,6 +321,23 @@ impl LLM {
             0
         };
         let prompt_lens = tokenized_prompts.iter().map(Vec::len).collect::<Vec<_>>();
+        #[cfg(feature = "internal-golden")]
+        if let Some(benchmark) = benchmark.as_mut() {
+            let (tokens, seqs) = self.engine.scheduler.diagnostic_limits();
+            benchmark.record_inputs(serde_json::json!({
+                "prompt_token_ids":tokenized_prompts,
+                "sampling_params":sampling_params.iter().map(|p|serde_json::json!({
+                    "temperature":p.temperature,"top_k":p.top_k,"top_p":p.top_p,
+                    "max_tokens":p.max_tokens,"ignore_eos":p.ignore_eos,
+                    "presence_penalty":p.presence_penalty,"frequency_penalty":p.frequency_penalty,
+                    "repetition_penalty":p.repetition_penalty})).collect::<Vec<_>>(),
+                "engine_options":{"max_num_batched_tokens":tokens,"max_num_seqs":seqs,
+                    "max_model_len":self.max_model_len,"gpu_memory_utilization":self.engine.scheduler.gpu_memory_utilization,
+                    "enforce_eager":self.benchmark_enforce_eager,"dtype":format!("{:?}",self._resolved_model.dtype())},
+                "device":if self.device.is_cuda(){"cuda:0"}else{"cpu"},
+                "cold_prefix_state":self.engine.kv_cache_manager.diagnostic_is_cold()
+            }))?;
+        }
         let mut request_ids = Vec::with_capacity(prompts.len());
         #[cfg(feature = "internal-golden")]
         let admission = Instant::now();
@@ -1020,6 +1041,8 @@ mod tests {
             ResolvedModel::resolve(Source::Local(model_dir.path().to_path_buf()), None).unwrap();
 
         LLM {
+            #[cfg(feature = "internal-golden")]
+            benchmark_enforce_eager: true,
             engine,
             tokenizer,
             _resolved_model: resolved_model,
@@ -2460,6 +2483,48 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "isolated capture test process failed");
             false
+        }
+
+        #[test]
+        fn benchmark_capture_binds_actual_tokens_parameters_and_cold_state() {
+            if !enter_isolated_test("llm::tests::internal_golden_capture::benchmark_capture_binds_actual_tokens_parameters_and_cold_state") { return; }
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::env::set_var("VLLM_OXIDE_INTERNAL_BENCHMARK_TEMP_DIR", root.path());
+            std::env::set_var(
+                "VLLM_OXIDE_INTERNAL_BENCHMARK_DESTINATION",
+                "benchmark.json",
+            );
+            std::env::set_var("VLLM_OXIDE_INTERNAL_BENCHMARK_CALL_ID", "cpu-binding");
+            let (mut llm, _) = causal_fingerprint_test_harness(128, 2, true);
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![1, 2])],
+                    &[deterministic_causal_params(2)],
+                )
+                .unwrap();
+            let raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(root.path().join("benchmark.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                raw["binding"]["prompt_token_ids"],
+                serde_json::json!([[1, 2]])
+            );
+            assert_eq!(
+                raw["binding"]["engine_options"]["max_num_batched_tokens"],
+                128
+            );
+            assert_eq!(raw["binding"]["sampling_params"][0]["max_tokens"], 2);
+            assert_eq!(raw["binding"]["cold_prefix_state"], true);
+            assert_eq!(raw["binding"]["fresh_request_ids"], true);
+            assert_eq!(
+                raw["outputs"][0]["token_ids"],
+                serde_json::json!(output[0].token_ids)
+            );
+            assert_eq!(
+                raw["sampled_token_ids"][0],
+                serde_json::json!(output[0].token_ids)
+            );
         }
 
         #[test]

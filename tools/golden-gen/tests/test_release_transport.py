@@ -129,6 +129,37 @@ def test_artifact_reference_cannot_hide_a_noncanonical_path(tmp_path):
         bound_file(tmp_path, dict(path="./payload", sha256=sha(path)))
 
 
+@pytest.mark.parametrize("mutation", ["floating-version", "missing-archive-name"])
+def test_wire_types_and_required_nested_fields_agree(tmp_path, mutation):
+    from golden_gen.release_transport import read_manifest
+
+    binary = os.environ.get("GOLDEN_TRANSPORT_TEST_BINARY")
+    if not binary:
+        pytest.skip("CPU transport binary required")
+    bundle = make_bundle(tmp_path)
+    path = bundle / "manifest.json"
+    raw = json.loads(path.read_text())
+    if mutation == "floating-version":
+        raw["schema_version"] = 5.0
+    else:
+        del raw["archive"]["filename"]
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError):
+        read_manifest(path)
+    actual = subprocess.run(
+        [
+            binary,
+            "--layered-transport",
+            "--bundle-dir",
+            str(bundle),
+            "--cache-dir",
+            str(tmp_path / "rust"),
+        ],
+        capture_output=True,
+    )
+    assert actual.returncode != 0
+
+
 @pytest.mark.parametrize(
     "path", ["../bad", "/bad", "a//b", "a/./b", "a/../b", ".git/config", "a\\b"]
 )

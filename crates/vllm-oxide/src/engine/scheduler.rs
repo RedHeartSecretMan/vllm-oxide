@@ -117,6 +117,10 @@ pub struct Scheduler {
 
 impl Scheduler {
     #[cfg(feature = "internal-golden")]
+    pub(crate) fn diagnostic_limits(&self) -> (usize, usize) {
+        (self.max_num_batched_tokens, self.max_num_seqs)
+    }
+    #[cfg(feature = "internal-golden")]
     pub(crate) fn diagnostic_eos_token_ids(&self) -> &[u32] {
         &self.eos_token_ids
     }

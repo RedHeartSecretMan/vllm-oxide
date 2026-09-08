@@ -1160,6 +1160,9 @@ mod tests {
             "canonical-04-repetition-1",
         ))
         .unwrap();
+        session
+            .record_inputs(serde_json::json!({"prompt_token_ids":[vec![1;8]]}))
+            .unwrap();
         session.bind_requests(&[7]).unwrap();
         session
             .record_engine_step(

@@ -95,7 +95,7 @@ class Artifact(BaseModel):
 
 class ArchiveIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    filename: Literal["goldens-v0.2.tar.gz"] = "goldens-v0.2.tar.gz"
+    filename: Literal["goldens-v0.2.tar.gz"]
     sha256: str = Field(pattern=HEX64)
 
 
@@ -166,6 +166,8 @@ def read_manifest(path: Path) -> ReleaseManifest:
     data = json.loads(raw, object_pairs_hook=unique)
     if not isinstance(data, dict) or set(data) != set(ReleaseManifest.model_fields):
         raise ValueError("release manifest missing or unknown wire fields")
+    if type(data["schema_version"]) is not int:
+        raise ValueError("release schema_version must be a wire integer")
     value = ReleaseManifest.model_validate(data)
     if value.archive is None:
         raise ValueError("release manifest has no archive identity")
@@ -231,7 +233,9 @@ def build_bundle(root: Path, manifest: ReleaseManifest, destination: Path) -> Pa
             raw.flush()
             os.fsync(raw.fileno())
         check_upload_size(archive.stat().st_size)
-        bound = manifest.model_copy(update={"archive": ArchiveIdentity(sha256=sha(archive))})
+        bound = manifest.model_copy(
+            update={"archive": ArchiveIdentity(filename="goldens-v0.2.tar.gz", sha256=sha(archive))}
+        )
         payload = (bound.model_dump_json(indent=2) + "\n").encode()
         if len(payload) > MANIFEST_LIMIT:
             raise ValueError("release manifest exceeds size limit")

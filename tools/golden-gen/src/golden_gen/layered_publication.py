@@ -16,6 +16,7 @@ from golden_gen.release_adapter import REPORT, git, render_report, verify_bundle
 from golden_gen.release_transport import ASSETS, check_upload_size
 
 REPOSITORY = "RedHeartSecretMan/vllm-oxide"
+PUSH_URL = f"https://github.com/{REPOSITORY}.git"
 TAG = "goldens-v0.2"
 
 
@@ -29,6 +30,9 @@ class PublicationTransport(Protocol):
 
 class GitHubTransport:
     """Real writes occur only after publish() has verified every local prerequisite."""
+
+    def __init__(self, repo: Path | None = None):
+        self.repo = repo
 
     @staticmethod
     def _gh(*args: str) -> bytes:
@@ -50,15 +54,14 @@ class GitHubTransport:
                 )
 
     def create_tag(self, candidate: str) -> None:
-        self._gh(
-            "api",
-            "--method",
-            "POST",
-            f"repos/{REPOSITORY}/git/refs",
-            "-f",
-            f"ref=refs/tags/{TAG}",
-            "-f",
-            f"sha={candidate}",
+        if self.repo is None or re.fullmatch(r"[0-9a-f]{40}", candidate) is None:
+            raise ValueError("tag push requires the reviewed repository and full candidate OID")
+        # Upload the local evidence-only descendant's objects and only this tag.
+        # A refs API call cannot create a ref to an object absent on GitHub.
+        subprocess.run(
+            ["git", "-C", str(self.repo), "push", "--", PUSH_URL, f"{candidate}:refs/tags/{TAG}"],
+            check=True,
+            capture_output=True,
         )
 
     def create_release(self, notes: Path) -> None:

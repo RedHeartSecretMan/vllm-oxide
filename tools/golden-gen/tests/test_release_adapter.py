@@ -62,6 +62,33 @@ def test_complete_raw_evidence_survives_python_bundle_rust_clean_consumer(tmp_pa
         prepare_bundle(repo, run, tmp_path / "wrong-performance", entries)
     raw.write_bytes(original_raw)
     wrapper.write_bytes(original_wrapper)
+    telemetry = run / "benchmark/canonical_04-repetition-1.telemetry.json"
+    original_telemetry = telemetry.read_bytes()
+    for key in ("prompt_token_ids", "sampling_params", "cold_prefix_state", "sampled_token_ids"):
+        data = json.loads(original_telemetry)
+        if key == "prompt_token_ids":
+            data["binding"][key] = [[3]]  # Same length, different actual input token.
+        elif key == "sampling_params":
+            data["binding"][key][0]["temperature"] = 1
+        elif key == "cold_prefix_state":
+            data["binding"][key] = False
+        else:
+            data[key][0][0] = 1
+        telemetry.write_text(json.dumps(data))
+        summary = json.loads(original_raw)
+        summary["workloads"]["canonical_04"]["repetitions"][0]["telemetry_artifact_sha256"] = sha(
+            telemetry
+        )
+        raw.write_text(json.dumps(summary))
+        wrapper_data = json.loads(original_wrapper)
+        wrapper_data["raw"]["sha256"] = sha(raw)
+        wrapper_data["telemetry"][0]["sha256"] = sha(telemetry)
+        wrapper.write_text(json.dumps(wrapper_data))
+        with pytest.raises(ValueError, match="binding|token stream"):
+            prepare_bundle(repo, run, tmp_path / ("wrong-" + key), entries)
+        telemetry.write_bytes(original_telemetry)
+        raw.write_bytes(original_raw)
+        wrapper.write_bytes(original_wrapper)
     cpu = run / "cpu/evidence.json"
     original_cpu = cpu.read_bytes()
     changed = json.loads(original_cpu)

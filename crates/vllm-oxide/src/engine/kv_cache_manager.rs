@@ -83,6 +83,10 @@ pub struct KvCacheManager {
 }
 
 impl KvCacheManager {
+    #[cfg(feature = "internal-golden")]
+    pub(crate) fn diagnostic_is_cold(&self) -> bool {
+        self.block_pool.hash_to_block_id.is_empty() && self.block_pool.used_block_ids.is_empty()
+    }
     /// Construct a new `KvCacheManager` with the given pool size and
     /// shared paged KV cache.
     pub fn new(num_blocks: usize, block_size: usize, paged_kv: Arc<Mutex<PagedKVCache>>) -> Self {

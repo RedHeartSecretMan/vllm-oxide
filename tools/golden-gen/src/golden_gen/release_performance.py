@@ -8,10 +8,47 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
+from golden_gen import config
 from golden_gen.layered_accuracy import PROTOCOL
 from golden_gen.layered_artifacts import atomic_json, bound_file, sha, source_identity
 from golden_gen.layered_manifest import _common_runtime, evaluate_manifest
 from golden_gen.layered_release import Registry
+
+FIXED_OPTIONS = dict(
+    max_num_batched_tokens=16384,
+    max_num_seqs=512,
+    max_model_len=4096,
+    gpu_memory_utilization=0.5,
+    enforce_eager=True,
+    dtype="BF16",
+)
+FIXED_SAMPLING = dict(
+    temperature=0,
+    top_k=None,
+    top_p=None,
+    max_tokens=64,
+    ignore_eos=True,
+    presence_penalty=0,
+    frequency_penalty=0,
+    repetition_penalty=0,
+)
+
+
+def _public_tokens(outputs: list[dict[str, Any]], count: int) -> list[list[int]]:
+    if len(outputs) != count:
+        raise ValueError("performance public output count mismatch")
+    for i, output in enumerate(outputs):
+        if (
+            output.get("request_id") != i
+            or output.get("finished") is not True
+            or not isinstance(output.get("text"), str)
+            or len(output.get("token_ids", [])) != 64
+            or any(
+                type(t) is not int or not 0 <= t < config.VOCAB_SIZE for t in output["token_ids"]
+            )
+        ):
+            raise ValueError("performance public token/request identity mismatch")
+    return [output["token_ids"] for output in outputs]
 
 
 def _integer(value: Any) -> int:
@@ -137,6 +174,7 @@ def validate_performance(
             ["canonical_04"] if workload == "canonical_04" else [f"canonical_05{x}" for x in "abcd"]
         )
         prompt_tokens = sum(len(members[i].prompt) for i in ids)
+        _public_tokens(value["discarded_warm_outputs"], len(ids))
         repetitions = value["repetitions"]
         if len(repetitions) != 3:
             raise ValueError("performance needs three measured repetitions")
@@ -149,13 +187,29 @@ def validate_performance(
                 raise ValueError("performance summary lost its raw telemetry hash")
             document = json.loads(telemetry_path.read_text())
             if (
-                document.get("format") != "vllm-oxide-internal-benchmark-json-v1"
-                or document.get("schema_version") != 1
+                document.get("format") != "vllm-oxide-internal-benchmark-json-v2"
+                or document.get("schema_version") != 2
                 or document.get("complete") is not True
                 or document.get("call_id") != name.removesuffix(".telemetry.json")
                 or document.get("request_ids") != list(range(len(ids)))
             ):
                 raise ValueError("performance telemetry identity mismatch")
+            binding = document.get("binding", {})
+            if (
+                binding.get("prompt_token_ids") != [members[i].prompt for i in ids]
+                or binding.get("engine_options") != FIXED_OPTIONS
+                or binding.get("sampling_params") != [FIXED_SAMPLING] * len(ids)
+                or binding.get("device") != "cuda:0"
+                or binding.get("fresh_request_ids") is not True
+                or binding.get("cold_prefix_state") is not True
+            ):
+                raise ValueError(
+                    "performance actual token/configuration/cold-state binding differs"
+                )
+            if _public_tokens(document["outputs"], len(ids)) != document.get("sampled_token_ids"):
+                raise ValueError(
+                    "performance public outputs differ from actual sampled token stream"
+                )
             recomputed = summarize_telemetry(
                 document["telemetry"]["steps"], document["request_ids"], prompt_tokens
             )

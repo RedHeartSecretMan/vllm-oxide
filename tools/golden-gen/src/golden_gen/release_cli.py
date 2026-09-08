@@ -160,7 +160,7 @@ def main() -> None:
                 args.rust_binary,
                 args.review,
                 args.review_base,
-                GitHubTransport(),
+                GitHubTransport(args.repo_root),
             )
             files = [
                 args.bundle_dir / "manifest.json",

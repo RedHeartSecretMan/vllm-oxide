@@ -81,7 +81,7 @@ impl BenchmarkConfig {
     }
 }
 
-const BENCHMARK_FORMAT: &str = "vllm-oxide-internal-benchmark-json-v1";
+const BENCHMARK_FORMAT: &str = "vllm-oxide-internal-benchmark-json-v2";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct BenchmarkArtifact {
@@ -89,6 +89,9 @@ struct BenchmarkArtifact {
     schema_version: u32,
     call_id: String,
     request_ids: Vec<usize>,
+    binding: serde_json::Value,
+    sampled_token_ids: Vec<Vec<u32>>,
+    outputs: Vec<serde_json::Value>,
     complete: bool,
     telemetry: crate::benchmark_telemetry::BenchmarkTelemetry,
 }
@@ -99,6 +102,8 @@ pub(crate) struct BenchmarkSession {
     stage_path: Option<PathBuf>,
     stage_file: Option<File>,
     request_ids: Vec<usize>,
+    binding: Option<serde_json::Value>,
+    sampled_token_ids: Vec<Vec<u32>>,
     samples: Vec<crate::benchmark_telemetry::StepSample>,
     published: bool,
 }
@@ -121,6 +126,8 @@ impl BenchmarkSession {
             stage_path: Some(stage_path),
             stage_file: Some(stage_file),
             request_ids: Vec::new(),
+            binding: None,
+            sampled_token_ids: Vec::new(),
             samples: Vec::new(),
             published: false,
         })
@@ -134,6 +141,19 @@ impl BenchmarkSession {
             bail!("internal benchmark received duplicate stable request ids");
         }
         self.request_ids.extend_from_slice(request_ids);
+        self.sampled_token_ids = vec![Vec::new(); request_ids.len()];
+        self.binding
+            .as_mut()
+            .context("benchmark inputs were not bound")?["fresh_request_ids"] =
+            serde_json::json!(request_ids.iter().copied().eq(0..request_ids.len()));
+        Ok(())
+    }
+
+    pub(crate) fn record_inputs(&mut self, binding: serde_json::Value) -> Result<()> {
+        if self.binding.is_some() || !binding.is_object() {
+            bail!("benchmark inputs already bound or invalid");
+        }
+        self.binding = Some(binding);
         Ok(())
     }
 
@@ -143,6 +163,17 @@ impl BenchmarkSession {
         started_ns: u64,
         ended_ns: u64,
     ) -> Result<()> {
+        for emission in &step.emissions {
+            let position = self
+                .request_ids
+                .iter()
+                .position(|id| *id == emission.request_id)
+                .context("benchmark emitted an unknown request")?;
+            if self.sampled_token_ids[position].len() != emission.completion_step {
+                bail!("benchmark sampled-token stream is not contiguous");
+            }
+            self.sampled_token_ids[position].push(emission.selected_token);
+        }
         let phase = match step
             .phase
             .ok_or_else(|| anyhow!("benchmark engine step has no executable plan"))?
@@ -183,11 +214,30 @@ impl BenchmarkSession {
             &self.request_ids,
             std::mem::take(&mut self.samples),
         )?;
+        if outputs
+            .iter()
+            .zip(&self.sampled_token_ids)
+            .any(|(o, t)| o.token_ids != *t)
+        {
+            bail!("benchmark public outputs differ from actual sampled tokens");
+        }
         let artifact = BenchmarkArtifact {
             format: BENCHMARK_FORMAT.to_string(),
-            schema_version: 1,
+            schema_version: 2,
             call_id: self.config.call_id.clone(),
             request_ids: self.request_ids.clone(),
+            binding: self
+                .binding
+                .take()
+                .context("benchmark input binding missing")?,
+            sampled_token_ids: std::mem::take(&mut self.sampled_token_ids),
+            outputs: outputs
+                .iter()
+                .map(|o| {
+                    serde_json::json!({"request_id":o.request_id,
+                "token_ids":o.token_ids,"text":o.text,"finished":o.finished})
+                })
+                .collect(),
             complete: true,
             telemetry,
         };

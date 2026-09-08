@@ -205,6 +205,13 @@ pub fn run_release_benchmark(
             bail!("throwaway benchmark run did not produce exactly 64 tokens per request");
         }
         drop(throwaway);
+        let discarded_warm_outputs = throwaway_outputs
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+            "request_id":o.request_id,"token_ids":o.token_ids,"text":o.text,"finished":o.finished})
+            })
+            .collect();
 
         let mut repetitions = Vec::new();
         for repetition in 1..=workload.measured_repetitions {
@@ -251,7 +258,10 @@ pub fn run_release_benchmark(
             });
             drop(llm);
         }
-        workloads.insert(workload.id.to_string(), aggregate_workload(repetitions)?);
+        workloads.insert(
+            workload.id.to_string(),
+            aggregate_workload(repetitions, discarded_warm_outputs)?,
+        );
     }
     let evidence = BenchmarkRunEvidence {
         protocol: "layered-accuracy-v1",

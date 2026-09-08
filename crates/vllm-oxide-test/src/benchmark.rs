@@ -195,6 +195,9 @@ struct PrivateTelemetryArtifact {
     schema_version: u32,
     call_id: String,
     request_ids: Vec<usize>,
+    binding: serde_json::Value,
+    sampled_token_ids: Vec<Vec<u32>>,
+    outputs: Vec<serde_json::Value>,
     complete: bool,
     telemetry: RawTelemetry,
 }
@@ -211,6 +214,7 @@ pub struct BenchmarkRepetitionEvidence {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkloadBenchmarkEvidence {
+    pub discarded_warm_outputs: Vec<serde_json::Value>,
     pub repetitions: Vec<BenchmarkRepetitionEvidence>,
     pub headline_prefill_tokens_per_second: f64,
     pub headline_decode_tokens_per_second: f64,
@@ -239,8 +243,8 @@ fn validate_private_telemetry(
         .with_context(|| format!("reading benchmark telemetry {}", path.display()))?;
     let artifact: PrivateTelemetryArtifact = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing benchmark telemetry {}", path.display()))?;
-    if artifact.format != "vllm-oxide-internal-benchmark-json-v1"
-        || artifact.schema_version != 1
+    if artifact.format != "vllm-oxide-internal-benchmark-json-v2"
+        || artifact.schema_version != 2
         || artifact.call_id != expected_call_id
         || !artifact.complete
         || artifact.request_ids.len() != expected_request_count
@@ -253,6 +257,21 @@ fn validate_private_telemetry(
             != expected_request_count
     {
         bail!("benchmark telemetry header, completion, or request identity mismatch");
+    }
+    if artifact.binding["fresh_request_ids"] != true
+        || artifact.binding["cold_prefix_state"] != true
+        || artifact.binding["device"] != "cuda:0"
+        || artifact.outputs.len() != expected_request_count
+        || artifact.sampled_token_ids.len() != expected_request_count
+        || artifact
+            .outputs
+            .iter()
+            .zip(&artifact.sampled_token_ids)
+            .any(|(output, tokens)| {
+                output["token_ids"] != serde_json::json!(tokens) || tokens.len() != 64
+            })
+    {
+        bail!("benchmark lacks fresh cold inputs or actual sampled/public token binding");
     }
     let telemetry = artifact.telemetry;
     let mut completion_steps = artifact
@@ -377,6 +396,7 @@ fn median_f64(mut values: Vec<f64>) -> Result<f64> {
 #[allow(clippy::cast_precision_loss)]
 fn aggregate_workload(
     repetitions: Vec<BenchmarkRepetitionEvidence>,
+    discarded_warm_outputs: Vec<serde_json::Value>,
 ) -> Result<WorkloadBenchmarkEvidence> {
     if repetitions.len() != 3 {
         bail!("benchmark workload requires exactly three measured repetitions");
@@ -407,6 +427,7 @@ fn aggregate_workload(
             .collect(),
     )?;
     Ok(WorkloadBenchmarkEvidence {
+        discarded_warm_outputs,
         repetitions,
         headline_prefill_tokens_per_second,
         headline_decode_tokens_per_second,
