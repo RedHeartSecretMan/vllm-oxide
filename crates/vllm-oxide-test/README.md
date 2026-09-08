@@ -6,7 +6,9 @@ L1=token/L2=logits numbering. It cannot satisfy new release acceptance under
 [layered workflow](../../tools/golden-gen/README.md#layered-accuracy-protocol-new-workflow)
 uses L0 operators, L1 model numerics and L2 decoding/public behavior. Historical
 artifacts retain their original verdicts; the old shell authoritative/publication
-entrypoints are disabled. A layered release adapter remains unfinished.
+entrypoints stay disabled. The new schema5 adapter is documented in the
+[release stages](../../tools/golden-gen/README.md#schema5-release-stages).
+Its CPU-tested transport does not imply GPU numerical acceptance.
 
 > **⚠️ Release gate — NOT a CI gate.**
 >

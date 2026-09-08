@@ -26,6 +26,7 @@ pub mod manifest;
 pub mod measurement;
 pub mod observation;
 pub mod prompts;
+pub mod release_transport;
 pub mod report;
 pub mod types;
 

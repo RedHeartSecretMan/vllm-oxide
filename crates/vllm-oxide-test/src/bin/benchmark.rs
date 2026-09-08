@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -22,6 +22,14 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.prompts_dir.canonicalize()?
+        != cli
+            .repo_root
+            .join("tools/golden-gen/prompts")
+            .canonicalize()?
+    {
+        bail!("performance prompts must come from the reviewed source checkout");
+    }
     let prompts = vllm_oxide_test::prompts::load_all_prompts(&cli.prompts_dir)?;
     vllm_oxide_test::benchmark::run_release_benchmark(
         &cli.model_path,

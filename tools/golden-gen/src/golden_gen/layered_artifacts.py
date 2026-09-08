@@ -55,7 +55,15 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 def bound_file(root: Path, record: dict[str, Any]) -> Path:
     relative = PurePosixPath(record["path"])
-    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or not relative.parts
+        or str(relative) != record["path"]
+        or "\\" in record["path"]
+        or "\0" in record["path"]
+        or ".git" in relative.parts
+    ):
         raise ValueError("unsafe layered artifact path")
     path = root / relative
     if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):

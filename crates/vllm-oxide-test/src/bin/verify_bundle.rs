@@ -8,6 +8,9 @@ use vllm_oxide_test::download::{download_release_with, ReleaseSource};
 
 #[derive(Parser)]
 struct Cli {
+    /// Verify schema5 transport only; mathematical acceptance is checked separately.
+    #[arg(long)]
+    layered_transport: bool,
     #[arg(long)]
     bundle_dir: PathBuf,
     #[arg(long)]
@@ -42,6 +45,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.cache_dir.exists() || cli.cache_dir.is_symlink() {
         bail!("clean-consumer verification requires a non-existing cache directory");
+    }
+    if cli.layered_transport {
+        let installed =
+            vllm_oxide_test::release_transport::install_transport(&cli.bundle_dir, &cli.cache_dir)?;
+        println!(
+            "{}",
+            serde_json::json!({"protocol":"layered-accuracy-v1",
+            "schema_version":5,"transport_verified":true,"accepting":false,"installed":installed})
+        );
+        return Ok(());
     }
     let (manifest, _) = download_release_with(
         &LocalBundle(cli.bundle_dir),

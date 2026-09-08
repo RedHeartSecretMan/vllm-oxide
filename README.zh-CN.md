@@ -263,7 +263,7 @@ cargo test
 
 参考预言机为固定 PyTorch SDPA MATH 后端的 Transformers BF16。基线预言机为 FlashAttention 后端的 vLLM BF16；其配对平均 KL 构成额外门槛，不能豁免参考失败。固定前缀回放保留所有规定的预测行，包括预测 token 分叉后的行；自由生成的分叉和一致率单独诊断，不计算不同历史之间的验收 KL。
 
-旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议。旧 authoritative 和 publication 入口已禁止新发布工作，既有工件保留原身份和原判定。分层验收还需接入性能证据、提交的发布报告、双资产 bundle 和干净消费者验证，之后才能启用发布；这部分适配器尚未实现。
+旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议，旧 authoritative/publication 入口保持禁用。[schema5 发布适配器](tools/golden-gen/README.md#schema5-release-stages) 将完整原始分层证据接入性能、固定 CPU 门槛、报告、双资产 bundle 和 Python/Rust 干净消费者验证。发布仍要求干净的 evidence-only 候选、完整新审查和独立用户授权。既有工件保留原身份和原判定。
 
 CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最终 `goldens-v0.2` 仍按 [ADR-0010](docs/adr/0010-golden-release-asset-contract.md) 仅包含 `manifest.json` 与 `goldens-v0.2.tar.gz` 两个资产。
 

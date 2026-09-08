@@ -82,15 +82,75 @@ after seeing acceptance outcomes.
 
 The new CLI deliberately exposes no tag, release, upload or publication action.
 The old shell `authoritative`/`publish` stages and direct publication preparation
-are disabled: they cannot consume layered evidence. A reviewed layered adapter
-for performance/report/bundle/clean-consumer/publication remains unfinished.
+stay disabled. The schema5 release adapter below consumes complete layered evidence.
 Numerical acceptance is not publication authority: performance evidence, release
 report, bundle/clean-consumer verification, final review and explicit publication
 authorization remain separate requirements. CPU tests do not establish GPU
 numerical accuracy. Dense raw inventories need substantially more disk space than
 the legacy corpus; budget storage from the frozen row inventory before collection.
 
-## Legacy workflow prerequisites
+## Schema5 release stages
+
+`python -m golden_gen.release_cli --help` exposes separately invocable `cpu`,
+`performance`, `bundle`, `verify`, `report` and `publish` stages. All require
+`--repo-root` and a fresh external `--marker`. Failure writes no success marker.
+These are CPU-tested implementation paths, not evidence of GPU acceptance.
+
+- `cpu`: `--output` is a fresh log directory; supply the development `--python`,
+  prepared `--worker-python`, CPU `--rust-binary` (the verify-bundle executable),
+  and shared `--target-dir`. The producer executes nine fixed gates: default
+  core, workspace, internal-golden, fmt, Clippy, cargo-deny, pytest, Ruff and
+  mypy. Actual commands, environment/toolchain, status and raw logs are retained;
+  no supplied PASS summary can replace execution. The default core output must
+  show the fixed 128-token pressure regression actually running.
+- `performance`: after separate GPU stage authorization, use `--output` for a
+  fresh directory, `--model-dir`, `--benchmark-binary` and
+  `--authoritative-manifest`. This revalidates authoritative evidence before
+  owning a GPU and records current runtime, guarded execution and original
+  synchronized telemetry for the ADR-0012 fixed workloads. Never invoke it
+  during CPU-only preparation.
+- `bundle`: supply `--run-dir`, fresh `--output`, `--authoritative-manifest`,
+  `--authoritative-marker`, `--performance-evidence` and `--cpu-evidence`.
+  All four evidence entrypoints must be beneath the same run root. The adapter
+  snapshots every relevant source's selected Definition bytes without changing
+  their original identities, recomputes the evidence and emits the two assets.
+- `verify`: use `--bundle-dir`, `--cache-dir` and CPU `--rust-binary`. It runs
+  Rust and Python transport readers on the actual two files, reconstructs the
+  closure in a private fresh cache, and re-evaluates raw semantics and performance
+  before exposing the verified immutable install. The Rust flag
+  `--layered-transport` alone explicitly returns `accepting=false`.
+- `report`: the same verification arguments plus a fresh external `--output`
+  produce Markdown. Commit those exact bytes at `docs/releases/goldens-v0.2.md`
+  in the evidence-only candidate; do not add the report to the two asset files.
+- `publish`: the verification arguments plus `--review`, `--review-base` and
+  independent `VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2` authority are required.
+  The review JSON uses protocol `layered-accuracy-v1`, schema1,
+  kind `full_candidate_review`, exact `base`, `candidate: {commit,tree}` and
+  SHA256 of the complete `git diff --binary BASE...CANDIDATE`. `axes.standards`
+  and `axes.spec` each bind an original report `{path,sha256}` relative to the
+  review JSON and require `unresolved_findings: []`. The adapter recomputes the
+  bundle and report, refuses existing/partial remote state, creates one direct
+  tag and release, uploads exactly two assets and validates downloaded bytes.
+  Failed remote operations are never automatically overwritten or repaired.
+
+Release schema5 bounds are 16 MiB per manifest, 50,000 artifacts, 8 GiB minus
+one byte per artifact (the USTAR field limit), and 1 TiB total extracted bytes.
+Artifact filenames are `artifact-NNNNNN.bin` in sorted ASCII logical-path order;
+identical bytes at different logical paths remain distinct records. Consumers
+enforce canonical gzip/USTAR headers, exact lengths/hashes, bounded streaming,
+complete inventories and immutable no-replace installation. Disk capacity is
+checked before packing/extraction. GitHub's per-asset limit, verified on
+2026-09-08, is strictly less than 2 GiB; equal or larger assets require a capacity
+decision, never silent splitting, evidence omission or encoding changes.
+
+The committed registry/budgets remain authoritative. Pending budgets or any
+missing source, owner, replay, raw telemetry, CPU gate or original evidence
+reject the new release path. Final candidate review and publication authorization
+stay outside the archive to avoid self-reference. Tests use synthetic evidence
+and injected transports; they never establish Qwen GPU correctness or publication
+permission.
+
+## Legacy workflow prerequisites (historical)
 
 - Linux with one NVIDIA sm_89 GPU and no unrelated CUDA compute process
 - At least 32 GiB host RAM; every GPU-owning stage stops below 16 GiB available

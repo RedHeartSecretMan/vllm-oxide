@@ -220,9 +220,13 @@ pub struct WorkloadBenchmarkEvidence {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchmarkRunEvidence {
+    pub protocol: &'static str,
     pub schema_version: u32,
     pub measurement_commit: String,
     pub measurement_tree: String,
+    pub build_source_id: &'static str,
+    pub cuda_feature_enabled: bool,
+    pub producer_pid: u32,
     pub workloads: BTreeMap<String, WorkloadBenchmarkEvidence>,
 }
 

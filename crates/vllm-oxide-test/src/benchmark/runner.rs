@@ -171,6 +171,11 @@ pub fn run_release_benchmark(
     measurement_commit: &str,
     measurement_tree: &str,
 ) -> Result<BenchmarkRunEvidence> {
+    if std::env::vars_os()
+        .any(|(name, _)| name.to_string_lossy().starts_with("VLLM_OXIDE_INTERNAL_"))
+    {
+        bail!("performance requires a fresh process without forcing or capture configuration");
+    }
     crate::measurement::validate_deterministic_environment()?;
     let measurement =
         validate_measurement_identity(repo_root, measurement_commit, measurement_tree)?;
@@ -249,9 +254,13 @@ pub fn run_release_benchmark(
         workloads.insert(workload.id.to_string(), aggregate_workload(repetitions)?);
     }
     let evidence = BenchmarkRunEvidence {
+        protocol: "layered-accuracy-v1",
         schema_version: 1,
         measurement_commit: measurement.commit,
         measurement_tree: measurement.tree,
+        build_source_id: env!("VLLM_OXIDE_BUILD_SOURCE_ID"),
+        cuda_feature_enabled: cfg!(feature = "cuda"),
+        producer_pid: std::process::id(),
         workloads,
     };
     let mut output = OpenOptions::new()

@@ -116,7 +116,8 @@ def test_authoritative_pending_budgets_stop_before_opening_manifest_or_holdout(
 
 def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observation(
     tmp_path: Path,
-) -> None:
+    release_fixture=False,
+):
     from golden_gen import config
     from golden_gen.fixed_prefix import ReplayPlan
     from golden_gen.layered_artifacts import sha
@@ -285,6 +286,49 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
             ("obvious_distribution_swap_v1", distribution_definition),
         )
     ]
+    extra_groups = []
+    if release_fixture:
+        for group_id, case_ids in (
+            ("single", ["canonical_04"]),
+            ("batch", [f"canonical_05{x}" for x in "abcd"]),
+        ):
+            extra_groups.append(
+                dict(
+                    split="development",
+                    engine_options={},
+                    required_mechanisms={
+                        e: ["prefill"] for e in ("reference", "baseline", "candidate")
+                    },
+                    plan=dict(
+                        protocol="layered-accuracy-v1",
+                        schema_version=1,
+                        execution_group_id=group_id,
+                        call_id=group_id,
+                        vocab_size=config.VOCAB_SIZE,
+                        members=[
+                            dict(case_id=case, member_id=case, prompt=[2], continuation=[2])
+                            for case in case_ids
+                        ],
+                    ),
+                )
+            )
+        registry["numerical_cases"].extend(extra_groups)
+        registry["expected_counts"]["development"] = dict(
+            owner_inventory=[
+                dict(
+                    kind="execution_group",
+                    execution_group_id=g["plan"]["execution_group_id"],
+                    engine=e,
+                    variant=v,
+                    target_rows=len(g["plan"]["members"]),
+                    setup_calls=0,
+                    setup_rows=0,
+                )
+                for g in extra_groups
+                for e in ("reference", "baseline", "candidate")
+                for v in ("primary", "replay", "control")
+            ]
+        )
     (repo / REGISTRY_PATH).write_text(json.dumps(registry))
     (repo / ".dag/definition-index.json").write_text(
         json.dumps(
@@ -813,6 +857,50 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
             refreshed[variant + "_receipt"] = store("auth-" + receipt_ref["path"], new_receipt)
         return refreshed
 
+    fresh_entries = [fresh_entry(e) for e in entries]
+    for group in extra_groups:
+        extra_plan = ReplayPlan.model_validate(group["plan"])
+        for original in fresh_entries[:3]:
+            extra = dict(
+                execution_group_id=extra_plan.execution_group_id, engine=original["engine"]
+            )
+            for variant in ("primary", "replay", "control"):
+                capture = json.loads((run / original[variant]["path"]).read_text())
+                capture.update(
+                    execution_group_id=extra_plan.execution_group_id, call_id=extra_plan.call_id
+                )
+                row = capture["rows"][0]
+                capture["rows"] = [
+                    {
+                        **row,
+                        "case_id": m.case_id,
+                        "member_id": m.member_id,
+                        "request_id": i,
+                        "execution_group_id": extra_plan.execution_group_id,
+                        "call_id": extra_plan.call_id,
+                        "history_sha256": extra_plan.history_sha256(m.member_id, 0),
+                    }
+                    for i, m in enumerate(extra_plan.members)
+                ]
+                event = capture["execution_events"][0]["members"][0]
+                capture["execution_events"] = [
+                    dict(
+                        plan_id=1,
+                        token_budget=len(extra_plan.members),
+                        members=[
+                            {**event, "request_id": i, "input_token_ids": m.prompt}
+                            for i, m in enumerate(extra_plan.members)
+                        ],
+                    )
+                ]
+                capture.pop("public_call", None)
+                prefix = f"extra-{extra_plan.execution_group_id}-{extra['engine']}-{variant}"
+                capref = store(prefix + ".json", capture)
+                receipt = json.loads((run / original[variant + "_receipt"]["path"]).read_text())
+                receipt["capture_sha256"] = capref["sha256"]
+                extra[variant] = capref
+                extra[variant + "_receipt"] = store(prefix + "-receipt.json", receipt)
+            fresh_entries.append(extra)
     approved_manifest = store(
         "authoritative-manifest.json",
         dict(
@@ -822,7 +910,7 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
             registry_sha256=registry_sha,
             policy_sha256=sha(repo / POLICY_PATH),
             purpose="authoritative",
-            captures=[fresh_entry(e) for e in entries],
+            captures=fresh_entries,
             operator_checks=[fresh_entry(auxiliary)],
             behavior_checks=[fresh_entry(behavior)],
             calibration_evidence=calibration,
@@ -856,6 +944,8 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
         calibration_marker_path,
     )
     assert verify_marker(marker, current_source)["predecessor"]["source"] == source
+    if release_fixture:
+        return repo, run, current_source, result["runtime_profile"]
     old_capture = run / entries[2]["primary"]["path"]
     preserved_capture = old_capture.read_text()
     old_capture.write_text("{}")
