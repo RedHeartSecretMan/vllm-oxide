@@ -286,6 +286,16 @@ fn validate_private_telemetry(
     let mut decode_tokens = 0usize;
     let mut decode_duration_ns = 0u64;
     for step in &telemetry.steps {
+        if step
+            .emissions
+            .iter()
+            .map(|e| e.request_id)
+            .collect::<HashSet<_>>()
+            .len()
+            != step.emissions.len()
+        {
+            bail!("benchmark permits only one token per request in a step");
+        }
         if !matches!(step.phase.as_str(), "prefill" | "decode" | "mixed")
             || step.started_ns < previous_end
             || step.ended_ns <= step.started_ns
@@ -440,6 +450,28 @@ fn aggregate_workload(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{approved_workloads, summarize_durations, MemoryMonitorEvidence, MemorySample};
+
+    #[test]
+    fn raw_consumer_rejects_63_tokens_from_one_request_in_one_decode_step() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("impossible.json");
+        let mut intervals = vec![(0, 10)];
+        intervals.extend(vec![(0, 0); 62]);
+        let artifact = serde_json::json!({"format":"vllm-oxide-internal-benchmark-json-v2","schema_version":2,
+            "call_id":"impossible","request_ids":[0],"complete":true,
+            "binding":{"fresh_request_ids":true,"cold_prefix_state":true,"device":"cuda:0"},
+            "outputs":[{"token_ids":vec![0;64]}],"sampled_token_ids":[vec![0;64]],
+            "telemetry":{"prefill_tokens":8,"prefill_duration_ns":10,"prefill_tokens_per_second":800000000.0,
+                "decode_tokens":63,"decode_duration_ns":10,"decode_tokens_per_second":6300000000.0,
+                "time_to_first_token_ns":[[0,10]],"inter_token_latency_ns":intervals,
+                "steps":[{"phase":"prefill","started_ns":0,"ended_ns":10,"prefill_tokens":8,
+                    "emissions":[{"request_id":0,"completion_step":0,"sampled_at_ns":10}]},
+                    {"phase":"decode","started_ns":10,"ended_ns":20,"prefill_tokens":0,
+                    "emissions":(1..64).map(|i|serde_json::json!({"request_id":0,"completion_step":i,"sampled_at_ns":20})).collect::<Vec<_>>()}]}});
+        std::fs::write(&path, serde_json::to_vec(&artifact).unwrap()).unwrap();
+        let error = super::validate_private_telemetry(&path, "impossible", 1).unwrap_err();
+        assert!(error.to_string().contains("one token per request"));
+    }
 
     #[test]
     fn workloads_fix_single_and_four_request_batches_with_three_fresh_repetitions() {

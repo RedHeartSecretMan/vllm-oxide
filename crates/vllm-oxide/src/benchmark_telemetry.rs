@@ -67,6 +67,16 @@ impl BenchmarkTelemetry {
         let mut decode_duration_ns = 0u64;
 
         for step in &steps {
+            if step
+                .emissions
+                .iter()
+                .map(|e| e.request_id)
+                .collect::<HashSet<_>>()
+                .len()
+                != step.emissions.len()
+            {
+                bail!("benchmark permits only one token per request in a step");
+            }
             if step.started_ns < previous_end
                 || step.ended_ns <= step.started_ns
                 || step
@@ -159,6 +169,25 @@ impl BenchmarkTelemetry {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{BenchmarkTelemetry, Emission, StepPhase, StepSample};
+
+    #[test]
+    fn one_request_cannot_emit_multiple_tokens_in_one_step() {
+        let step = StepSample {
+            phase: StepPhase::Decode,
+            started_ns: 0,
+            ended_ns: 10,
+            prefill_tokens: 0,
+            emissions: (0..2)
+                .map(|completion_step| Emission {
+                    request_id: 0,
+                    completion_step,
+                    sampled_at_ns: 10,
+                })
+                .collect(),
+        };
+        let error = BenchmarkTelemetry::from_samples(&[0], vec![step]).unwrap_err();
+        assert!(error.to_string().contains("one token per request"));
+    }
 
     #[test]
     fn fixed_step_samples_produce_the_approved_metric_formulas() {

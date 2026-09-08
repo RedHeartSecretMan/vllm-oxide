@@ -66,6 +66,9 @@ def summarize_telemetry(
     previous_end = prefill = prefill_ns = decode_ns = decode = 0
     inter = []
     for step in steps:
+        requests_in_step = [e["request_id"] for e in step["emissions"]]
+        if len(set(requests_in_step)) != len(requests_in_step):
+            raise ValueError("performance permits only one token per request in a step")
         start, end, count = (
             _integer(step[k]) for k in ("started_ns", "ended_ns", "prefill_tokens")
         )
