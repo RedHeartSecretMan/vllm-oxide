@@ -136,6 +136,7 @@ def capture_reference(plan: ReplayPlan, oracle: Any, *, control: bool = False) -
                     request_id=index,
                     input_token_ids=tokens,
                     positions=[pos[0], pos[-1] + 1],
+                    cached_range=[0, pos[0]],
                     kv_length=int(attention_mask[index].sum()),
                     phase="prefill" if len(events) == 0 else "decode",
                     sampling_allowed=True,
