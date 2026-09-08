@@ -315,6 +315,7 @@ def _worker_auxiliary(args: argparse.Namespace, output: Path) -> None:
 
 def _worker_capture(args: argparse.Namespace, output: Path) -> None:
     from golden_gen.environment import collect_release_runtime, validate_deterministic_environment
+    from golden_gen.fixed_prefix import validate_baseline_owner_bindings
     from golden_gen.fixed_prefix_oracles import capture_baseline, capture_reference
 
     validate_deterministic_environment(os.environ)
@@ -378,6 +379,13 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
                 setup_paths.append(path)
             capture = collector(group.plan, oracle, control=control)
             if args.engine == "baseline":
+                # Retain identities, not all persisted setup logits, in the validator.
+                validate_baseline_owner_bindings(
+                    (plan, capture if path is None else json.loads(path.read_text()))
+                    for plan, path in zip(
+                        [*group.setup_calls, group.plan], [*setup_paths, None], strict=True
+                    )
+                )
                 evidence["worker_states"] = [x.model_dump() for x in oracle.protocol_evidence()]
             else:
                 import torch

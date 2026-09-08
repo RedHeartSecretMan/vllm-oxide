@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
+from collections.abc import Iterable
 from typing import Annotated, Any, Literal, Self
 
 import numpy as np
@@ -116,6 +117,22 @@ def validate_capture(plan: ReplayPlan, capture: dict[str, Any]) -> dict[str, lis
         raise ValueError("missing fixed-prefix prediction rows")
     validate_execution_events(plan, capture, output)
     return output
+
+
+def validate_baseline_owner_bindings(
+    calls: Iterable[tuple[ReplayPlan, dict[str, Any]]],
+) -> None:
+    """Validate one fresh owner's setup calls and target in execution order."""
+    seen: dict[str, set[Any]] = {
+        key: set() for key in ("request_id", "native_request_id", "external_request_id")
+    }
+    for plan, capture in calls:
+        validate_baseline_bindings(plan, capture)
+        for binding in capture["request_bindings"]:
+            for key, identities in seen.items():
+                if binding[key] in identities:
+                    raise ValueError("baseline owner request binding reused across calls")
+                identities.add(binding[key])
 
 
 def validate_baseline_bindings(plan: ReplayPlan, capture: dict[str, Any]) -> None:

@@ -76,3 +76,34 @@ def test_baseline_native_external_mapping_cannot_be_omitted_aliased_or_rebound(m
         bad["execution_events"][0]["members"][0]["native_request_id"] = "0-another-suffix"
     with pytest.raises(ValueError, match="binding"):
         validate_baseline_bindings(plan, bad)
+
+
+@pytest.mark.parametrize("identity", ["request_id", "native_request_id", "external_request_id"])
+def test_baseline_owner_rejects_setup_target_aliases_but_fresh_owners_are_independent(identity):
+    from golden_gen.fixed_prefix import validate_baseline_owner_bindings
+
+    setup, first = fixture()
+    target = setup.model_copy(update={"call_id": "target"})
+    second = copy.deepcopy(first)
+    for binding in second["request_bindings"]:
+        binding["call_id"] = "target"
+        binding["request_id"] += 2
+        binding["native_request_id"] += "-new"
+        binding["external_request_id"] += "-new"
+
+    def rebind_rows(capture):
+        for index, binding in enumerate(capture["request_bindings"]):
+            for row in (capture["rows"][index], capture["execution_events"][0]["members"][index]):
+                row["request_id"] = binding["request_id"]
+                row["native_request_id"] = binding["native_request_id"]
+
+    rebind_rows(second)
+    calls = [(setup, first), (target, second)]
+    validate_baseline_owner_bindings(iter(calls))
+    validate_baseline_owner_bindings(iter(calls))  # Another fresh owner may use identical IDs.
+    bad = copy.deepcopy(second)
+    bad["request_bindings"][0][identity] = first["request_bindings"][0][identity]
+    rebind_rows(bad)
+    validate_baseline_bindings(target, bad)  # Internally valid; only owner scope reveals aliasing.
+    with pytest.raises(ValueError, match="owner.*binding"):
+        validate_baseline_owner_bindings(iter([(setup, first), (target, bad)]))

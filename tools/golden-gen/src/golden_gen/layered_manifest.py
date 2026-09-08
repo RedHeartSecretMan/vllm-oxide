@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from golden_gen import config
 from golden_gen.fixed_prefix import (
     require_collection_equivalence,
-    validate_baseline_bindings,
+    validate_baseline_owner_bindings,
     validate_capture,
     validate_control_capture,
     validate_execution_events,
@@ -486,9 +486,6 @@ def _evaluate(
                 if len(refs) != len(case.setup_calls):
                     raise ValueError("setup capture count differs from the frozen execution group")
                 setup_values = [_read(root, Artifact.model_validate(ref)) for ref in refs]
-                if engine == "baseline":
-                    for plan, raw in zip(case.setup_calls, setup_values, strict=True):
-                        validate_baseline_bindings(plan, raw)
                 setup_raws.append(setup_values)
                 setup_rows.append(
                     [
@@ -517,8 +514,10 @@ def _evaluate(
                 _read(root, ref) for ref in (entry.primary, entry.replay, entry.control)
             )
             if engine == "baseline":
-                for raw in (first, second, control):
-                    validate_baseline_bindings(case.plan, raw)
+                for setups, raw in zip(setup_raws, (first, second, control), strict=True):
+                    validate_baseline_owner_bindings(
+                        zip([*case.setup_calls, case.plan], [*setups, raw], strict=True)
+                    )
             primary = validate_capture(case.plan, first)
             if engine == "candidate":
                 execution_captures[case.plan.execution_group_id] = (case, first)
