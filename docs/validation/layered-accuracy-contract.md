@@ -226,3 +226,43 @@ KL 理论上非负。仅对 [-1e-12,0) 内的微小计算舍入值归零，并�
 ADR-0012 未被本文件替代的模型/权重/tokenizer/环境身份、资源保护、确定性、真实性及发布流程仍有效。旧 56-fixture 固定数、四个校准/四个 holdout 分割和旧容差只属于历史协议；新协议以已冻结 registry 的完整预期清单计数，而不是取消计数。新的 collector、schema、prompt 或数值代码必须先冻结测量提交并产生自己的数据；旧 O/P/M 工件不能因 ancestry 存在就改标为新协议。
 
 所有成功阶段均需原子、完整输出 marker 和前驱/源身份验证；阈值未知的观测 completion 与 release PASS 必须是不同状态。发布仍需 L0/L1/L2 全通过、性能记录、证据报告、bundle/clean consumer 验证，最终 evidence-only 候选的完整复审及单独的 tag/release/asset 权限。资产仍仅为 manifest 和 archive，报告不是第三资产；CPU CI 不等于 GPU 验收。此检查点不提供发布权限。
+
+## 14. 数值用例与执行组的适用边界
+
+每个注册的请求 member 是独立的 Numerical case，分别使用自己的 T 个预测行计算 mean KL、peak KL、paired mean KL excess 和 peak reference choice loss。Execution group 只描述一次共同执行；组通过要求所有成员通过且组级行为检查通过。组平均值仅作摘要，不能抵消任何成员的硬失败。setup 调用、控制采集及独立重放在预期清单中单列，不计入目标 case 的 T 行。
+
+三端同前缀比较要求相同的条件 token 历史，不要求内部调度事件相同。注册表须写明各机制要求适用于哪个 engine：Rust 的分页 KV、分块 prefill、prefix cache、等待准入和抢占重算，由 Rust 实际执行事件证明；vLLM 声明启用的对应机制由其自身证据证明。Transformers MATH 不因缺少 Rust 调度机制而伪造对应事件，也不能代替 Rust 提供机制覆盖。所有适配器仍须如实记录自己的实际 phase、输入、位置、有效长度和预测边界，不以此区分放宽共同的历史、身份、完整性与重放要求。
+
+## 15. 注册表与待批准预算
+
+[用例注册表](layered-accuracy-cases.json) 是完整规范输入：包含逐成员 token 流、setup 调用、执行配置、各 engine 的机制与缓存范围要求、算子输入及故障定义、公开行为调用清单、检查语义、来源身份和预期数量。它不包含模型测量值、当前运行状态或验收结果；未推送的实现指针不代替内嵌的输入和数学定义。
+
+初始注册表的数值清单如下；行数均按一个 engine 的一个基础 variant 计。
+
+| 分割 | 执行组 | 逐成员数值 case | 目标预测行 | setup 调用 / 预测行 |
+| --- | --- | --- | --- | --- |
+| development | 25 | 28 | 1152 | 0 / 0 |
+| calibration | 13 | 19 | 75 | 1 / 1 |
+| acceptance | 13 | 19 | 75 | 1 / 1 |
+
+每个数值组要求 reference、baseline、candidate 三端各自的 primary、replay 和 control，合计九个基础独立采集 owner。control 关闭 forcing、忽略 EOS 并保留预定 T 行；它不是 fixed-prefix 数值行的替代品。calibration 和 acceptance 各自的 prefix-hit、pressure、waiting 组另要求一个新的 candidate `control-replay` owner，用于真实公开行为的独立重放。其精确输入与用途见注册表 `owner_inventory`。跨分割的实际预测历史（含 setup）不得重用。分割内为比较执行路径或验证 prefix sharing 而明示复用输入是允许的；逐 case 独立判定不等于统计独立，不能把这种复用夸大为独立样本量。
+
+calibration 和 acceptance 各有五个独立自由生成行为场景，每个 primary/replay variant 包含 124 次调用、116 个成功请求输出及 10 次预期拒绝。另各保留三个 fixed-prefix 结构场景，并新增三个 `unforced_control` 公开行为场景：prefix-hit、pressure、waiting。后者明确通过 `LLM::generate` 完成所有冻结的 setup 与目标调用，整个 owner 中 forcing 都关闭；仅取 continuation 的长度作为 completion 预算，不推进冻结的 token 值。每个 control/control-replay variant 另包含四次公开调用、八个成功请求输出。
+
+`unforced_control` 必须保存排序和文本解码完成后的真实 `RequestOutput`、实际准入身份与参数、原始 logits、实际采样 token 及执行事件；公开返回值须与该 owner 自身的采样历史一致。control 和 control-replay 都须验证缓存范围、等待准入或抢占重算等声明机制，并通过完整 logits 与公开返回值的独立一致性检查。setup、返回值、原始采集、receipt、guard 及新增重放均进入证据闭包。fixed-prefix 通过不能代替这些无 forcing 的公开调用证据，也不能通过修改模式标签来满足要求。
+
+每个新分割共有 117 个数值用途 owner、16 个公开行为用途 owner，其中三个既有 candidate control 同时承担两种用途；因此是 130 个唯一 owner，而不是相加的 133 个。其中 120 个属于组采集（含三个新增 control-replay），10 个属于独立公开行为采集。新增 control-replay 合计 30 个目标行与一个 setup 行，使本分割所有组采集共计 715 行。`expected_counts` 中的 owner identity 与 `uses` 显式记录重叠，不允许重复计数或漏掉独立重放。
+
+L0 包含七个 profile、primary/replay 两个实际算子采集 owner 和 16 个隔离 CPU 算子故障模型。注册表另列七个全局故障条目，其中一个条目含两个独立变换；所有必需变换均须验证，不能只按条目数声称覆盖。包含 development 的完整冻结清单为 225+130+130+2=487 个唯一 GPU owner；该数量只是完整性要求，不是立即执行所有分割或提前运行 acceptance 的授权。
+
+专门的 EOS 场景要求真实自由生成触发提前 EOS 停止。未触发时是必需机制未覆盖，返回 INVALID 并阻断验收，不能直接诊断为模型精度或 EOS 状态机错误；实际已输出 EOS 而违反停止策略时才是行为 FAIL。不得在观察 acceptance 输出后反复更换提示挑选通过结果。校准阶段若证明输入不能触发所需机制，须按前述 Definition 与独立性规则修订。
+
+[预算政策](layered-accuracy-budgets.json) 绑定注册表原始字节的 SHA-256 和指标算法版本。`values=null` 表示 A_mean、A_peak、Delta_mean、G_limit 均未批准；七个 `operator_budgets` 同样保持 null，校准来源、证据哈希与理由也尚未提供。后续具体预算仍须校准与故障检测证据、独立审阅及用户批准。本次用例冻结不批准任何数值、不生成 PASS、不授权 GPU 阶段或发布；实际实现仍须完成 CPU 检查和新候选审查，后续 GPU 采集另按阶段权限与资源保护执行。
+
+## 16. 压力场景与固定调度回归
+
+两个数值分割的 pressure 组使用 prompt 长度 512/255、completion 预算 4/5、每步 token 预算 768、context 上限 768、最多两个并发请求和三个 256-token 物理 KV block。baseline 使用 48 个 16-token block，足以容纳所声明的 context。该组必须在已经推进至少一个 completion token 后，真实重新执行此前计算过的历史区间；单有 prefill 标签或 prefix-cache 命中后只计算新 token 都不足以证明重算。
+
+pressure 组不再声称覆盖 chunked prefill；分块覆盖仍由 chunk-remainder、mixed、waiting 等明确要求该机制的组承担。fixed-prefix、无 forcing 的 control 及独立 control-replay 都必须以自身事件证明机制，CPU 指纹替身的成功只证明调度几何与历史路径，不代替 Qwen 的 GPU 数值验收。
+
+[混合阶段压力修复范围](t45-mixed-phase-pressure-repair.md)中的 128-token 步预算、三个 KV block 的公开接口回归仍是必须通过的 CPU 结构门槛，须与四 block 及同容量串行对照输出一致。它不计为 GPU owner，也不因 768-token 场景成功而被删除、忽略或放宽。

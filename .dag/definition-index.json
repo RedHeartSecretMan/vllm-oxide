@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "576ca4a7953bf45829fe42ff96c09177b2ebb71e"
+      "blob_oid": "3d05aa0d2e98816f61a1f75d3be59daf7d95cb5d"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -74,8 +74,16 @@
       "blob_oid": "f61e289b43ded163d00d659c08a530f8fbe6a9b8"
     },
     {
+      "path": "docs/validation/layered-accuracy-budgets.json",
+      "blob_oid": "f2ab3ed0a6fe2082b535fe12666952f3450344c3"
+    },
+    {
+      "path": "docs/validation/layered-accuracy-cases.json",
+      "blob_oid": "cada413160d9d155c6eca26cc89e363b4f040b26"
+    },
+    {
       "path": "docs/validation/layered-accuracy-contract.md",
-      "blob_oid": "b9f2128540b22d9ea23ea78ef591b551b21d1bc5"
+      "blob_oid": "ebd8c10c2533d7fd5b28690c9473636f338a48c2"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
