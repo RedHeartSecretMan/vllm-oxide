@@ -179,6 +179,14 @@ _Avoid_: near-tie skip, epsilon skip, close-call skip.
 A numerical comparison whose corresponding predictions have identical causal token histories. Different-history outputs are not comparable rows, whether the histories arose from free generation or controlled replay.
 _Avoid_: prefix-aware L2, context-aware comparison.
 
+**Numerical case**:
+One registered request member with its own fixed prediction history and numerical verdict. Batch peers are separate cases even when they share an execution.
+_Avoid_: batch-average acceptance unit, token row as independent case.
+
+**Execution group**:
+A registered set of request members executed together in one generation call. It captures shared execution behavior without replacing the individual numerical cases.
+_Avoid_: sequential calls labeled as batch, pooled numerical verdict.
+
 **Fixed-prefix replay**:
 A run whose continuation token stream is fixed independently of each implementation's predicted choices. It preserves shared histories while exercising the actual incremental engine path.
 _Avoid_: forced prediction, repeated prefill as decode.

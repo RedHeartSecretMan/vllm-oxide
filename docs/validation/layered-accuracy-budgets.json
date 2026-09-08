@@ -1,0 +1,20 @@
+{
+  "protocol": "layered-accuracy-v1",
+  "schema_version": 1,
+  "algorithm": "fp64-logsoftmax-fsum-underflow-recorded-p95-linear-v1",
+  "values": null,
+  "operator_budgets": {
+    "rms-residual": null,
+    "rope-position": null,
+    "silu-opmath": null,
+    "attention-prefill": null,
+    "attention-paged": null,
+    "kv-slots": null,
+    "sampler-ids": null
+  },
+  "registry_sha256": "7917e03a1a46db04dacf73fe013b6a7f2a7efcf844d9543c485c72f95b1fb074",
+  "calibration_source": null,
+  "calibration_evidence_sha256": null,
+  "fault_evidence_sha256": null,
+  "rationale": null
+}
