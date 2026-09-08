@@ -1369,14 +1369,13 @@ mod tests {
                     causal_fingerprint_test_harness_with_capacity(128, max_seqs, blocks, true);
                 llm.max_model_len = 768;
                 let result = llm.generate(&prompts, &params);
-                println!("CHUNK_PRESSURE_DIAG label={label} blocks={blocks} max_seqs={max_seqs} result={result:?}");
-                for (step, metadata) in controls.take_metadata().iter().enumerate() {
-                    println!("CHUNK_PRESSURE_DIAG label={label} step={step} q={:?} k={:?} block_table={:?} slots={:?}",
-                        metadata.cu_seqlens_q, metadata.cu_seqlens_k, metadata.block_table, metadata.slot_mapping);
+                for metadata in controls.take_metadata() {
+                    assert!(metadata.cu_seqlens_q.last().is_some_and(|&q| q <= 128));
                 }
-                println!(
-                    "CHUNK_PRESSURE_DIAG label={label} free_after={}",
-                    llm.engine.kv_cache_manager.num_free_blocks()
+                assert_eq!(
+                    llm.engine.kv_cache_manager.num_free_blocks(),
+                    blocks,
+                    "{label} must release every owned block"
                 );
                 outcomes.push(result);
             }
@@ -1393,6 +1392,16 @@ mod tests {
                 low.iter().map(|o| &o.token_ids).collect::<Vec<_>>(),
                 serial.iter().map(|o| &o.token_ids).collect::<Vec<_>>()
             );
+            assert_eq!(low.len(), 2);
+            assert_eq!(low[0].token_ids, vec![54, 80, 39, 85]);
+            assert_eq!(low[1].token_ids, vec![22, 26, 57, 79, 7]);
+            for outputs in &outcomes {
+                for (index, output) in outputs.as_ref().unwrap().iter().enumerate() {
+                    assert_eq!(output.request_id, index);
+                    assert!(output.finished);
+                    assert_eq!(output.text, serial[index].text);
+                }
+            }
         }
 
         #[test]

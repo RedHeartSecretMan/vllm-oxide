@@ -753,19 +753,33 @@ impl Scheduler {
     /// logical history length as the recovery target, and requeue at the front
     /// of `waiting` without changing request identity, tokens, or parameters.
     fn preempt_if_needed(&mut self, kv_mgr: &mut KvCacheManager) -> Result<(), StepPlanError> {
-        if self
-            .running
-            .iter()
-            .any(|sequence| sequence.is_prefill && sequence.recompute_target_tokens.is_none())
-        {
-            return Ok(());
-        }
-
         loop {
+            // Use the same bounded work selection as the next decision. Prefill
+            // already owns its history blocks; only selected decoders append.
+            // A mixed batch must still recover pressure while initial prefill
+            // is incomplete, without restarting exact-capacity pure prefill.
+            let reserve_admission_token =
+                !self.waiting.is_empty() && self.admission_block(kv_mgr, 0).is_none();
+            let mut budget = self
+                .max_num_batched_tokens
+                .saturating_sub(usize::from(reserve_admission_token));
             let decode_batch = self
                 .running
                 .iter()
-                .take(self.max_num_batched_tokens)
+                .filter(|sequence| {
+                    if budget == 0 {
+                        return false;
+                    }
+                    if Self::sequence_phase(sequence) == SequencePhase::Prefill {
+                        budget = budget.saturating_sub(
+                            sequence.prefill_target_tokens() - sequence.num_cached_tokens,
+                        );
+                        false
+                    } else {
+                        budget -= 1;
+                        true
+                    }
+                })
                 .collect::<Vec<_>>();
             if kv_mgr.can_append_batch(&decode_batch) {
                 return Ok(());
@@ -2178,8 +2192,10 @@ mod tests {
                 ),
                 91,
             );
-            recovery.num_cached_tokens = BLOCK_SIZE / 2;
+            kv.deallocate(&mut recovery).unwrap();
             recovery.recompute_target_tokens = Some(BLOCK_SIZE + 1);
+            kv.allocate(&mut recovery, 0).unwrap();
+            recovery.num_cached_tokens = BLOCK_SIZE / 2;
             recovery.is_prefill = true;
             scheduler.running.push_back(recovery);
 
@@ -2694,16 +2710,11 @@ mod tests {
 
             let tokens: Vec<u32> = (0..BLOCK_SIZE as u32).collect();
             s.add_request(tokens.clone(), make_params(64));
-            s.select_work(&mut kv).unwrap();
+            let prefill = s.plan_step(&mut kv).unwrap().unwrap();
+            s.apply_step_result(&result_for_plan(&prefill, 99), &mut kv)
+                .unwrap();
             assert_eq!(s.num_running(), 1);
             assert_eq!(kv.num_free_blocks(), 0);
-
-            {
-                let seq = &mut s.running[0];
-                while seq.num_tokens < BLOCK_SIZE + 1 {
-                    seq.append_token(99);
-                }
-            }
 
             s.select_work(&mut kv).unwrap();
             assert!(s.num_waiting() >= 1, "preempted seq should be in waiting");
