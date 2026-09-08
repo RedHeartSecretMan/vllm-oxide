@@ -4,6 +4,9 @@
 //! the Python golden generator (`tools/golden-gen/`). Three comparison
 //! levels:
 //!
+//! Historical schema-v4 numbering below is retained for existing artifacts;
+//! new release acceptance uses ADR-0015's separate layered-accuracy-v1 workflow.
+//!
 //! - **L1**: reference-token match or explicit same-prefix near-tie classification
 //! - **L2**: same-prefix logits comparison with a versioned absolute tolerance
 //! - **L3**: per-layer activations (debug-only, skeleton in v0.1)

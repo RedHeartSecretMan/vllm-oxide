@@ -1,5 +1,13 @@
 # vllm-oxide-test — Golden Comparison Crate
 
+This document describes the **historical schema-v4 comparator** and its original
+L1=token/L2=logits numbering. It cannot satisfy new release acceptance under
+[ADR-0015](../../docs/adr/0015-layered-accuracy-validation.md). The current
+[layered workflow](../../tools/golden-gen/README.md#layered-accuracy-protocol-new-workflow)
+uses L0 operators, L1 model numerics and L2 decoding/public behavior. Historical
+artifacts retain their original verdicts; the old shell authoritative/publication
+entrypoints are disabled. A layered release adapter remains unfinished.
+
 > **⚠️ Release gate — NOT a CI gate.**
 >
 > This crate validates the Rust inference engine against golden fixtures on
@@ -35,8 +43,9 @@ vLLM artifacts count only after the manifest records successful calibration.
 
 ### Run the authoritative comparator
 
-The normal release path is `tools/validate-release.sh authoritative <run-root>`.
-Direct invocation is intentionally verbose because holdout access must bind a
+The former `tools/validate-release.sh authoritative <run-root>` entrypoint is
+disabled. The direct commands below are historical diagnostic tooling and do not
+authorize a layered release. Direct invocation is verbose because access binds a
 Definition-approved observation and retain a second set of candidate captures:
 
 ```bash
