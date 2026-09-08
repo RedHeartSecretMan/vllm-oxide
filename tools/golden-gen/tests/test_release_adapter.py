@@ -167,6 +167,24 @@ def test_complete_raw_evidence_survives_python_bundle_rust_clean_consumer(tmp_pa
         )
     )
     monkeypatch.setenv("VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH", "goldens-v0.2")
+    for corruption in ("report", "source"):
+        changed_path = report_path if corruption == "report" else repo / "unapproved_execution.py"
+        changed_path.write_text("unapproved synthetic mutation\n")
+        git(repo, "add", str(changed_path.relative_to(repo)))
+        git(repo, "commit", "-qm", f"synthetic wrong {corruption}")
+        refused = FakeTransport()
+        with pytest.raises(ValueError, match="committed report|post-measurement"):
+            publish(
+                repo,
+                bundle,
+                tmp_path / f"wrong-{corruption}-cache",
+                Path(binary),
+                review,
+                base,
+                refused,
+            )
+        assert refused.calls == []
+        git(repo, "checkout", "--quiet", "--detach", candidate["commit"])
     transport = FakeTransport()
     published = publish(
         repo, bundle, tmp_path / "publication-cache", Path(binary), review, base, transport

@@ -44,6 +44,24 @@ def test_schema5_preserves_distinct_logical_files_and_installs_immutably(tmp_pat
         install_transport(bundle, tmp_path / "cache")
 
 
+def test_concurrent_schema5_installs_share_only_a_verified_winner(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    bundle = make_bundle(tmp_path)
+    barrier = Barrier(2)
+
+    def install():
+        barrier.wait()
+        return install_transport(bundle, tmp_path / "cache")
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        results = list(workers.map(lambda _: install(), range(2)))
+    assert results[0] == results[1]
+    assert (results[0] / "evidence/one.json").read_bytes() == b"raw bytes\n"
+    assert list((tmp_path / "cache/goldens-v0.2").iterdir()) == [results[0]]
+
+
 def test_real_rust_consumer_reads_python_schema5_bytes(tmp_path):
     binary = os.environ.get("GOLDEN_TRANSPORT_TEST_BINARY")
     if not binary:

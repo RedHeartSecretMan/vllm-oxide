@@ -1206,6 +1206,55 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_artifact_preserves_exact_rates_across_json_roundtrip() {
+        let temp = private_temp();
+        for duration in [30, 33, 77] {
+            let mut session = BenchmarkSession::prepare(benchmark_config(
+                temp.path(),
+                &format!("benchmark-{duration}.json"),
+                "roundtrip",
+            ))
+            .unwrap();
+            session
+                .record_inputs(serde_json::json!({"prompt_token_ids":[vec![1;8]]}))
+                .unwrap();
+            session.bind_requests(&[7]).unwrap();
+            for (phase, prefill_tokens, completion_step, selected_token, start, end) in [
+                (crate::engine::StepPhase::Prefill, 8, 0, 11, 0, duration),
+                (
+                    crate::engine::StepPhase::Decode,
+                    0,
+                    1,
+                    12,
+                    duration,
+                    duration + 3,
+                ),
+            ] {
+                session
+                    .record_engine_step(
+                        crate::engine::EngineStepTelemetry {
+                            phase: Some(phase),
+                            prefill_tokens,
+                            emissions: vec![crate::engine::EngineCaptureRow {
+                                request_id: 7,
+                                completion_step,
+                                selected_token,
+                            }],
+                        },
+                        start,
+                        end,
+                    )
+                    .unwrap();
+            }
+            let published = session.finish(&[output(7, vec![11, 12])]);
+            assert!(
+                published.is_ok(),
+                "valid duration={duration} must roundtrip: {published:?}"
+            );
+        }
+    }
+
+    #[test]
     fn incomplete_benchmark_configuration_fails_before_request_admission() {
         let error = BenchmarkConfig::from_values(
             Some(OsString::from("/does/not/matter")),
