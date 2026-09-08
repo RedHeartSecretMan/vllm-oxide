@@ -1385,9 +1385,7 @@ mod tests {
                 extra_block.iter().map(|o| &o.token_ids).collect::<Vec<_>>(),
                 serial.iter().map(|o| &o.token_ids).collect::<Vec<_>>()
             );
-            let low = outcomes[0]
-                .as_ref()
-                .expect("legal low-capacity batch must complete using recompute");
+            let low = outcomes[0].as_ref().unwrap();
             assert_eq!(
                 low.iter().map(|o| &o.token_ids).collect::<Vec<_>>(),
                 serial.iter().map(|o| &o.token_ids).collect::<Vec<_>>()
@@ -2470,7 +2468,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let plan = root.path().join("pressure.json");
-            let prompts = vec![vec![1; 512], vec![2; 255]];
+            let prompts = [vec![1; 512], vec![2; 255]];
             let limits = [4, 5];
             std::fs::write(&plan,serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
                 "execution_group_id":"pressure","call_id":"pressure","vocab_size":100,
