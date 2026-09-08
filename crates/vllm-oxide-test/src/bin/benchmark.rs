@@ -22,6 +22,7 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    vllm_oxide_test::measurement::validate_deterministic_environment()?;
     if cli.prompts_dir.canonicalize()?
         != cli
             .repo_root
