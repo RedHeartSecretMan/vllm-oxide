@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "3d05aa0d2e98816f61a1f75d3be59daf7d95cb5d"
+      "blob_oid": "37a36ecebc055b5bd08e43d2527ca3800b4e2fe1"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -47,7 +47,7 @@
     },
     {
       "path": "docs/adr/0010-golden-release-asset-contract.md",
-      "blob_oid": "39a3da72dd217ecde4335f940757d5776efe1f69"
+      "blob_oid": "ed2aaeab83f08a59416a592c950a081f38cfd2b4"
     },
     {
       "path": "docs/adr/0011-public-generation-contract.md",
@@ -70,6 +70,10 @@
       "blob_oid": "386f1467de8d062a59e6dd6a5d2613cb3242be6f"
     },
     {
+      "path": "docs/adr/0016-layered-golden-release-assets.md",
+      "blob_oid": "560b6873d4accd674880184018fa811b452a5f84"
+    },
+    {
       "path": "docs/releases/goldens-v0.2-calibration-observation.json",
       "blob_oid": "f61e289b43ded163d00d659c08a530f8fbe6a9b8"
     },
@@ -84,6 +88,10 @@
     {
       "path": "docs/validation/layered-accuracy-contract.md",
       "blob_oid": "ebd8c10c2533d7fd5b28690c9473636f338a48c2"
+    },
+    {
+      "path": "docs/validation/layered-release-assets.md",
+      "blob_oid": "6408ca5b334b1ceeb00a4bfea4eab0fdf57dcc82"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
