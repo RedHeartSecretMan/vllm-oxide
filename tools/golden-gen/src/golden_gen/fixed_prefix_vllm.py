@@ -15,6 +15,37 @@ class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
         self.state: dict[int, tuple[ReplayPlan, str, list[int], bool]] = {}
         self.execution: dict[int, dict[str, Any]] = {}
         self.rows: list[dict[str, Any]] = []
+        self.identities: dict[str, dict[str, Any]] = {}
+
+    def request_identity(self, index: int, native: str) -> int:
+        """Assign an owner-local ID without interpreting the engine's opaque ID."""
+        if not isinstance(native, str) or not native or index not in self.state:
+            raise ValueError("vLLM execution has no bound opaque request identity")
+        plan, member_id, _, _ = self.state[index]
+        member = next(m for m in plan.members if m.member_id == member_id)
+        key = (plan.call_id, member_id)
+        previous = self.identities.get(native)
+        if previous is not None:
+            if (previous["call_id"], previous["member_id"]) != key:
+                raise ValueError("vLLM native identity aliases two request members")
+            return int(previous["request_id"])
+        if any((r["call_id"], r["member_id"]) == key for r in self.identities.values()):
+            raise ValueError("vLLM request member changed its opaque native identity")
+        request_id = len(self.identities)
+        value = dict(
+            request_id=request_id,
+            native_request_id=native,
+            execution_group_id=plan.execution_group_id,
+            call_id=plan.call_id,
+            member_id=member_id,
+            case_id=member.case_id,
+        )
+        self.identities[native] = value
+        return request_id
+
+    def request_bindings(self) -> list[dict[str, Any]]:
+        active = {r["request_id"] for r in self.rows}
+        return [dict(r) for r in self.identities.values() if r["request_id"] in active]
 
     @classmethod
     def validate_params(cls, params: Any) -> None:
@@ -77,6 +108,10 @@ class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
             execution = self.execution.get(index)
             if execution is None:
                 raise ValueError("vLLM forcing lacks actual model execution metadata")
+            if execution["request_id"] != self.request_identity(
+                index, execution["native_request_id"]
+            ):
+                raise ValueError("vLLM execution request binding differs")
             if not execution["sampling_allowed"]:
                 # V1 discards sampled outputs from incomplete prefill chunks.
                 continue
@@ -107,6 +142,7 @@ class FixedPrefixProcessor(LogitsProcessor):  # type: ignore[misc]
                     history if control else None,
                 )
             )
+            self.rows[-1]["native_request_id"] = execution["native_request_id"]
             if not control:
                 forced[index] = float("-inf")
                 forced[index, member.continuation[step]] = 0.0

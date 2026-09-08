@@ -75,6 +75,14 @@ prefix/cache-pressure/waiting cases also retain the actual ordered/detokenized
 shared with collection-equivalence evidence and counted once, not twice. Merely
 relabeling forced rows never establishes public behavior coverage.
 
+vLLM request IDs are opaque: its internal ID can differ from the externally
+returned ID. Baseline captures declare `request_identity=vllm-owner-local-v1`
+and retain both complete strings in an explicit per-member `request_bindings`
+table. Capture-local integer IDs are assigned when native requests are first
+observed and remain stable across batch moves and setup calls; they are not
+parsed from a string prefix or recomputed from a current batch slot. Rows and
+execution events must agree with the mapping, and aliases/rebinding are rejected.
+
 No early resolved EOS means missing required coverage (`INVALID`), not a diagnosis
 of model inaccuracy or an EOS-state-machine bug. Emitting EOS and violating the
 stop/length policy is a behavior `FAIL`. Do not select replacement holdout prompts

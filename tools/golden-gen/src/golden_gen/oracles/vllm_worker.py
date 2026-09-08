@@ -39,6 +39,8 @@ class DeterministicWorker(Worker):  # type: ignore[misc]
         ]
         if not processors:
             return
+        if len(processors) != 1:
+            raise ValueError("fixed-prefix worker requires exactly one identity owner")
 
         def record_execution(_module: Any, _args: Any, kwargs: Any) -> None:
             runner = self.model_runner
@@ -57,7 +59,8 @@ class DeterministicWorker(Worker):  # type: ignore[misc]
                     raise ValueError("vLLM executed noncontiguous positions")
                 history = runner.requests[request_id].output_token_ids
                 row = dict(
-                    request_id=int(request_id),
+                    request_id=processors[0].request_identity(index, request_id),
+                    native_request_id=request_id,
                     input_token_ids=tokens,
                     positions=[pos[0], pos[-1] + 1],
                     cached_range=[0, pos[0]],
@@ -86,13 +89,16 @@ class DeterministicWorker(Worker):  # type: ignore[misc]
         from golden_gen.fixed_prefix_vllm import FixedPrefixProcessor
 
         rows = []
+        bindings = []
         for processor in self.model_runner.input_batch.logitsprocs.non_argmax_invariant:
             if isinstance(processor, FixedPrefixProcessor):
+                bindings.extend(processor.request_bindings())
                 rows.extend(processor.rows)
                 processor.rows = []
         events, self._fixed_events = self._fixed_events, []
         return dict(
             rows=rows,
+            request_bindings=bindings,
             execution_events=events,
             allocated_cache_blocks=self.model_runner.kv_cache_config.num_blocks,
             cache_block_size=self.vllm_config.cache_config.block_size,

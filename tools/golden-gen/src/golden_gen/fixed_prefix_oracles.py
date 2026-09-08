@@ -9,6 +9,7 @@ import numpy as np
 from golden_gen.fixed_prefix import (
     ReplayPlan,
     history_hash,
+    validate_baseline_bindings,
     validate_capture,
     validate_control_capture,
 )
@@ -228,6 +229,7 @@ def capture_baseline(plan: ReplayPlan, oracle: Any, *, control: bool = False) ->
     if len(evidence) != 1 or len(outputs) != len(plan.members):
         raise ValueError("baseline fixed replay requires one worker and complete group output")
     rows = evidence[0]["rows"]
+    bindings = [dict(b) for b in evidence[0]["request_bindings"]]
     for member, output in zip(plan.members, outputs, strict=True):
         if list(output.prompt_token_ids) != member.prompt or len(output.outputs) != 1:
             raise ValueError("baseline fixed replay prompt/candidate count mismatch")
@@ -237,8 +239,15 @@ def capture_baseline(plan: ReplayPlan, oracle: Any, *, control: bool = False) ->
             raise ValueError("baseline did not advance the complete frozen stream")
         raw = _extract_full_logits(completion, len(member.continuation), plan.vocab_size)
         member_rows = [r for r in rows if r["member_id"] == member.member_id]
+        matches = [b for b in bindings if b["member_id"] == member.member_id]
+        if len(matches) != 1 or not isinstance(output.request_id, str) or not output.request_id:
+            raise ValueError("baseline native/public request identity is missing or ambiguous")
+        binding = matches[0]
+        binding["external_request_id"] = output.request_id
         if len(member_rows) != len(member.continuation) or any(
-            r["request_id"] != int(output.request_id) for r in member_rows
+            r["request_id"] != binding["request_id"]
+            or r.get("native_request_id") != binding["native_request_id"]
+            for r in member_rows
         ):
             raise ValueError("baseline worker/consumer request identity mismatch")
         if not tensor_bits_equal(
@@ -256,7 +265,10 @@ def capture_baseline(plan: ReplayPlan, oracle: Any, *, control: bool = False) ->
         execution_events=evidence[0]["execution_events"],
         allocated_cache_blocks=evidence[0]["allocated_cache_blocks"],
         cache_block_size=evidence[0]["cache_block_size"],
+        request_identity="vllm-owner-local-v1",
+        request_bindings=bindings,
         complete=True,
     )
+    validate_baseline_bindings(plan, capture)
     (validate_control_capture if control else validate_capture)(plan, capture)
     return capture

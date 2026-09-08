@@ -118,6 +118,60 @@ def validate_capture(plan: ReplayPlan, capture: dict[str, Any]) -> dict[str, lis
     return output
 
 
+def validate_baseline_bindings(plan: ReplayPlan, capture: dict[str, Any]) -> None:
+    """Keep native, public and capture-local IDs distinct and bijectively bound."""
+    bindings = capture.get("request_bindings")
+    if (
+        capture.get("request_identity") != "vllm-owner-local-v1"
+        or not isinstance(bindings, list)
+        or len(bindings) != len(plan.members)
+    ):
+        raise ValueError("baseline opaque request bindings missing")
+    by_member = {}
+    by_id = {}
+    native = set()
+    external = set()
+    members = {m.member_id: m for m in plan.members}
+    for binding in bindings:
+        member_id = binding.get("member_id")
+        request = binding.get("request_id")
+        n, e = binding.get("native_request_id"), binding.get("external_request_id")
+        if (
+            member_id not in members
+            or member_id in by_member
+            or type(request) is not int
+            or request < 0
+            or request in by_id
+            or not isinstance(n, str)
+            or not n
+            or n in native
+            or not isinstance(e, str)
+            or not e
+            or e in external
+            or binding.get("case_id") != members[member_id].case_id
+            or binding.get("call_id") != plan.call_id
+            or binding.get("execution_group_id") != plan.execution_group_id
+        ):
+            raise ValueError("baseline opaque request binding is ambiguous or stale")
+        by_member[member_id] = binding
+        by_id[request] = binding
+        native.add(n)
+        external.add(e)
+    for row in capture["rows"]:
+        binding = by_member.get(row.get("member_id"))
+        if (
+            binding is None
+            or row.get("request_id") != binding["request_id"]
+            or row.get("native_request_id") != binding["native_request_id"]
+        ):
+            raise ValueError("baseline prediction lost its native request binding")
+    for event in capture["execution_events"]:
+        for member in event["members"]:
+            binding = by_id.get(member.get("request_id"))
+            if binding is None or member.get("native_request_id") != binding["native_request_id"]:
+                raise ValueError("baseline execution lost its native request binding")
+
+
 def validate_execution_events(
     plan: ReplayPlan, capture: dict[str, Any], rows: dict[str, list[dict[str, Any]]]
 ) -> set[str]:

@@ -45,3 +45,30 @@ def release_runtime() -> RuntimeInfo:
 
 
 __all__ = ["pinned_kernel_paths", "release_runtime"]
+
+
+def bind_synthetic_baseline(plan, capture):
+    """Explicit opaque identity evidence for synthetic CPU consumer fixtures."""
+    bindings = []
+    for member in plan.members:
+        request = next(
+            r["request_id"] for r in capture["rows"] if r["member_id"] == member.member_id
+        )
+        bindings.append(
+            dict(
+                request_id=request,
+                native_request_id=f"native-{plan.call_id}-{request}-opaque",
+                external_request_id=f"external-{request}",
+                member_id=member.member_id,
+                case_id=member.case_id,
+                call_id=plan.call_id,
+                execution_group_id=plan.execution_group_id,
+            )
+        )
+    by_id = {b["request_id"]: b for b in bindings}
+    for row in capture["rows"]:
+        row["native_request_id"] = by_id[row["request_id"]]["native_request_id"]
+    for event in capture["execution_events"]:
+        for member in event["members"]:
+            member["native_request_id"] = by_id[member["request_id"]]["native_request_id"]
+    capture.update(request_identity="vllm-owner-local-v1", request_bindings=bindings)

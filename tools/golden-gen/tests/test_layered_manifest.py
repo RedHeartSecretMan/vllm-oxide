@@ -444,6 +444,10 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                     ),
                     outputs=[dict(request_id=0, token_ids=[0], text="a", finished=True)],
                 )
+            if engine == "baseline":
+                from tests.support import bind_synthetic_baseline
+
+                bind_synthetic_baseline(plan, capture)
             capref = store(f"{engine}-{variant}.json", capture)
             pid = 100 + 10 * e + n
             guard = store(
@@ -895,6 +899,8 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                 ]
                 capture.pop("public_call", None)
                 prefix = f"extra-{extra_plan.execution_group_id}-{extra['engine']}-{variant}"
+                if extra["engine"] == "baseline":
+                    bind_synthetic_baseline(extra_plan, capture)
                 capref = store(prefix + ".json", capture)
                 receipt = json.loads((run / original[variant + "_receipt"]["path"]).read_text())
                 receipt["capture_sha256"] = capref["sha256"]
