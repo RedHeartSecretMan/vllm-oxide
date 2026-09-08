@@ -132,8 +132,16 @@ A content-addressed model-output record for a fixed input and oracle identity un
 _Avoid_: reference output, expected output, snapshot, oracle output.
 
 **Golden asset bundle**:
-The immutable release pair containing one standalone manifest and one compressed archive of every declared `Golden fixture`. It is the only published transport for a golden version; individual fixture release assets are outside the contract.
+The immutable release pair containing one standalone `Golden release manifest` and one compressed archive of the complete declared evidence. It is the only published transport for a golden version; individual fixture release assets are outside the contract.
 _Avoid_: fixture pack, golden package, per-fixture assets.
+
+**Golden release manifest**:
+The versioned inventory binding a golden version to its archive, original evidence identities and validation entrypoints. It describes published transport, not the result of a measurement stage.
+_Avoid_: execution manifest, second manifest wrapper.
+
+**Execution evidence manifest**:
+The source-bound record of one validation stage and its original evidence dependencies. It remains part of the evidence even when a release transports several stages together.
+_Avoid_: release manifest, asset inventory.
 
 **Reference oracle**:
 The authoritative correctness target: Transformers BF16 with `output_logits=True` and `attn_implementation=sdpa`. A reference-oracle failure cannot be overridden by baseline evidence.
