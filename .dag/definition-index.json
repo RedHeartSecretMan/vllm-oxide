@@ -78,12 +78,16 @@
       "blob_oid": "2a6a02ac9bff42f6d7520e79ba673820391e687f"
     },
     {
+      "path": "docs/adr/0018-freeze-layered-accuracy-budgets.md",
+      "blob_oid": "3de9f008825b64640fd4636856ca092914379b18"
+    },
+    {
       "path": "docs/releases/goldens-v0.2-calibration-observation.json",
       "blob_oid": "f61e289b43ded163d00d659c08a530f8fbe6a9b8"
     },
     {
       "path": "docs/validation/layered-accuracy-budgets.json",
-      "blob_oid": "6884138f5078a093c68891c22c0f4075de7d0db7"
+      "blob_oid": "046c0ce6dd73c172ac762f295f0d44ba6e6e6464"
     },
     {
       "path": "docs/validation/layered-accuracy-cases.json",

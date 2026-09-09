@@ -2,19 +2,27 @@
   "protocol": "layered-accuracy-v1",
   "schema_version": 1,
   "algorithm": "fp64-logsoftmax-fsum-underflow-recorded-p95-linear-v1",
-  "values": null,
+  "values": {
+    "a_mean": 0.002,
+    "a_peak": 0.005,
+    "delta_mean": 0.001,
+    "g_limit": 0.22314355131420976
+  },
   "operator_budgets": {
-    "rms-residual": null,
-    "rope-position": null,
-    "silu-opmath": null,
-    "attention-prefill": null,
-    "attention-paged": null,
-    "kv-slots": null,
-    "sampler-ids": null
+    "rms-residual": 0.0,
+    "rope-position": 0.0078125,
+    "silu-opmath": 0.0,
+    "attention-prefill": 0.0078125,
+    "attention-paged": 0.0078125,
+    "kv-slots": 0.0,
+    "sampler-ids": 0.0
   },
   "registry_sha256": "88f89084fe7b0c14a877c4c72f275314ad2a8e593d6fbc3ac63a194b91fb98f4",
-  "calibration_source": null,
-  "calibration_evidence_sha256": null,
-  "fault_evidence_sha256": null,
-  "rationale": null
+  "calibration_source": {
+    "commit": "6b7ae7d9ec5e4736a504aa1a58aa36005986bfd3",
+    "tree": "f0f931e75eefa722bad41fb9491b6cb32ce38c4d"
+  },
+  "calibration_evidence_sha256": "d423774300f50f4602dbbfeb23a65a4ef8d8bbd645ca27764e87072af0101faa",
+  "fault_evidence_sha256": "1bccf67c82ff8da33df3ccc3110942366ea2278c46d651d49c8eadb81e83cec8",
+  "rationale": "User-approved layered-budget-v1; see docs/adr/0018-freeze-layered-accuracy-budgets.md for scope, engineering trade-offs, calibration selection bias, independent review and content-addressed evidence. Per-case reference log-score budgets are 2/5 millinats mean/peak, paired baseline excess is 1 millinat, and G_limit=ln(1.25) requires at least 80% of the best reference-token probability. Operator limits are fixed-profile maximum absolute errors, not universal BF16 tolerances. Exact structure, raw selection and required replay remain mandatory; no legacy verdict is changed and budget approval is not release acceptance."
 }
