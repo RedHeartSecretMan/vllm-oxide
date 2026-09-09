@@ -261,7 +261,9 @@ L0 包含七个 profile、primary/replay 两个实际算子采集 owner 和 16 �
 
 ## 16. 压力场景与固定调度回归
 
-两个数值分割的 pressure 组使用 prompt 长度 512/255、completion 预算 4/5、每步 token 预算 768、context 上限 768、最多两个并发请求和三个 256-token 物理 KV block。baseline 使用 48 个 16-token block，足以容纳所声明的 context。该组必须在已经推进至少一个 completion token 后，真实重新执行此前计算过的历史区间；单有 prefill 标签或 prefix-cache 命中后只计算新 token 都不足以证明重算。
+两个数值分割的 pressure 组使用 prompt 长度 512/255、completion 预算 4/5、每步 token 预算 768、context 上限 768、最多两个并发请求和三个 256-token 的 Rust 物理 KV block。Rust 必须在已经推进至少一个 completion token 后，真实重新执行此前计算过的历史区间；单有 prefill 标签或 prefix-cache 命中后只计算新 token 都不足以证明重算。
+
+baseline 按 [ADR-0017](../adr/0017-pressure-baseline-usable-capacity.md) 使用 51 个 16-token 总 block；固定 vLLM 版本保留一个 null block，因此有 50 个可用 block，可容纳两请求完整计算历史的 33+17 个 block。baseline 仍必须证明 prefill、decode、batch，但不要求它重算；Rust 的三 block 压力和重算要求不变。49 个总 block 已能容纳初始 32+16 个 block，51 不是触发 batch 的唯一或最小值，而是完整历史容量的选择，不额外规定两端调度顺序一致或 baseline 永不抢占。两个数值 pressure 条目和对应公开行为条目的配置镜像必须一致。容量计算不代替新配置下的实际 GPU 机制与数值验证；旧配置工件保持原来源和判定。
 
 pressure 组不再声称覆盖 chunked prefill；分块覆盖仍由 chunk-remainder、mixed、waiting 等明确要求该机制的组承担。fixed-prefix、无 forcing 的 control 及独立 control-replay 都必须以自身事件证明机制，CPU 指纹替身的成功只证明调度几何与历史路径，不代替 Qwen 的 GPU 数值验收。
 
