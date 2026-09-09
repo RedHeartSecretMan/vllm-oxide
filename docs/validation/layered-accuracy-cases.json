@@ -13484,7 +13484,7 @@
     {
       "case_id": "calibration-behavior-public-pressure",
       "engine_options": {
-        "baseline_blocks": 48,
+        "baseline_blocks": 51,
         "enforce_eager": true,
         "gpu_memory_utilization": 0.5,
         "max_model_len": 768,
@@ -28089,7 +28089,7 @@
     {
       "case_id": "acceptance-behavior-public-pressure",
       "engine_options": {
-        "baseline_blocks": 48,
+        "baseline_blocks": 51,
         "enforce_eager": true,
         "gpu_memory_utilization": 0.5,
         "max_model_len": 768,
@@ -50581,7 +50581,7 @@
     },
     {
       "engine_options": {
-        "baseline_blocks": 48,
+        "baseline_blocks": 51,
         "enforce_eager": true,
         "gpu_memory_utilization": 0.5,
         "max_model_len": 768,
@@ -61703,7 +61703,7 @@
     },
     {
       "engine_options": {
-        "baseline_blocks": 48,
+        "baseline_blocks": 51,
         "enforce_eager": true,
         "gpu_memory_utilization": 0.5,
         "max_model_len": 768,
