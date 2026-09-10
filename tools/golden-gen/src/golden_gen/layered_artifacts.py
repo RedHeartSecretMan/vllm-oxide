@@ -73,6 +73,17 @@ def bound_file(root: Path, record: dict[str, Any]) -> Path:
     return path
 
 
+def worker_metadata(root: Path, receipt_path: Path, receipt: dict[str, Any]) -> Path:
+    path = receipt_path.with_name("worker.json")
+    if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+        raise ValueError("missing or unsafe original worker metadata")
+    if json.loads(path.read_text()) != {
+        key: value for key, value in receipt.items() if key != "guard"
+    }:
+        raise ValueError("original worker metadata differs from receipt")
+    return path
+
+
 def manifest_artifact_closure(manifest_path: Path, seen: set[Path] | None = None) -> list[Path]:
     """Hash the complete declared dependency graph without parsing full logit tensors."""
     visited = set() if seen is None else seen
@@ -83,12 +94,22 @@ def manifest_artifact_closure(manifest_path: Path, seen: set[Path] | None = None
     data = json.loads(manifest_path.read_text())
     if (
         data.get("protocol") != PROTOCOL
-        or data.get("schema_version") != 1
+        or data.get("schema_version") not in (1, 2)
         or data.get("purpose") not in ("observation", "authoritative")
     ):
         raise ValueError("invalid manifest in layered artifact closure")
     root = manifest_path.parent
     paths = [manifest_path]
+    if data["schema_version"] == 2:
+        from golden_gen.layered_manifest import LayeredManifest
+
+        LayeredManifest.model_validate(data)
+        paths.append(bound_file(root, data["supervision_policy"]))
+        ledger_path = bound_file(root, data["retained_owner_ledger"])
+        paths.append(ledger_path)
+        ledger = json.loads(ledger_path.read_text())
+        for owner in ledger["owners"]:
+            paths.extend(bound_file(root, item) for item in owner["files"])
     for entry in [
         *data.get("captures", []),
         *data.get("operator_checks", []),
@@ -101,7 +122,13 @@ def manifest_artifact_closure(manifest_path: Path, seen: set[Path] | None = None
             receipt_path = bound_file(root, entry[variant + "_receipt"])
             paths.append(receipt_path)
             receipt = json.loads(receipt_path.read_text())
-            paths.append(bound_file(root, receipt["guard"]))
+            guard_path = bound_file(root, receipt["guard"])
+            paths.append(guard_path)
+            if (
+                data["schema_version"] == 2
+                and json.loads(guard_path.read_text()).get("schema_version") == 2
+            ):
+                paths.append(worker_metadata(root, receipt_path, receipt))
             paths.extend(bound_file(root, ref) for ref in receipt.get("setup_captures", []))
     for name in ("calibration_evidence", "fault_evidence", "calibration_marker"):
         if data.get(name) is not None:
@@ -124,10 +151,12 @@ def write_marker(
     if stage not in ("observation", "authoritative") or not outputs:
         raise ValueError("unsupported or empty layered stage")
     result = json.loads(outputs[0].read_text())
+    supervised = result.get("evaluator_source") is not None
     if (
         result.get("protocol") != PROTOCOL
         or result.get("schema_version") != 1
-        or result.get("source") != source
+        or result.get("evaluator_source" if supervised else "source") != source
+        or (supervised and (stage != "authoritative" or result.get("supervision_source") != source))
     ):
         raise ValueError("legacy/unknown result cannot create a layered marker")
     accepting = stage == "authoritative"
@@ -169,12 +198,17 @@ def write_marker(
         destination,
         dict(
             protocol=PROTOCOL,
-            schema_version=1,
+            schema_version=2 if supervised else 1,
             stage=stage,
             source=source,
             accepting=accepting,
             predecessor=prior,
             outputs=records,
+            **(
+                dict(measurement_source=result["source"], supervision_source=source)
+                if supervised
+                else {}
+            ),
         ),
     )
     return destination
@@ -184,7 +218,7 @@ def verify_marker(path: Path, source: dict[str, str]) -> dict[str, Any]:
     value: dict[str, Any] = json.loads(path.read_text())
     if (
         value.get("protocol") != PROTOCOL
-        or value.get("schema_version") != 1
+        or value.get("schema_version") not in (1, 2)
         or value.get("source") != source
         or not value.get("outputs")
         or value.get("stage") not in ("observation", "authoritative")
@@ -199,14 +233,40 @@ def verify_marker(path: Path, source: dict[str, str]) -> dict[str, Any]:
     for record in value["outputs"]:
         bound_file(root, record)
     result = json.loads(bound_file(root, value["outputs"][0]).read_text())
+    supervised = value["schema_version"] == 2
     if (
         result.get("protocol") != PROTOCOL
         or result.get("schema_version") != 1
-        or result.get("source") != source
+        or result.get("evaluator_source" if supervised else "source") != source
+        or (
+            supervised
+            and (
+                value.get("stage") != "authoritative"
+                or value.get("measurement_source") != result.get("source")
+                or value.get("supervision_source") != source
+                or result.get("supervision_source") != source
+            )
+        )
+        or (not supervised and result.get("evaluator_source") is not None)
     ):
         raise ValueError("marker result protocol/source differs")
     if len(value["outputs"]) > 1:
         manifest_path = bound_file(root, value["outputs"][1])
+        manifest = json.loads(manifest_path.read_text())
+        if supervised and (
+            manifest.get("schema_version") != 2
+            or manifest.get("source") != value["measurement_source"]
+            or any(
+                manifest.get(key) != result.get(key)
+                for key in (
+                    "evaluator_source",
+                    "supervision_source",
+                    "supervision_policy",
+                    "retained_owner_ledger",
+                )
+            )
+        ):
+            raise ValueError("supervised marker/manifest roles differ")
         if result.get("manifest_sha256") != sha(manifest_path):
             raise ValueError("marker manifest/result identity mismatch")
         closure = {p.relative_to(root).as_posix() for p in manifest_artifact_closure(manifest_path)}

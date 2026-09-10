@@ -6,10 +6,10 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from golden_gen import config
 from golden_gen.fixed_prefix import (
@@ -71,7 +71,7 @@ class AuxiliaryEntry(BaseModel):
 class LayeredManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol: Literal["layered-accuracy-v1"]
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     source: dict[str, str]
     registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     policy_sha256: str | None = None
@@ -83,6 +83,27 @@ class LayeredManifest(BaseModel):
     calibration_manifest: Artifact | None = None
     calibration_marker: Artifact | None = None
     fault_evidence: Artifact | None = None
+    evaluator_source: dict[str, str] | None = None
+    supervision_source: dict[str, str] | None = None
+    supervision_policy: Artifact | None = None
+    retained_owner_ledger: Artifact | None = None
+
+    @model_validator(mode="after")
+    def source_roles(self) -> Self:
+        roles = (
+            self.evaluator_source,
+            self.supervision_source,
+            self.supervision_policy,
+            self.retained_owner_ledger,
+        )
+        if self.schema_version == 2:
+            if self.purpose != "authoritative" or any(role is None for role in roles):
+                raise ValueError("supervised manifest requires all source roles and dependencies")
+            if self.evaluator_source != self.supervision_source:
+                raise ValueError("evaluator/supervisor sources differ")
+        elif any(role is not None for role in roles):
+            raise ValueError("legacy manifest cannot declare new source roles")
+        return self
 
 
 def _read(root: Path, artifact: Artifact) -> dict[str, Any]:
@@ -382,6 +403,19 @@ def _evaluate(
         )
     if len(found_owners) != len(declared_keys) or set(found_owners) != declared_keys:
         raise ValueError("manifest does not cover the exact frozen unique owner inventory")
+    roles: dict[str, Any] = {}
+    from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
+    from golden_gen.supervision import manifest_roles
+
+    if manifest.schema_version == 2:
+        if source_override is not None or not authoritative:
+            raise ValueError("supervised manifests cannot override evaluator source")
+        roles = manifest_roles(
+            repo, manifest_path.parent, manifest.model_dump(exclude_none=True), inventory, source
+        )
+        source = manifest.source
+    elif authoritative and source_override is None and (repo / SUPERVISION_POLICY_PATH).exists():
+        raise ValueError("current authoritative evaluation requires supervised manifest schema 2")
     if (
         manifest.source != source
         or manifest.registry_sha256 != registry_sha
@@ -760,6 +794,7 @@ def _evaluate(
         free_generation_diagnostics=free_generation,
         calibration_source=policy.calibration_source if policy is not None else None,
         distribution_fault=distribution_fault,
+        **roles,
     )
     if (
         any(b.get("evidence_complete") is False for b in behaviors)

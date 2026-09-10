@@ -190,3 +190,33 @@ def validate_cpu(path: Path, source: dict[str, str]) -> list[Path]:
         _output_ok(name, files["stdout"].read_text(), files["stderr"].read_text())
         closure.extend(files.values())
     return closure
+
+
+def validate_cpu_roles(
+    path: Path, measurement: dict[str, str], supervision: dict[str, str]
+) -> list[Path]:
+    """Keep both original CPU executions separate; copying never changes their source."""
+    data = json.loads(path.read_text())
+    if (
+        data.get("protocol") != PROTOCOL
+        or data.get("schema_version") != 1
+        or data.get("kind") != "role_cpu_gates"
+        or data.get("measurement_source") != measurement
+        or data.get("supervision_source") != supervision
+        or set(data)
+        != {
+            "protocol",
+            "schema_version",
+            "kind",
+            "measurement_source",
+            "supervision_source",
+            "measurement",
+            "supervision",
+        }
+    ):
+        raise ValueError("CPU role provenance mismatch")
+    original = bound_file(path.parent, data["measurement"])
+    current = bound_file(path.parent, data["supervision"])
+    if original == current or measurement == supervision:
+        raise ValueError("supervised CPU roles cannot collapse to one source")
+    return [path, *validate_cpu(original, measurement), *validate_cpu(current, supervision)]

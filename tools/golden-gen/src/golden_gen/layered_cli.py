@@ -140,10 +140,21 @@ def collect_group(
     binary: Path | None = None,
     *,
     auxiliary: bool = False,
+    measurement_repo: Path | None = None,
 ) -> dict[str, Any]:
     from golden_gen.guard import run_guarded
+    from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
+    from golden_gen.supervision import measurement_context
 
-    source = source_identity(repo)
+    if (repo / SUPERVISION_POLICY_PATH).exists() and measurement_repo is None:
+        raise ValueError("supervised collection requires an immutable measurement checkout")
+    execution_repo = measurement_repo or repo
+    context = (
+        measurement_context(repo, execution_repo, sys.executable, binary)
+        if measurement_repo is not None
+        else None
+    )
+    source = source_identity(execution_repo)
     # Freeze/approval check before creating files or importing a GPU runtime.
     if auxiliary:
         _auxiliary_definition(repo, group_id)
@@ -182,7 +193,7 @@ def collect_group(
         "golden_gen.layered_cli",
         "worker-aux" if auxiliary else "worker",
         "--repo-root",
-        str(repo),
+        str(execution_repo),
         "--run-dir",
         str(run_dir),
         "--model-dir",
@@ -197,7 +208,15 @@ def collect_group(
     if binary is not None:
         command.extend(["--candidate-binary", str(binary)])
     guard_path = output / "guard.json"
-    run_guarded(command, guard_path)
+    if context is None:
+        run_guarded(command, guard_path)
+    else:
+        worker_env = dict(os.environ)
+        worker_env["PYTHONPATH"] = context["measurement_invocation"]["pythonpath"]
+        worker_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        run_guarded(
+            command, guard_path, cwd=execution_repo.resolve(), env=worker_env, supervision=context
+        )
     guard = json.loads(guard_path.read_text())
     if guard["after"]["compute_processes"]:
         raise ValueError("GPU owner left an active compute process")
@@ -205,9 +224,24 @@ def collect_group(
     if (
         metadata["source"] != source
         or metadata["driver_pid"] != guard["child_pid"]
-        or source_identity(repo) != source
+        or source_identity(execution_repo) != source
     ):
         raise ValueError("worker metadata does not belong to this guarded source/process")
+    if context is not None:
+        from golden_gen.guard_evidence import validate_guard_timeline
+        from golden_gen.supervision import load_policy, validate_invocation
+
+        if measurement_context(repo, execution_repo, sys.executable, binary) != context:
+            raise ValueError("measurement/supervision identity changed during collection")
+        validate_guard_timeline(guard)
+        kind = (
+            ("operator_suite" if group_id == "operators" else "standalone_behavior")
+            if auxiliary
+            else "execution_group"
+        )
+        validate_invocation(
+            guard, load_policy(repo)[0], (kind, group_id, engine, variant), metadata
+        )
     metadata["guard"] = _artifact(guard_path, run_dir)
     atomic_json(output / "receipt.json", metadata)
     return dict(
@@ -467,6 +501,9 @@ def main() -> None:
     parser.add_argument("--engine", choices=["reference", "baseline", "candidate"])
     parser.add_argument("--variant", choices=["primary", "replay", "control", "control-replay"])
     parser.add_argument("--candidate-binary", type=Path)
+    parser.add_argument("--measurement-repo", type=Path)
+    parser.add_argument("--supervision-policy", type=Path)
+    parser.add_argument("--retained-owner-ledger", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--output", type=Path)
     for name in (
@@ -495,6 +532,7 @@ def main() -> None:
                 args.variant,
                 args.candidate_binary,
                 auxiliary=args.action == "collect-aux",
+                measurement_repo=args.measurement_repo,
             )
         elif args.action == "faults":
             from golden_gen.layered_faults import generate_fault_evidence
@@ -530,6 +568,8 @@ def main() -> None:
                 args.run_dir,
                 authoritative=args.action == "assemble-authoritative",
                 calibration=calibration or None,
+                supervision_policy=args.supervision_policy,
+                retained_owner_ledger=args.retained_owner_ledger,
             )
             output = args.manifest or args.run_dir / "manifest.json"
             if output.parent.resolve() != args.run_dir.resolve():

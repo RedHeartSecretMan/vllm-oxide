@@ -140,7 +140,11 @@ class BudgetPolicy(BaseModel):
 
 def definition_document(repo: Path, relative: str) -> tuple[dict[str, Any], str]:
     """Rehash the selected, tracked Definition input; a caller's approval flag is insufficient."""
-    if relative not in (REGISTRY_PATH, POLICY_PATH):
+    if relative not in (
+        REGISTRY_PATH,
+        POLICY_PATH,
+        "docs/validation/layered-supervision-policy.json",
+    ):
         raise ValueError("unsupported layered Definition document")
     index_bytes = (repo / ".dag/definition-index.json").read_bytes()
     tracked_index = subprocess.check_output(

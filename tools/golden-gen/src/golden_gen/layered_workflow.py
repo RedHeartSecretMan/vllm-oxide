@@ -50,11 +50,45 @@ def assemble_entries(root: Path, inventory: list[dict[str, Any]]) -> dict[str, A
 
 
 def assemble_manifest(
-    repo: Path, root: Path, *, authoritative: bool, calibration: dict[str, Path] | None = None
+    repo: Path,
+    root: Path,
+    *,
+    authoritative: bool,
+    calibration: dict[str, Path] | None = None,
+    supervision_policy: Path | None = None,
+    retained_owner_ledger: Path | None = None,
 ) -> dict[str, Any]:
     from golden_gen.layered_manifest import LayeredManifest
 
     source = source_identity(repo)
+    from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
+    from golden_gen.supervision import load_policy, validate_equivalence
+
+    supervised = authoritative and (repo / SUPERVISION_POLICY_PATH).exists()
+    roles: dict[str, Any] = {}
+    if supervised:
+        if supervision_policy is None or retained_owner_ledger is None:
+            raise ValueError(
+                "supervision assembly requires policy and retained ledger dependencies"
+            )
+        supervision, digest = load_policy(repo)
+        validate_equivalence(repo, supervision, source)
+        policy_ref = artifact_reference(root, supervision_policy)
+        ledger_ref = artifact_reference(root, retained_owner_ledger)
+        if (
+            policy_ref["sha256"] != digest
+            or ledger_ref["sha256"] != supervision["retained_ledger_sha256"]
+        ):
+            raise ValueError("supervision assembly dependency identity mismatch")
+        roles = dict(
+            evaluator_source=source,
+            supervision_source=source,
+            supervision_policy=policy_ref,
+            retained_owner_ledger=ledger_ref,
+        )
+        source = supervision["measurement_source"]
+    elif supervision_policy is not None or retained_owner_ledger is not None:
+        raise ValueError("unexpected supervision dependencies for legacy assembly")
     data, registry_sha = definition_document(repo, REGISTRY_PATH)
     registry = Registry.model_validate(data)
     policy_sha = None
@@ -85,11 +119,12 @@ def assemble_manifest(
     records = assemble_entries(root, inventory)
     records.update(
         protocol="layered-accuracy-v1",
-        schema_version=1,
+        schema_version=2 if supervised else 1,
         source=source,
         registry_sha256=registry_sha,
         policy_sha256=policy_sha,
         purpose="authoritative" if authoritative else "observation",
+        **roles,
     )
     if calibration:
         records.update({key: artifact_reference(root, path) for key, path in calibration.items()})

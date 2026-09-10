@@ -21,7 +21,7 @@ from golden_gen.layered_artifacts import (
 from golden_gen.layered_inventory import frozen_owner_inventory
 from golden_gen.layered_manifest import LayeredManifest, evaluate_manifest
 from golden_gen.layered_release import POLICY_PATH, REGISTRY_PATH, Registry, definition_document
-from golden_gen.release_cpu import validate_cpu
+from golden_gen.release_cpu import validate_cpu, validate_cpu_roles
 from golden_gen.release_performance import validate_performance
 from golden_gen.release_transport import (
     Artifact,
@@ -62,6 +62,10 @@ def _source_definitions(repo: Path, source: dict[str, str]) -> dict[str, bytes]:
 def _sources(path: Path) -> list[dict[str, str]]:
     manifest = LayeredManifest.model_validate_json(path.read_text())
     sources = [manifest.source]
+    if manifest.evaluator_source is not None:
+        sources.append(manifest.evaluator_source)
+    if manifest.supervision_source is not None:
+        sources.append(manifest.supervision_source)
     if manifest.calibration_manifest is not None:
         sources.extend(
             _sources(bound_file(path.parent, manifest.calibration_manifest.model_dump()))
@@ -126,13 +130,20 @@ def validate_evidence(
     if len(build_ids) != 1:
         raise ValueError("candidate binary build identities conflict")
     performance, performance_files = validate_performance(
-        paths["performance"], source, result["runtime_profile"], registry, next(iter(build_ids))
+        paths["performance"],
+        manifest.source,
+        result["runtime_profile"],
+        registry,
+        next(iter(build_ids)),
     )
     wrapper = json.loads(paths["performance"].read_text())
     if wrapper.get("authoritative_manifest_sha256") != sha(paths["authoritative_manifest"]):
         raise ValueError("performance predecessor differs from authoritative evidence")
     closure.extend(performance_files)
-    closure.extend(validate_cpu(paths["cpu_gates"], source))
+    if manifest.schema_version == 2:
+        closure.extend(validate_cpu_roles(paths["cpu_gates"], manifest.source, source))
+    else:
+        closure.extend(validate_cpu(paths["cpu_gates"], source))
     for name, value in _definitions(repo, paths["authoritative_manifest"]).items():
         path = root / name
         if path.is_symlink() or not path.is_file() or path.read_bytes() != value:
@@ -158,10 +169,12 @@ def validate_evidence(
         artifacts=len(inventory),
     )
     metadata = dict(
-        source=source,
+        source=manifest.source,
         registry_sha256=registry_sha,
         policy_sha256=policy_sha,
-        definition_index_blob=git(repo, "rev-parse", "HEAD:.dag/definition-index.json")
+        definition_index_blob=git(
+            repo, "rev-parse", f"{manifest.source['commit']}:.dag/definition-index.json"
+        )
         .decode()
         .strip(),
         entrypoints=entrypoints.model_dump(),
@@ -235,10 +248,7 @@ def measurement_checkout(repo: Path, source: dict[str, str]) -> Iterator[Path]:
 def verify_bundle(repo: Path, bundle: Path, cache: Path, rust_binary: Path) -> dict[str, Any]:
     manifest = read_manifest(bundle / "manifest.json")
     original_hashes = {p.name: sha(p) for p in bundle.iterdir()}
-    with (
-        measurement_checkout(repo, manifest.source.model_dump()) as measured,
-        tempfile.TemporaryDirectory(prefix="layered-consumer-") as directory,
-    ):
+    with tempfile.TemporaryDirectory(prefix="layered-consumer-") as directory:
         stage = Path(directory)
         # Rust reads the actual archive, not the Python extracted tree or a PASS summary.
         completed = subprocess.run(
@@ -267,7 +277,12 @@ def verify_bundle(repo: Path, bundle: Path, cache: Path, rust_binary: Path) -> d
             python_install / "manifest.json"
         ).read_bytes():
             raise ValueError("Python/Rust transport manifests differ")
-        evidence, _ = validate_evidence(measured, installed / "evidence", manifest.entrypoints)
+        execution = LayeredManifest.model_validate_json(
+            (installed / "evidence" / manifest.entrypoints.authoritative_manifest).read_text()
+        )
+        evaluator = execution.evaluator_source or manifest.source.model_dump()
+        with measurement_checkout(repo, evaluator) as trusted:
+            evidence, _ = validate_evidence(trusted, installed / "evidence", manifest.entrypoints)
         reconstructed = ReleaseManifest.model_validate(evidence["manifest"]).model_copy(
             update={"archive": manifest.archive}
         )

@@ -146,9 +146,10 @@ def publish(
     candidate = source_identity(repo)
     verified = verify_bundle(repo, bundle, cache, rust_binary)
     measured = verified["manifest"]["source"]
-    if candidate == measured:
+    evaluator = verified["result"].get("evaluator_source", measured)
+    if candidate == evaluator:
         raise ValueError("publication requires a reviewed evidence-only report descendant")
-    git(repo, "merge-base", "--is-ancestor", base, measured["commit"])
+    git(repo, "merge-base", "--is-ancestor", base, evaluator["commit"])
     report = render_report(verified)
     if git(repo, "show", f"{candidate['commit']}:{REPORT}") != report.encode():
         raise ValueError("committed report differs from revalidated evidence and asset hashes")
