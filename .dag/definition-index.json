@@ -82,6 +82,10 @@
       "blob_oid": "3de9f008825b64640fd4636856ca092914379b18"
     },
     {
+      "path": "docs/adr/0019-bounded-resource-supervision.md",
+      "blob_oid": "5590614e9198169d0dbc9332f82a7c9f6a129afb"
+    },
+    {
       "path": "docs/releases/goldens-v0.2-calibration-observation.json",
       "blob_oid": "f61e289b43ded163d00d659c08a530f8fbe6a9b8"
     },
@@ -100,6 +104,14 @@
     {
       "path": "docs/validation/layered-release-assets.md",
       "blob_oid": "6408ca5b334b1ceeb00a4bfea4eab0fdf57dcc82"
+    },
+    {
+      "path": "docs/validation/layered-supervision-contract.md",
+      "blob_oid": "4f334cb569b25f8b56c30bf9e1352656a15ece93"
+    },
+    {
+      "path": "docs/validation/layered-supervision-policy.json",
+      "blob_oid": "e93eba0115e1cd47f2c485827b8ba5f06cfcf824"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
