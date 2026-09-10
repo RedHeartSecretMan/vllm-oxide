@@ -124,9 +124,15 @@ def validate_guard_timeline(record: dict[str, Any]) -> None:
             or not previous_end <= start <= end <= duration
         ):
             raise ValueError("overlapping or unordered telemetry attempts")
+        active_retry = (
+            index > 0
+            and events[index - 1]["phase"] == "active"
+            and events[index - 1]["outcome"] == "timeout"
+        )
         if (
             (phase == "before" and end > launched)
-            or (phase == "active" and not launched <= start <= exited <= cleaned)
+            or (phase == "active" and start < launched)
+            or (phase == "active" and start > exited and not active_retry)
             or (phase == "active" and end > cleaned)
             or (phase == "after" and start < cleaned)
         ):

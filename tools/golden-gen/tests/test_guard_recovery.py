@@ -28,10 +28,13 @@ def fake_query(tmp_path, monkeypatch, delays):
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
 
 
-def test_real_query_timeout_keeps_five_second_deadline_and_recovers(tmp_path, monkeypatch):
+@pytest.mark.parametrize("timeout_phase", ["before", "active"])
+def test_real_query_timeout_keeps_five_second_deadline_and_recovers(
+    tmp_path, monkeypatch, timeout_phase
+):
     from golden_gen.guard_evidence import validate_guard_timeline
 
-    fake_query(tmp_path, monkeypatch, {("gpu", 1): 6})
+    fake_query(tmp_path, monkeypatch, {("gpu", 1 if timeout_phase == "before" else 2): 6})
     evidence = tmp_path / "real-timeout.json"
     run_guarded([sys.executable, "-c", "import time; time.sleep(.12)"], evidence)
     record = json.loads(evidence.read_text())
@@ -40,6 +43,21 @@ def test_real_query_timeout_keeps_five_second_deadline_and_recovers(tmp_path, mo
     assert len(timeouts) == 1
     assert timeouts[0]["queries"][0]["timeout_seconds"] == 5
     assert record["failure"] is None
+    assert timeouts[0]["phase"] == timeout_phase
+    if timeout_phase == "active":
+        import copy
+
+        retry = record["telemetry_events"][timeouts[0]["attempt"] + 1]
+        assert record["child_exit_observed_seconds"] < retry["started_seconds"]
+        assert retry["ended_seconds"] <= record["owner_cleanup_completed_seconds"]
+        forged = copy.deepcopy(record)
+        forged["telemetry_events"] = [
+            event for event in forged["telemetry_events"] if event["outcome"] != "timeout"
+        ]
+        for index, event in enumerate(forged["telemetry_events"]):
+            event["attempt"] = index
+        with pytest.raises(ValueError, match="lifecycle"):
+            validate_guard_timeline(forged)
 
 
 def test_recovery_window_stops_blocked_retry_without_waiting_another_five_seconds(
