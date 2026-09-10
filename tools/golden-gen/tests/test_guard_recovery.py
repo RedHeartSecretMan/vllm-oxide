@@ -175,6 +175,22 @@ def test_guard_records_real_query_and_fast_ram_timeline(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="query"):
         validate_guard_timeline(record)
+    record["telemetry_events"][-1]["queries"][0]["timeout_seconds"] = 5
+    import copy
+
+    missing_owned = copy.deepcopy(record)
+    missing_owned["owned_process_samples"] = []
+    with pytest.raises(ValueError, match="monitoring"):
+        validate_guard_timeline(missing_owned)
+    wrong_phase = copy.deepcopy(record)
+    active = next(event for event in wrong_phase["telemetry_events"] if event["phase"] == "active")
+    active["phase"] = "after"
+    with pytest.raises(ValueError, match="lifecycle"):
+        validate_guard_timeline(wrong_phase)
+    truncated = copy.deepcopy(record)
+    truncated["resource_samples"].pop()
+    with pytest.raises(ValueError, match="snapshot"):
+        validate_guard_timeline(truncated)
 
 
 def test_persistent_timeout_cannot_become_success(tmp_path):
@@ -339,3 +355,79 @@ def test_cleanup_permission_failure_is_retained_and_rejected(tmp_path, monkeypat
                         break
                     if reaped == 0:
                         time.sleep(0.01)
+
+
+def test_guard_rejects_erased_active_monitoring_interval():
+    from golden_gen.guard_evidence import validate_guard_timeline
+
+    ram = 32 * 1024**3
+    samples = [
+        dict(
+            started_seconds=start,
+            completed_seconds=end,
+            elapsed_seconds=end,
+            available_ram_bytes=ram,
+            disk_free_bytes=1000,
+            gpu_memory="0, 1, 2",
+            compute_processes="",
+        )
+        for start, end in ((0.0, 0.5), (101.1, 101.5))
+    ]
+    events = []
+    for index, (phase, sample) in enumerate(zip(("before", "after"), samples, strict=True)):
+        start = sample["started_seconds"]
+        queries = [
+            dict(
+                kind=kind,
+                pid=200 + index * 2 + offset,
+                timeout_seconds=5,
+                started_seconds=start + 0.01 + offset * 0.2,
+                ended_seconds=start + 0.1 + offset * 0.2,
+                outcome="ok",
+                error=None,
+            )
+            for offset, kind in enumerate(("gpu_memory", "compute_processes"))
+        ]
+        events.append(
+            dict(
+                attempt=index,
+                phase=phase,
+                started_seconds=start,
+                ended_seconds=sample["completed_seconds"],
+                outcome="fresh",
+                snapshot_index=index,
+                error=None,
+                queries=queries,
+            )
+        )
+    record = dict(
+        schema_version=2,
+        child_pid=10,
+        owned_pgid=10,
+        child_returncode=0,
+        failure=None,
+        cleanup_failure=None,
+        telemetry_cleanup_failure=None,
+        remaining_owned_pids=[],
+        remaining_telemetry_pids=[],
+        ram_poll_interval_ms=100,
+        telemetry_interval_ms=1000,
+        child_started_seconds=1.0,
+        child_exit_observed_seconds=100.0,
+        owner_cleanup_completed_seconds=101.0,
+        elapsed_seconds=102.0,
+        fast_ram_samples=[dict(elapsed_seconds=102.0, available_ram_bytes=ram)],
+        ram_sample_count=1,
+        maximum_fast_poll_gap_seconds=0,
+        owned_process_samples=[],
+        resource_samples=samples,
+        telemetry_events=events,
+        before=samples[0],
+        after=samples[1],
+        minimum_available_ram_bytes=ram,
+        minimum_disk_free_bytes=1000,
+        peak_gpu_used_mib=1,
+        minimum_gpu_free_mib=2,
+    )
+    with pytest.raises(ValueError, match="monitoring|coverage"):
+        validate_guard_timeline(record)

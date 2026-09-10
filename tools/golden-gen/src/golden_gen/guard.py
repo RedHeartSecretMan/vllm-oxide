@@ -346,9 +346,12 @@ def _run_guarded(
         child = subprocess.Popen(command, start_new_session=True, cwd=cwd, env=env)
         child_started = elapsed()
         known_owned.add(child.pid)
+        fast(force=True)
         next_telemetry = time.monotonic()
         while child.poll() is None:
             fast()
+            if child.returncode is not None:
+                break
             if time.monotonic() >= next_telemetry:
                 snapshot("active")
                 next_telemetry = time.monotonic() + 1
@@ -361,6 +364,10 @@ def _run_guarded(
         failure = error
     finally:
         closing = True
+        try:
+            fast(force=True)
+        except BaseException as error:
+            failure = failure or error
         if child is not None:
             try:
 

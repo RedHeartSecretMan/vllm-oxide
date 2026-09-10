@@ -85,8 +85,11 @@ def validate_guard_timeline(record: dict[str, Any]) -> None:
     if _number(record["maximum_fast_poll_gap_seconds"]) != gap:
         raise ValueError("false independent RAM polling gap")
     rams = [_integer(sample["available_ram_bytes"], 16 * 1024**3) for sample in fast]
+    if not any(launched <= when <= exited for when in times):
+        raise ValueError("missing RAM monitoring coverage during the worker lifecycle")
     known = {pid}
     previous = launched
+    observed_owner = False
     for observation in record["owned_process_samples"]:
         when = _number(observation["elapsed_seconds"])
         if not previous <= when <= cleaned:
@@ -96,10 +99,15 @@ def validate_guard_timeline(record: dict[str, Any]) -> None:
         if members != sorted(set(members)):
             raise ValueError("invalid owned-process membership")
         known.update(_integer(member, 1) for member in members)
+        observed_owner |= pid in members and when <= exited
+    if not observed_owner:
+        raise ValueError("missing owned-process monitoring coverage")
     samples = record["resource_samples"]
     events = record["telemetry_events"]
     if not samples or not events:
         raise ValueError("missing fresh resource evidence")
+    if times[0] > samples[0]["started_seconds"] or times[-1] < samples[-1]["completed_seconds"]:
+        raise ValueError("RAM monitoring coverage does not bracket resource supervision")
     fresh: list[tuple[str, dict[str, Any]]] = []
     timeout_at: int | None = None
     previous_end = 0.0
@@ -116,6 +124,13 @@ def validate_guard_timeline(record: dict[str, Any]) -> None:
             or not previous_end <= start <= end <= duration
         ):
             raise ValueError("overlapping or unordered telemetry attempts")
+        if (
+            (phase == "before" and end > launched)
+            or (phase == "active" and not launched <= start <= exited <= cleaned)
+            or (phase == "active" and end > cleaned)
+            or (phase == "after" and start < cleaned)
+        ):
+            raise ValueError("telemetry phase lies outside the owner lifecycle")
         if (
             phase == "active"
             and active_start is not None
@@ -147,6 +162,8 @@ def validate_guard_timeline(record: dict[str, Any]) -> None:
             elif query["outcome"] == "timeout":
                 if not query["error"] or number != len(queries) - 1 or finish - begin < 5:
                     raise ValueError("invalid timed-out query")
+                if not any(begin < when < finish for when in times):
+                    raise ValueError("missing independent RAM monitoring during timed-out query")
             else:
                 raise ValueError("fatal telemetry query cannot be accepted")
             last_end = finish
@@ -166,7 +183,11 @@ def validate_guard_timeline(record: dict[str, Any]) -> None:
                 or event["error"] is not None
             ):
                 raise ValueError("partial snapshot cannot be fresh")
-            if type(event["snapshot_index"]) is not int or event["snapshot_index"] != len(fresh):
+            if (
+                type(event["snapshot_index"]) is not int
+                or event["snapshot_index"] != len(fresh)
+                or event["snapshot_index"] >= len(samples)
+            ):
                 raise ValueError("fresh snapshot index mismatch")
             sample = samples[event["snapshot_index"]]
             if (
@@ -185,6 +206,10 @@ def validate_guard_timeline(record: dict[str, Any]) -> None:
             raise ValueError("fatal telemetry attempt cannot be accepted")
     if timeout_at == len(events) - 1 or len(fresh) != len(samples):
         raise ValueError("unrecovered timeout or unbound resource sample")
+    if exited - launched >= record["telemetry_interval_ms"] / 1000 and not any(
+        phase == "active" for phase, _ in fresh
+    ):
+        raise ValueError("missing active telemetry monitoring coverage")
     if (
         fresh[0][0] != "before"
         or fresh[-1][0] != "after"
