@@ -2,6 +2,11 @@
 
 [English](README.md) | **简体中文**
 
+> **v0.2.0-rc.1 是实验性源码预发布，不是已通过精度验收的正式 v0.2.0。**
+> 原始数值验收在未修改的预算下有 18/66 个 case 失败。
+> 证据身份、使用方式及剩余门禁见 [RC1 发布说明](docs/releases/v0.2.0-rc.1.md)。
+> RC1 不附带宣称通过验收的 `goldens-v0.2` bundle。
+
 [CI][ci-url]
 [License: Apache-2.0][license-url]
 
@@ -88,7 +93,7 @@ flowchart TD
 
 ### 工具链
 
-- **Rust**：edition 2021，rust-version 1.75+（见 [workspace.package] 声明）。
+- **Rust**：edition 2021；RC1 请使用 Rust 1.94.0。manifest 历史声明的 1.75 下限尚未在本预发布中验证。
 - **系统**：Linux（唯一支持的 NVIDIA CUDA 平台）。Windows 和 macOS GPU 推理不在 v0.2.0 范围内。
 
 ## 快速开始
@@ -147,7 +152,7 @@ cargo run --release --example generate_qwen3 --features cuda -- hub:Qwen/Qwen3-0
 
 ```toml
 [dependencies]
-vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", features = ["cuda"] }
+vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0-rc.1", features = ["cuda"] }
 anyhow = "1"
 ```
 
@@ -288,7 +293,7 @@ CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最
 
 ## 最低支持的 Rust 版本 (MSRV)
 
-当前 MSRV 为 **1.75**（在 `[workspace.package]` 中声明）。我们采用滚动策略：MSRV 可能在次版本发布时提升，但仅提升至已稳定至少 6 个月的 Rust 版本。
+workspace 历史声明为 **1.75**，但 RC1 不宣称已在该工具链上构建通过。请使用记录的验证工具链 **Rust 1.94.0**。声明下限的验证仍属于未完成的正式发布门禁。
 
 ## 安全
 

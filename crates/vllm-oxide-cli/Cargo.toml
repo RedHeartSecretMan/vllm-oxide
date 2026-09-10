@@ -8,6 +8,10 @@ repository.workspace = true
 authors.workspace = true
 description = "Thin CLI binary for vllm-oxide — parses argv and calls LLM::generate."
 
+[features]
+default = []
+cuda = ["vllm_oxide/cuda"]
+
 [dependencies]
 # Issue #24 — thin CLI over LLM::generate. No tokio; LLM::generate is sync.
 vllm_oxide = { path = "../vllm-oxide" }

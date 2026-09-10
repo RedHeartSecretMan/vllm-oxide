@@ -2,6 +2,11 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+> **v0.2.0-rc.1 is an experimental source prerelease, not a numerically qualified v0.2.0 release.**
+> The recorded numerical run failed 18 of 66 cases under the unchanged budgets.
+> See the [RC1 release notes](docs/releases/v0.2.0-rc.1.md) for evidence identities,
+> supported usage and remaining release gates. No passing `goldens-v0.2` bundle is published with RC1.
+
 [![CI][ci-badge]][ci-url]
 [![License: Apache-2.0][license-badge]][license-url]
 
@@ -89,7 +94,7 @@ Key design decisions (see `CONTEXT.md` for the full vocabulary):
 
 ### Toolchain
 
-- **Rust**: edition 2021, rust-version 1.75+ (as declared in [workspace.package]).
+- **Rust**: edition 2021; use Rust 1.94.0 for RC1. The historical manifest minimum of 1.75 is not validated for this prerelease.
 - **System**: Linux (the only supported NVIDIA CUDA platform). Windows and macOS GPU inference are outside v0.2.0.
 
 ## Quick Start
@@ -148,7 +153,7 @@ Add `vllm_oxide` as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", features = ["cuda"] }
+vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0-rc.1", features = ["cuda"] }
 anyhow = "1"
 ```
 
@@ -289,7 +294,7 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for br
 
 ## Minimum Supported Rust Version (MSRV)
 
-The current MSRV is **1.75** (declared in `[workspace.package]`). We follow a rolling policy: the MSRV may increase in a minor release, but only to a Rust version that has been stable for at least 6 months.
+The workspace historically declares **1.75**, but RC1 does not claim a successful build on that toolchain. Use **Rust 1.94.0**, the recorded validation toolchain. Verification of the declared minimum remains part of the unfinished formal release gate.
 
 ## Security
 
