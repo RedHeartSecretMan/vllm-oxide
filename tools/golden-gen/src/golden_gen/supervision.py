@@ -211,6 +211,10 @@ def validate_retained_ledger(
     inventory: list[dict[str, Any]],
 ) -> dict[tuple[str, str, str, str], dict[str, Any]]:
     """Authorize only the frozen byte identities, not arbitrary old source claims."""
+    # Ledger indices bind the approved measurement execution plan: L0 first.
+    # The registry inventory is a set inventory with operators appended last.
+    # Stable partition preserves every other owner and every metadata field.
+    inventory = sorted(inventory, key=lambda owner: owner["kind"] != "operator_suite")
     if artifact.get("sha256") != policy["retained_ledger_sha256"]:
         raise ValueError("retained ledger differs from approved policy")
     ledger = json.loads(bound_file(root, artifact).read_text())

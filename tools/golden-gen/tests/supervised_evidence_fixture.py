@@ -17,6 +17,8 @@ def supervised_release_inputs(tmp_path):
     manifest = json.loads(manifest_path.read_text())
     registry = Registry.model_validate_json((repo / REGISTRY_PATH).read_text())
     inventory = frozen_owner_inventory(registry, authoritative=True)
+    # The approved measurement plan executes L0 first, preserving all other order.
+    inventory.sort(key=lambda owner: owner["kind"] != "operator_suite")
 
     def artifact(path):
         return dict(path=str(path.relative_to(run)), sha256=sha(path))
