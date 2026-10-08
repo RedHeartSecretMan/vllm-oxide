@@ -868,6 +868,32 @@ mod tests {
         }
 
         #[test]
+        fn greedy_batch_with_penalties_keeps_history_effects() {
+            let device = cuda();
+            let logits = repeat_row(&[3.0, 2.0, 1.0], 4, &device);
+            let params = [
+                SamplingParams::default(),
+                SamplingParams {
+                    presence_penalty: 2.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    frequency_penalty: 1.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    repetition_penalty: 2.0,
+                    ..SamplingParams::default()
+                },
+            ];
+            let histories: [&[u32]; 4] = [&[0], &[0], &[0, 0], &[0]];
+            let selected = Sampler::new_with_seed(17)
+                .forward(&logits, &params, &histories)
+                .unwrap();
+            assert_eq!(selected_token_ids_to_host(&selected).unwrap(), [0, 1, 1, 1]);
+        }
+
+        #[test]
         fn mixed_device_paths_are_isolated_and_transfer_only_selected_tokens() {
             HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
             let device = cuda();
