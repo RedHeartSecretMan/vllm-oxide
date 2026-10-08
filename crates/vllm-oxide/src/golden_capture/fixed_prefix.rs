@@ -230,7 +230,7 @@ impl ReplaySession {
                 .copied()
                 .collect();
             if planned.completion_step != step
-                || planned.token_history != history
+                || planned.token_history.as_ref() != history.as_slice()
                 || planned.logical_positions.end != history.len()
                 || Some(planned.input_token_ids.as_slice())
                     != history.get(planned.token_range.clone())

@@ -286,7 +286,7 @@ impl EngineCore {
             if sequence.sampling_allowed {
                 sample_hiddens.push(hidden.get(offset + sequence.token_budget - 1)?);
                 sampling_params.push(sequence.sampling_params.clone());
-                token_histories.push(sequence.token_history.clone());
+                token_histories.push(sequence.token_history.as_ref());
             }
             offset += sequence.token_budget;
         }

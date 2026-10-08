@@ -209,7 +209,7 @@ struct PreparedBatch {
 
 fn prepare_batch(
     params: &[SamplingParams],
-    token_history: &[Vec<u32>],
+    token_history: &[impl AsRef<[u32]>],
     vocab_size: usize,
 ) -> Result<PreparedBatch> {
     let vocab_u32 = u32::try_from(vocab_size).map_err(|_| {
@@ -231,6 +231,7 @@ fn prepare_batch(
     prepared.history_offsets.push(0);
 
     for (row, (params, history)) in params.iter().zip(token_history).enumerate() {
+        let history = history.as_ref();
         params.validate().map_err(|error| {
             Error::msg(format!(
                 "sampler CUDA adapter: sampling params at row {row}{error}"
@@ -303,7 +304,7 @@ fn ensure_workspace<'a>(
 pub(super) fn sample(
     logits: &Tensor,
     params: &[SamplingParams],
-    token_history: &[Vec<u32>],
+    token_history: &[impl AsRef<[u32]>],
     row_seeds: &[u64],
     workspace_slot: &mut Option<Workspace>,
 ) -> Result<Tensor> {

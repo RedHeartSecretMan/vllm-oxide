@@ -322,7 +322,7 @@ impl Scheduler {
                 cache,
                 sampling_allowed,
                 sampling_params: sequence.sampling_params().clone(),
-                token_history: sequence.token_ids.clone(),
+                token_history: sequence.token_ids.as_slice().into(),
                 completion_step: sequence.num_completion_tokens(),
             });
         }
@@ -1475,6 +1475,34 @@ mod tests {
             assert_eq!(scheduler.running[0].num_cached_tokens, 0);
             assert!(scheduler.running[0].completion_token_ids().is_empty());
             assert_eq!(scheduler.in_flight.as_ref().unwrap().id, plan.id);
+        }
+
+        #[test]
+        fn cloned_plans_share_history_without_changing_prior_step_snapshots() {
+            let mut scheduler = make_scheduler();
+            let mut kv = make_kv_mgr(100);
+            scheduler.add_request(vec![11, 12, 13], make_params(2));
+            let prefill = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            let retained = prefill.clone();
+
+            // Retaining an immutable plan must not copy its entire history.
+            assert_eq!(
+                prefill.sequences[0].token_history.as_ptr(),
+                retained.sequences[0].token_history.as_ptr()
+            );
+
+            scheduler
+                .apply_step_result(&result_for_plan(&prefill, 42), &mut kv)
+                .unwrap();
+            let decode = scheduler.plan_step(&mut kv).unwrap().unwrap();
+            assert_eq!(&decode.sequences[0].token_history[..], &[11, 12, 13, 42]);
+            assert_eq!(&retained.sequences[0].token_history[..], &[11, 12, 13]);
+
+            scheduler
+                .apply_step_result(&result_for_plan(&decode, 43), &mut kv)
+                .unwrap();
+            assert_eq!(&decode.sequences[0].token_history[..], &[11, 12, 13, 42]);
+            assert_eq!(&retained.sequences[0].token_history[..], &[11, 12, 13]);
         }
 
         #[test]

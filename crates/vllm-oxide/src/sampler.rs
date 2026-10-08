@@ -338,7 +338,8 @@ impl Sampler {
     ///
     /// `token_history` is the per-row list of token ids generated *so far*
     /// (prompt + completion); only consulted when `params[i].has_penalties()`.
-    /// Pass empty vecs when no penalties are active.
+    /// Rows may be owned buffers or borrowed slices; sampling never copies
+    /// their token storage. Pass empty rows when no penalties are active.
     ///
     /// Returns a `[batch]` tensor of `u32` token ids on the same device as
     /// `logits`. The dtype is `U32` because candle's `Tensor::argmax`
@@ -347,7 +348,7 @@ impl Sampler {
         &mut self,
         logits: &Tensor,
         params: &[SamplingParams],
-        token_history: &[Vec<u32>],
+        token_history: &[impl AsRef<[u32]>],
     ) -> Result<Tensor> {
         let rank = logits.rank();
         if rank != 2 {
@@ -382,7 +383,7 @@ impl Sampler {
         &mut self,
         logits: &Tensor,
         params: &[SamplingParams],
-        token_history: &[Vec<u32>],
+        token_history: &[impl AsRef<[u32]>],
         batch: usize,
     ) -> Result<Tensor> {
         // Consume exactly one scalar seed per row, including greedy rows. A
@@ -410,7 +411,7 @@ impl Sampler {
         &mut self,
         _logits: &Tensor,
         _params: &[SamplingParams],
-        _token_history: &[Vec<u32>],
+        _token_history: &[impl AsRef<[u32]>],
         _batch: usize,
     ) -> Result<Tensor> {
         Err(CandleError::msg(
@@ -422,7 +423,7 @@ impl Sampler {
         &mut self,
         logits: &Tensor,
         params: &[SamplingParams],
-        token_history: &[Vec<u32>],
+        token_history: &[impl AsRef<[u32]>],
         batch: usize,
         vocab: usize,
     ) -> Result<Tensor> {
@@ -436,8 +437,12 @@ impl Sampler {
         // tests pin the contract.
         for row in 0..batch {
             let row_tensor = logits.get(row)?;
-            let sampled =
-                self.sample_row_host(&row_tensor, &params[row], &token_history[row], vocab)?;
+            let sampled = self.sample_row_host(
+                &row_tensor,
+                &params[row],
+                token_history[row].as_ref(),
+                vocab,
+            )?;
             // Vocabulary size is bounded by u32::MAX in every realistic model
             // (Qwen3 vocab is ~150k); the cast preserves all valid token ids.
             #[allow(clippy::cast_possible_truncation)]
@@ -676,6 +681,30 @@ mod tests {
         use super::*;
 
         #[test]
+        fn borrowed_histories_preserve_per_row_penalties() {
+            let logits = Tensor::from_vec(
+                vec![3.0_f32, 2.0, 1.0, 3.0, 2.0, 1.0, 3.0, 2.0, 1.0],
+                (3, 3),
+                &Device::Cpu,
+            )
+            .unwrap();
+            let params = vec![
+                SamplingParams {
+                    frequency_penalty: 1.0,
+                    ..SamplingParams::default()
+                };
+                3
+            ];
+            let histories: [&[u32]; 3] = [&[0, 0], &[], &[1, 1, 1]];
+            let selected = Sampler::new_with_seed(0)
+                .forward(&logits, &params, &histories)
+                .unwrap();
+
+            // Only row 0 loses its original winner: token 0's score is 3 - 2.
+            assert_eq!(selected_token_ids_to_host(&selected).unwrap(), [1, 0, 0]);
+        }
+
+        #[test]
         fn legacy_sampler_records_one_full_vocabulary_host_transfer() {
             HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
 
@@ -846,8 +875,11 @@ mod tests {
                 vec![0],
             ];
             let mut sampler = Sampler::new_with_seed(7);
+            let borrowed_histories = histories.iter().map(Vec::as_slice).collect::<Vec<_>>();
 
-            let selected = sampler.forward(&logits, &params, &histories).unwrap();
+            let selected = sampler
+                .forward(&logits, &params, &borrowed_histories)
+                .unwrap();
             assert!(
                 HOST_TRANSFERS.with(|transfers| transfers.borrow().is_empty()),
                 "device sampling must not transfer logits"
