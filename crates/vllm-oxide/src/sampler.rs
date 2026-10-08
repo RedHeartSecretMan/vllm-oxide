@@ -793,6 +793,81 @@ mod tests {
         }
 
         #[test]
+        #[ignore = "manual CUDA sampler microbenchmark, not a release performance gate"]
+        fn benchmark_greedy_batches() {
+            const VOCAB: usize = 151_936;
+            const ITERATIONS: usize = 128;
+            let device = cuda();
+            let row = (0..VOCAB).map(|token| token as f32).collect::<Vec<_>>();
+            for batch in [1, 8, 32, 128] {
+                let logits = repeat_row(&row, batch, &device);
+                let params = vec![SamplingParams::default(); batch];
+                let histories = vec![&[] as &[u32]; batch];
+                let mut sampler = Sampler::new_with_seed(7);
+                for _ in 0..32 {
+                    let selected = sampler.forward(&logits, &params, &histories).unwrap();
+                    assert_eq!(
+                        selected_token_ids_to_host(&selected).unwrap(),
+                        vec![u32::try_from(VOCAB - 1).unwrap(); batch]
+                    );
+                }
+                let mut samples_us = Vec::new();
+                for _ in 0..7 {
+                    device.synchronize().unwrap();
+                    let started = std::time::Instant::now();
+                    for _ in 0..ITERATIONS {
+                        // The CUDA adapter synchronizes before returning.
+                        // Include Rust preparation/allocation and scratch reuse;
+                        // logits preparation and selected-token D2H stay outside.
+                        drop(sampler.forward(&logits, &params, &histories).unwrap());
+                    }
+                    device.synchronize().unwrap();
+                    samples_us.push(started.elapsed().as_secs_f64() * 1e6 / ITERATIONS as f64);
+                }
+                println!("greedy batch={batch} vocab={VOCAB} samples_us={samples_us:?}");
+            }
+        }
+
+        #[test]
+        fn greedy_batches_preserve_row_offsets_and_lowest_token_ties() {
+            let device = cuda();
+            for (batch, vocab) in [(1, 17), (33, 513), (32, 151_936)] {
+                let mut values = vec![-3.0_f32; batch * vocab];
+                let mut expected = Vec::with_capacity(batch);
+                let params = (0..batch)
+                    .map(|row| {
+                        let first = (row * 97 + vocab - 1) % vocab;
+                        let tied = (first + 256) % vocab;
+                        values[row * vocab + first] = 5.0;
+                        values[row * vocab + tied] = 5.0;
+                        expected.push(u32::try_from(first.min(tied)).unwrap());
+                        if row % 2 == 0 {
+                            SamplingParams::default()
+                        } else {
+                            SamplingParams {
+                                temperature: 0.7,
+                                top_k: Some(1),
+                                top_p: Some(0.5),
+                                ..SamplingParams::default()
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let logits = Tensor::from_vec(values, (batch, vocab), &device).unwrap();
+                // Histories are deliberately nonempty: no-op penalties must
+                // leave every row's argmax unchanged.
+                let histories = vec![&[0_u32, 0, 1][..]; batch];
+                for dtype in [DType::F32, DType::BF16] {
+                    let logits = logits.to_dtype(dtype).unwrap();
+                    let selected = Sampler::new_with_seed(17)
+                        .forward(&logits, &params, &histories)
+                        .unwrap();
+                    assert_eq!(selected_token_ids_to_host(&selected).unwrap(), expected);
+                }
+            }
+        }
+
+        #[test]
         fn mixed_device_paths_are_isolated_and_transfer_only_selected_tokens() {
             HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
             let device = cuda();
