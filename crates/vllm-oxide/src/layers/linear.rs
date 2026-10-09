@@ -162,6 +162,7 @@ fn project(x: &Tensor, weight: &Tensor, layout: ProjectionLayout) -> Result<Tens
 }
 
 // Experimental: prevent workspace-dependent split reductions in multi-request GEMMs.
+#[allow(unsafe_code)] // Narrow cuBLAS handle-control seam; no raw matrix pointers.
 fn stable_batched_matmul(x: &Tensor, weight: &Tensor, layout: ProjectionLayout) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Device::Cuda(device) = x.device() {
