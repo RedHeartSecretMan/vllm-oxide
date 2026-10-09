@@ -1,0 +1,5 @@
+# Rebuild release evidence without retained owners
+
+Manifest schema 3 and the `bounded-telemetry-fresh-v1` supervision profile describe a complete new run with zero retained owners. Every registered owner must have its original worker metadata and a schema-2 guard whose process lifecycle, independent RAM sampling, CUDA telemetry, cleanup, command, source and binary identities validate. This preserves ADR-0019's resource constraints while removing dependence on the missing historical ledger. Schema 2 remains the explicit retained-ledger protocol and cannot be silently interpreted as fresh evidence.
+
+Fresh evidence still requires approved numerical/calibration bindings, the exact frozen owner inventory, both source-role CPU gates, complete artifact closure, replay/control checks, all operator/behavior gates, performance evidence and a separately authorized publication. The new schema changes evidence provenance, not numerical thresholds or dataset splits. Implementing this workflow does not approve a new calibration, reinterpret an old failure as PASS, or authorize reusing the old backend's approval for FP32 causal math.

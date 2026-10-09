@@ -140,7 +140,7 @@ def validate_evidence(
     if wrapper.get("authoritative_manifest_sha256") != sha(paths["authoritative_manifest"]):
         raise ValueError("performance predecessor differs from authoritative evidence")
     closure.extend(performance_files)
-    if manifest.schema_version == 2:
+    if manifest.schema_version in (2, 3):
         closure.extend(validate_cpu_roles(paths["cpu_gates"], manifest.source, source))
     else:
         closure.extend(validate_cpu(paths["cpu_gates"], source))

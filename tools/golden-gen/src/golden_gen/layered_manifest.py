@@ -71,7 +71,7 @@ class AuxiliaryEntry(BaseModel):
 class LayeredManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol: Literal["layered-accuracy-v1"]
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     source: dict[str, str]
     registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     policy_sha256: str | None = None
@@ -90,18 +90,17 @@ class LayeredManifest(BaseModel):
 
     @model_validator(mode="after")
     def source_roles(self) -> Self:
-        roles = (
-            self.evaluator_source,
-            self.supervision_source,
-            self.supervision_policy,
-            self.retained_owner_ledger,
-        )
-        if self.schema_version == 2:
+        roles = (self.evaluator_source, self.supervision_source, self.supervision_policy)
+        if self.schema_version in (2, 3):
             if self.purpose != "authoritative" or any(role is None for role in roles):
                 raise ValueError("supervised manifest requires all source roles and dependencies")
             if self.evaluator_source != self.supervision_source:
                 raise ValueError("evaluator/supervisor sources differ")
-        elif any(role is not None for role in roles):
+            if self.schema_version == 2 and self.retained_owner_ledger is None:
+                raise ValueError("retained manifest requires its original ledger")
+            if self.schema_version == 3 and self.retained_owner_ledger is not None:
+                raise ValueError("fresh manifest cannot retain legacy owners")
+        elif any(role is not None for role in (*roles, self.retained_owner_ledger)):
             raise ValueError("legacy manifest cannot declare new source roles")
         return self
 
@@ -407,7 +406,7 @@ def _evaluate(
     from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
     from golden_gen.supervision import manifest_roles
 
-    if manifest.schema_version == 2:
+    if manifest.schema_version in (2, 3):
         if source_override is not None or not authoritative:
             raise ValueError("supervised manifests cannot override evaluator source")
         roles = manifest_roles(
@@ -415,7 +414,7 @@ def _evaluate(
         )
         source = manifest.source
     elif authoritative and source_override is None and (repo / SUPERVISION_POLICY_PATH).exists():
-        raise ValueError("current authoritative evaluation requires supervised manifest schema 2")
+        raise ValueError("current authoritative evaluation requires a supervised manifest")
     if (
         manifest.source != source
         or manifest.registry_sha256 != registry_sha

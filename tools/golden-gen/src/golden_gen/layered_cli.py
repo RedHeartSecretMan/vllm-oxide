@@ -239,6 +239,7 @@ def collect_group(
         worker_env = dict(os.environ)
         worker_env["PYTHONPATH"] = context["measurement_invocation"]["pythonpath"]
         worker_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        worker_env["UV_PROJECT_ENVIRONMENT"] = sys.prefix
         run_guarded(
             command, guard_path, cwd=execution_repo.resolve(), env=worker_env, supervision=context
         )

@@ -17,10 +17,11 @@ POLICY_PATH = "docs/validation/layered-supervision-policy.json"
 
 def load_policy(repo: Path) -> tuple[dict[str, Any], str]:
     data, digest = definition_document(repo, POLICY_PATH)
+    fresh = data.get("policy_id") == "bounded-telemetry-fresh-v1"
     fixed = dict(
-        protocol="layered-supervision-policy-v1",
-        schema_version=1,
-        policy_id="bounded-telemetry-recovery-v1",
+        protocol="layered-supervision-policy-v2" if fresh else "layered-supervision-policy-v1",
+        schema_version=2 if fresh else 1,
+        policy_id="bounded-telemetry-fresh-v1" if fresh else "bounded-telemetry-recovery-v1",
         ram_floor_bytes=16 * 1024**3,
         fast_poll_interval_ms=100,
         telemetry_interval_ms=1000,
@@ -33,18 +34,36 @@ def load_policy(repo: Path) -> tuple[dict[str, Any], str]:
         require_fresh_after_cleanup=True,
         require_single_flight=True,
         require_owned_and_telemetry_cleanup=True,
-        retained_index_start=0,
     )
     for key, expected in fixed.items():
         if type(data.get(key)) is not type(expected) or data[key] != expected:
             raise ValueError(f"unsupported supervision policy: {key}")
-    for key in ("registry_sha256", "numerical_policy_sha256", "retained_ledger_sha256"):
+    digest_fields: tuple[str, ...] = ("registry_sha256", "numerical_policy_sha256")
+    if not fresh:
+        digest_fields += ("retained_ledger_sha256",)
+    for key in digest_fields:
         if not isinstance(data.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", data[key]) is None:
             raise ValueError("invalid supervision policy digest")
     count = data.get("retained_owner_count")
-    if (
+    if fresh:
+        if (
+            type(count) is not int
+            or count != 0
+            or any(
+                key in data
+                for key in (
+                    "retained_ledger_sha256",
+                    "retained_index_start",
+                    "retained_index_end_inclusive",
+                )
+            )
+        ):
+            raise ValueError("fresh supervision cannot retain legacy owners or ledger authority")
+    elif (
         type(count) is not int
         or count <= 0
+        or type(data.get("retained_index_start")) is not int
+        or data["retained_index_start"] != 0
         or data.get("retained_index_end_inclusive") != count - 1
     ):
         raise ValueError("invalid retained owner policy range")
@@ -302,7 +321,17 @@ def manifest_roles(
         raise ValueError("supervised manifest source/policy mismatch")
     if json.loads(bound_file(root, manifest["supervision_policy"]).read_text()) != policy:
         raise ValueError("supervision policy artifact differs from selected Definition")
-    retained = validate_retained_ledger(root, manifest["retained_owner_ledger"], policy, inventory)
+    fresh = policy["policy_id"] == "bounded-telemetry-fresh-v1"
+    if fresh:
+        if manifest.get("schema_version") != 3 or manifest.get("retained_owner_ledger") is not None:
+            raise ValueError("fresh supervision requires manifest schema 3 without retained owners")
+        retained = {}
+    else:
+        if manifest.get("schema_version") != 2:
+            raise ValueError("retained supervision requires manifest schema 2")
+        retained = validate_retained_ledger(
+            root, manifest["retained_owner_ledger"], policy, inventory
+        )
     records = {}
     for category, kind in (
         ("captures", "execution_group"),
@@ -354,4 +383,5 @@ def manifest_roles(
             "supervision_policy",
             "retained_owner_ledger",
         )
+        if name in manifest
     }

@@ -67,6 +67,21 @@ Markers rehash the full declared capture/receipt/guard/setup dependency graph.
 Definition-only approval changes may bridge calibration to fresh measurements;
 execution-source changes require fresh calibration. Old markers are never inputs.
 
+For a new calibration after an implementation change, `collect` and `collect-aux`
+accept `--fresh-observation`. This mode permits only the frozen calibration owner
+inventory and remains nonaccepting; it does not inherit the prior backend's
+calibration approval. The worker uses the declared checkout and the invoking
+GPU-only Python environment.
+
+After the new calibration and source bindings are approved, the
+`bounded-telemetry-fresh-v1` supervision policy produces manifest schema 3. Supply
+`--measurement-repo` during collection and `--supervision-policy` during
+assembly; no retained-owner ledger is allowed. Every owner must carry a full
+schema-2 guard and original worker metadata. Source-role CPU gates, replay,
+calibration/fault provenance and the full artifact closure remain mandatory.
+The earlier recovery policy and manifest schema 2 still require their exact
+original retained ledger. See [ADR-0021](../../docs/adr/0021-fresh-supervised-release-evidence.md).
+
 Fixed replay records exactly T predictions for prompt+continuation[:t], with a
 separate predicted and advance token. Recording the final advance does not claim
 another forward. Controls advance only their own raw greedy predictions. Public
