@@ -46,7 +46,7 @@ fn dense(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
             })
             .collect::<Vec<_>>();
         let mask = Tensor::from_vec(mask, (count, keys), q.device())?;
-        let probabilities = candle_nn::ops::softmax_last_dim(&scores.broadcast_add(&mask)?)?;
+        let probabilities = candle_nn::ops::softmax(&scores.broadcast_add(&mask)?, 2)?;
         output_chunks.push(probabilities.matmul(&v32)?);
     }
     Tensor::cat(&output_chunks, 1)?
