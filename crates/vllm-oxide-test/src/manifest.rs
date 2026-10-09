@@ -610,7 +610,7 @@ mod tests {
             "kernel_paths": {
                 "reference": "transformers-4.57.6/torch-2.10.0/fp32-gemm-reduction/sdpa-math",
                 "baseline": "vllm-0.18.1/flash-attn-v2/eager",
-                "candidate": "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2"
+                "candidate": "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2+call-layout-v1"
             },
             "generation": {
                 "canonical_max_tokens": 64,
@@ -627,7 +627,7 @@ mod tests {
             "tolerance_policy": {
                 "version": "same-prefix-v1",
                 "dtype": "bfloat16",
-                "kernel": "transformers-4.57.6/torch-2.10.0/fp32-gemm-reduction/sdpa-math::vs::vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2",
+                "kernel": "transformers-4.57.6/torch-2.10.0/fp32-gemm-reduction/sdpa-math::vs::vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2+call-layout-v1",
                 "l1_near_tie_max_abs_logit_gap": 0.02,
                 "l2_atol": 0.01,
                 "rationale": "Reviewed synthetic policy",

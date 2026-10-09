@@ -67,9 +67,23 @@ impl EngineCore {
         }
     }
 
-    /// Add a new inference request and return its stable public request identity.
-    pub(crate) fn add_request(&mut self, prompt: Vec<u32>, params: SamplingParams) -> usize {
-        self.scheduler.add_request(prompt, params)
+    /// Admit one complete, validated public call and bind its model context.
+    /// An overlapping call cannot change the layout of requests already running.
+    pub(crate) fn add_requests(
+        &mut self,
+        requests: Vec<(Vec<u32>, SamplingParams)>,
+    ) -> Result<Vec<usize>> {
+        if self.is_running() {
+            candle_core::bail!("cannot admit a generation call while requests are running")
+        }
+        if requests.is_empty() {
+            candle_core::bail!("cannot admit an empty generation call")
+        }
+        self.model.begin_generation(requests.len());
+        Ok(requests
+            .into_iter()
+            .map(|(prompt, params)| self.scheduler.add_request(prompt, params))
+            .collect())
     }
 
     /// One step of the engine loop: schedule → forward → sample → KV update.
@@ -215,6 +229,9 @@ impl EngineCore {
                 return Err(self.cleanup_failed_step(candle_core::Error::msg(error)));
             }
         };
+        if !self.is_running() {
+            self.model.end_generation();
+        }
         Ok((
             outputs,
             EngineStepCapture {
@@ -230,6 +247,7 @@ impl EngineCore {
     }
 
     fn cleanup_failed_step(&mut self, error: candle_core::Error) -> candle_core::Error {
+        self.model.end_generation();
         match self
             .scheduler
             .abort_all_requests(&mut self.kv_cache_manager)
@@ -243,6 +261,7 @@ impl EngineCore {
 
     #[cfg(feature = "internal-golden")]
     pub(crate) fn abort_generation(&mut self) -> Result<()> {
+        self.model.end_generation();
         self.scheduler
             .abort_all_requests(&mut self.kv_cache_manager)
             .map_err(candle_core::Error::msg)
@@ -950,7 +969,7 @@ mod tests {
             attn_ctx,
             device,
         );
-        engine.add_request(
+        engine.scheduler.add_request(
             vec![1],
             SamplingParams {
                 max_tokens: 3,
@@ -958,14 +977,14 @@ mod tests {
             },
         );
         assert!(engine.step().unwrap().is_empty());
-        engine.add_request(
+        engine.scheduler.add_request(
             vec![4, 5],
             SamplingParams {
                 max_tokens: 1,
                 ..SamplingParams::default()
             },
         );
-        engine.add_request(
+        engine.scheduler.add_request(
             vec![6, 7, 8, 9],
             SamplingParams {
                 max_tokens: 2,

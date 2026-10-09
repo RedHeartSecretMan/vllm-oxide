@@ -35,6 +35,31 @@ pub struct LinearSpec {
     pub bias: bool,
 }
 
+/// Bounded physical row floor for a sequence of projections. Extra rows are
+/// zeros discarded immediately after GEMM; they never become logical tokens.
+///
+/// Keeping a small call's row floor across admission and early completion
+/// avoids switching between the matrix-vector and small-matrix reduction paths.
+/// This is a compatibility layout, not a promise of shape-invariant arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProjectionLayout {
+    minimum_rows: usize,
+}
+
+impl ProjectionLayout {
+    pub(crate) fn for_batch(request_count: usize) -> Self {
+        Self {
+            minimum_rows: request_count.clamp(1, 8),
+        }
+    }
+}
+
+impl Default for ProjectionLayout {
+    fn default() -> Self {
+        Self::for_batch(1)
+    }
+}
+
 /// Fused linear projection generic over a [`ParallelStyle`] type-level tag.
 ///
 /// The tag determines (a) how [`Linear::from_vb`] assembles the weight from
@@ -81,8 +106,8 @@ impl<P: ParallelStyle> Linear<P> {
         }
     }
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let out = x.matmul(&self.weight.t()?)?;
+    pub fn forward(&self, x: &Tensor, layout: ProjectionLayout) -> Result<Tensor> {
+        let out = project(x, &self.weight, layout)?;
         match &self.bias {
             Some(b) => out.broadcast_add(b),
             None => Ok(out),
@@ -96,13 +121,19 @@ impl<P: ParallelStyle> Linear<P> {
     /// Evaluate a logical projection independently while retaining packed
     /// checkpoint storage. Slicing a fused GEMM's output can round differently
     /// from this GEMM geometry; optional bias uses the same output range.
-    pub(crate) fn forward_range(&self, x: &Tensor, start: usize, width: usize) -> Result<Tensor> {
+    pub(crate) fn forward_range(
+        &self,
+        x: &Tensor,
+        start: usize,
+        width: usize,
+        layout: ProjectionLayout,
+    ) -> Result<Tensor> {
         let total = self.weight.dim(0)?;
         if width == 0 || start.checked_add(width).is_none_or(|end| end > total) {
             candle_core::bail!("linear output range is empty or out of bounds")
         }
         let weight = self.weight.narrow(0, start, width)?;
-        let output = x.matmul(&weight.t()?)?;
+        let output = project(x, &weight, layout)?;
         match &self.bias {
             Some(bias) => output.broadcast_add(&bias.narrow(0, start, width)?),
             None => Ok(output),
@@ -112,6 +143,22 @@ impl<P: ParallelStyle> Linear<P> {
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
     }
+}
+
+fn project(x: &Tensor, weight: &Tensor, layout: ProjectionLayout) -> Result<Tensor> {
+    if matches!(x.device(), Device::Cuda(_)) && x.dtype() == candle_core::DType::BF16 {
+        let (rows, features) = x.dims2()?;
+        if rows > 0 && rows < layout.minimum_rows {
+            let zeros = Tensor::zeros(
+                (layout.minimum_rows - rows, features),
+                x.dtype(),
+                x.device(),
+            )?;
+            let padded = Tensor::cat(&[x, &zeros], 0)?;
+            return padded.matmul(&weight.t()?)?.narrow(0, 0, rows);
+        }
+    }
+    x.matmul(&weight.t()?)
 }
 
 /// Per-style checkpoint assembly. `pub(crate)` so external code can call
@@ -203,6 +250,21 @@ mod tests {
     fn vb_from(tensors: Vec<(String, Tensor)>) -> VarBuilder<'static> {
         let map: HashMap<String, Tensor> = tensors.into_iter().collect();
         VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
+
+    #[test]
+    fn projection_layout_bounds_additional_physical_rows() {
+        for (count, expected) in [
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (8, 8),
+            (9, 8),
+            (usize::MAX, 8),
+        ] {
+            assert_eq!(ProjectionLayout::for_batch(count).minimum_rows, expected);
+        }
     }
 
     mod linear_spec {
@@ -391,14 +453,16 @@ mod tests {
                 Tensor::from_vec(vec![2.0f32, 3.0, 5.0, 7.0], (2, 2), &Device::Cpu).unwrap();
             assert_eq!(
                 projection
-                    .forward_range(&input, 1, 2)
+                    .forward_range(&input, 1, 2, ProjectionLayout::default())
                     .unwrap()
                     .to_vec2::<f32>()
                     .unwrap(),
                 vec![vec![16.0, 30.0], vec![20.0, 48.0]]
             );
             for (start, width) in [(0, 0), (3, 1), (2, 2), (usize::MAX, 1)] {
-                assert!(projection.forward_range(&input, start, width).is_err());
+                assert!(projection
+                    .forward_range(&input, start, width, ProjectionLayout::default())
+                    .is_err());
             }
         }
 
@@ -424,7 +488,7 @@ mod tests {
                 .unwrap()
                 .reshape((1, 3))
                 .unwrap();
-            let out = lin.forward(&x).unwrap();
+            let out = lin.forward(&x, ProjectionLayout::default()).unwrap();
             assert_eq!(out.shape().dims(), [1, 3]);
             assert_eq!(
                 out.get(0)
@@ -470,7 +534,7 @@ mod tests {
             };
             let lin = Linear::<Row>::from_vb(vb, &spec, &Device::Cpu).unwrap();
             let x = Tensor::zeros((1, 2), DType::F32, &Device::Cpu).unwrap();
-            let out = lin.forward(&x).unwrap();
+            let out = lin.forward(&x, ProjectionLayout::default()).unwrap();
             assert_eq!(
                 out.get(0)
                     .unwrap()
