@@ -286,6 +286,7 @@ def _require_calibration_definition_changes(repo: Path, before: str, after: str)
                 "-C",
                 str(repo),
                 "diff",
+                "--no-renames",
                 "--name-only",
                 "-z",
                 before,

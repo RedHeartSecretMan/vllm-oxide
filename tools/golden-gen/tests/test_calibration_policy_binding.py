@@ -28,6 +28,7 @@ from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
         "symlink",
         "mode",
         "execution",
+        "rename",
     ],
 )
 def test_only_bound_numerical_policy_pointer_can_change(tmp_path: Path, mutation: str) -> None:
@@ -37,6 +38,7 @@ def test_only_bound_numerical_policy_pointer_can_change(tmp_path: Path, mutation
     git("init", "-q")
     git("config", "user.name", "CPU Test")
     git("config", "user.email", "cpu@example.invalid")
+    git("config", "diff.renames", "true")
     numerical = tmp_path / POLICY_PATH
     numerical.parent.mkdir(parents=True)
     numerical.write_text('{"values":{"a_mean":0.002},"binding":"old"}\n')
@@ -51,6 +53,8 @@ def test_only_bound_numerical_policy_pointer_can_change(tmp_path: Path, mutation
     if mutation == "old-hash":
         policy["numerical_policy_sha256"] = "0" * 64
     supervision.write_text(json.dumps(policy))
+    if mutation == "rename":
+        (tmp_path / "runtime.py").write_text("actual_execution = True\n")
     git("add", ".")
     git("commit", "-qm", "calibration")
     before = git("rev-parse", "HEAD")
@@ -80,6 +84,9 @@ def test_only_bound_numerical_policy_pointer_can_change(tmp_path: Path, mutation
         supervision.chmod(0o755)
     elif mutation == "execution":
         (tmp_path / "runtime.py").write_text("changed_execution = True\n")
+    if mutation == "rename":
+        (tmp_path / "docs/adr").mkdir()
+        git("mv", "runtime.py", "docs/adr/moved.md")
     git("add", ".")
     git("commit", "-qm", "policy binding")
     after = git("rev-parse", "HEAD")
