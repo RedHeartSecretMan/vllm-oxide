@@ -524,7 +524,17 @@ impl CausalLM for Qwen3ForCausalLM {
         self.model.forward(input_ids, positions, &prepared)
     }
     fn compute_logits(&self, hidden_states: &Tensor) -> CandleResult<Tensor> {
-        self.lm_head.forward(hidden_states)
+        let output = hidden_states.to_dtype(candle_core::DType::F32)?.matmul(
+            &self
+                .lm_head
+                .weight()
+                .to_dtype(candle_core::DType::F32)?
+                .t()?,
+        )?;
+        match self.lm_head.bias() {
+            Some(bias) => output.broadcast_add(&bias.to_dtype(candle_core::DType::F32)?),
+            None => Ok(output),
+        }
     }
     fn vocab_size(&self) -> usize {
         self.vocab_size
