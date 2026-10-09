@@ -167,7 +167,12 @@ def _receipt(
         ):
             raise ValueError("reference lacks deterministic MATH and FP32-reduction evidence")
     elif engine == "baseline":
-        from golden_gen.worker_determinism import BaselineWorkerEvidence
+        from golden_gen.worker_determinism import (
+            BaselineSchedulingEvidence,
+            BaselineWorkerEvidence,
+        )
+
+        scheduling = BaselineSchedulingEvidence.model_validate(evidence.get("scheduling"))
 
         states = [
             BaselineWorkerEvidence.model_validate(record)
@@ -177,6 +182,9 @@ def _receipt(
             len(states) != 2
             or [s.phase for s in states] != ["ready", "complete"]
             or states[0].pid != states[1].pid
+            or states[0].pid != scheduling.worker_pid
+            or type(value.get("driver_pid")) is not int
+            or scheduling.driver_pid != value.get("driver_pid")
             or any(s.expected_attention_layers != 28 for s in states)
         ):
             raise ValueError("baseline worker lifecycle/backend evidence is incomplete")

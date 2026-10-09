@@ -500,10 +500,16 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                 )
             else:
                 receipt["engine_evidence"] = dict(
+                    scheduling=dict(
+                        engine_core_class="vllm.v1.engine.core_client.InprocClient",
+                        multiprocessing_enabled=False,
+                        driver_pid=pid,
+                        worker_pid=pid,
+                    ),
                     worker_states=[
                         dict(
                             phase=phase,
-                            pid=pid + 10000,
+                            pid=pid,
                             worker_class="golden_gen.oracles.vllm_worker.DeterministicWorker",
                             before_cuda=dict(enabled=True, warn_only=False, cuda_initialized=False),
                             current=dict(enabled=True, warn_only=False, cuda_initialized=True),
@@ -524,7 +530,7 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                             cudagraph_mode="NONE",
                         )
                         for phase in ("ready", "complete")
-                    ]
+                    ],
                 )
             entry[variant] = capref
             entry[variant + "_receipt"] = store(f"{engine}-{variant}-receipt.json", receipt)
@@ -644,6 +650,31 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     assert result["behavior_checks"][0]["checks"]["order"] is True
     assert result["behavior_checks"][1]["checks"]["execution_history"] is True
     assert result["behavior_checks"][2]["checks"]["count"] is True
+    baseline = next(entry for entry in entries if entry["engine"] == "baseline")
+    for index, mutation in enumerate(("missing", "worker", "owner", "enabled", "numeric-false")):
+        changed = json.loads((run / baseline["primary_receipt"]["path"]).read_text())
+        scheduling = changed["engine_evidence"]["scheduling"]
+        if mutation == "missing":
+            del changed["engine_evidence"]["scheduling"]
+        elif mutation == "worker":
+            scheduling["worker_pid"] += 1
+        elif mutation == "owner":
+            scheduling["driver_pid"] += 1
+            scheduling["worker_pid"] += 1
+        else:
+            scheduling["multiprocessing_enabled"] = True if mutation == "enabled" else 0
+        changed_ref = store(f"bad-scheduling-{index}.receipt.json", changed)
+        bad_manifest = json.loads(manifest.read_text())
+        next(entry for entry in bad_manifest["captures"] if entry["engine"] == "baseline")[
+            "primary_receipt"
+        ] = changed_ref
+        bad_ref = store(f"bad-scheduling-{index}.manifest.json", bad_manifest)
+        assert (
+            evaluate_manifest(repo, run / bad_ref["path"], authoritative=False)[
+                "observation_complete"
+            ]
+            is False
+        )
     different_host = json.loads((run / entries[2]["primary_receipt"]["path"]).read_text())
     different_host["runtime"].update(gpu_name="NVIDIA L40", nvidia_driver_version="600.00")
     different_host_ref = store("different-host.receipt.json", different_host)
@@ -855,6 +886,12 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
             new_receipt["runtime"]["generator_commit"] = current_source["commit"]
             if new_receipt["engine"] == "candidate":
                 new_receipt["engine_evidence"]["source"] = current_source
+            elif new_receipt["engine"] == "baseline":
+                for state in new_receipt["engine_evidence"]["worker_states"]:
+                    state["pid"] = new_receipt["driver_pid"]
+                new_receipt["engine_evidence"]["scheduling"].update(
+                    driver_pid=new_receipt["driver_pid"], worker_pid=new_receipt["driver_pid"]
+                )
             old_guard = new_receipt["guard"]
             guard_data = json.loads((run / old_guard["path"]).read_text())
             guard_data["child_pid"] = new_receipt["driver_pid"]
