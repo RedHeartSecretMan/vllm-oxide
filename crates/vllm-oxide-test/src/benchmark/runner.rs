@@ -31,21 +31,48 @@ fn ensure_no_unrelated_compute_processes() -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let pids = String::from_utf8(output.stdout)
-        .context("nvidia-smi process output is not UTF-8")?
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| *pid != std::process::id())
-        .collect::<Vec<_>>();
+    let pids = parse_compute_processes(
+        &String::from_utf8(output.stdout).context("nvidia-smi process output is not UTF-8")?,
+        std::process::id(),
+    )?;
     if !pids.is_empty() {
         bail!("unrelated CUDA compute processes are active: {pids:?}");
     }
     Ok(())
 }
 
+fn parse_compute_processes(output: &str, own_pid: u32) -> Result<Vec<u32>> {
+    let mut others = Vec::new();
+    for line in output.lines() {
+        let pid = line
+            .trim()
+            .parse::<u32>()
+            .context("malformed CUDA compute-process identity")?;
+        if pid == 0 {
+            bail!("CUDA compute-process identity must be positive");
+        }
+        if pid != own_pid {
+            others.push(pid);
+        }
+    }
+    Ok(others)
+}
+
+struct MemoryReadings {
+    samples: Vec<MemorySample>,
+    maximum_gap: Duration,
+}
+
+fn observed_interval(gap: Duration) -> Result<u64> {
+    if gap.is_zero() || gap > Duration::from_millis(50) {
+        bail!("actual GPU memory sampling interval must be positive and at most 50 ms");
+    }
+    u64::try_from(gap.as_nanos().div_ceil(1_000_000)).context("GPU memory interval exceeds u64")
+}
+
 struct ActiveMemoryMonitor {
     child: Child,
-    reader: Option<thread::JoinHandle<Result<Vec<MemorySample>>>>,
+    reader: Option<thread::JoinHandle<Result<MemoryReadings>>>,
 }
 
 impl ActiveMemoryMonitor {
@@ -55,19 +82,21 @@ impl ActiveMemoryMonitor {
                 "--query-gpu=memory.used",
                 "--format=csv,noheader,nounits",
                 "--id=0",
-                "--loop-ms=50",
+                "--loop-ms=10",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("starting 50 ms GPU memory monitor")?;
+            .context("starting 10 ms GPU memory monitor")?;
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("GPU memory monitor stdout is unavailable"))?;
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let reader = thread::spawn(move || -> Result<Vec<MemorySample>> {
+        let reader = thread::spawn(move || -> Result<MemoryReadings> {
             let mut started = None;
+            let mut previous = None;
+            let mut maximum_gap = Duration::ZERO;
             let mut samples = Vec::new();
             for line in BufReader::new(stdout).lines() {
                 let line = line.context("reading GPU memory monitor output")?;
@@ -75,8 +104,14 @@ impl ActiveMemoryMonitor {
                     .trim()
                     .parse::<u64>()
                     .with_context(|| format!("parsing GPU memory sample {line:?}"))?;
-                let baseline = started.get_or_insert_with(Instant::now);
-                let elapsed = u64::try_from(baseline.elapsed().as_millis())
+                let observed = Instant::now();
+                if let Some(last) = previous.replace(observed) {
+                    let gap = observed.duration_since(last);
+                    observed_interval(gap)?; // Enforce before any millisecond truncation.
+                    maximum_gap = maximum_gap.max(gap);
+                }
+                let baseline = *started.get_or_insert(observed);
+                let elapsed = u64::try_from(observed.duration_since(baseline).as_millis())
                     .context("GPU memory monitor duration exceeds u64")?;
                 samples.push(MemorySample {
                     elapsed_ms: elapsed,
@@ -86,7 +121,10 @@ impl ActiveMemoryMonitor {
                     let _ = ready_sender.send(());
                 }
             }
-            Ok(samples)
+            Ok(MemoryReadings {
+                samples,
+                maximum_gap,
+            })
         });
         let monitor = Self {
             child,
@@ -106,13 +144,16 @@ impl ActiveMemoryMonitor {
         self.child
             .wait()
             .context("waiting for GPU memory monitor")?;
-        let samples = self
+        let readings = self
             .reader
             .take()
             .ok_or_else(|| anyhow::anyhow!("GPU memory reader missing"))?
             .join()
             .map_err(|_| anyhow::anyhow!("GPU memory monitor reader panicked"))??;
-        MemoryMonitorEvidence::validate(50, false, &[], samples)
+        // Round the actual maximum interval upward; the reader already
+        // rejected sub-millisecond violations of the unchanged 50 ms ceiling.
+        let interval = observed_interval(readings.maximum_gap)?;
+        MemoryMonitorEvidence::validate(interval, false, &[], readings.samples)
     }
 }
 
@@ -282,4 +323,43 @@ pub fn run_release_benchmark(
     output.write_all(b"\n")?;
     output.sync_all()?;
     Ok(evidence)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_compute_process_output_cannot_hide_another_owner() {
+        assert!(parse_compute_processes("N/A\n", 10).is_err());
+        assert!(parse_compute_processes("10\nbad PID\n", 10).is_err());
+        assert!(parse_compute_processes("0\n", 10).is_err());
+        assert_eq!(parse_compute_processes("10\n20\n", 10).unwrap(), [20]);
+        assert!(parse_compute_processes("", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sub_millisecond_polling_overruns_are_rejected_before_rounding() {
+        assert_eq!(observed_interval(Duration::from_millis(50)).unwrap(), 50);
+        assert_eq!(
+            observed_interval(Duration::from_micros(10_434)).unwrap(),
+            11
+        );
+        assert!(observed_interval(Duration::from_micros(50_001)).is_err());
+        assert!(observed_interval(Duration::from_micros(50_429)).is_err());
+        assert!(observed_interval(Duration::ZERO).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    #[ignore = "requires a guarded NVIDIA telemetry owner"]
+    fn actual_memory_monitor_preserves_the_fifty_millisecond_ceiling() {
+        let monitor = ActiveMemoryMonitor::start().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let evidence = monitor.finish().unwrap();
+        assert!((1..=50).contains(&evidence.polling_interval_ms));
+        assert!(evidence.sample_count >= 2);
+        assert_eq!(evidence.samples[0].elapsed_ms, 0);
+    }
 }

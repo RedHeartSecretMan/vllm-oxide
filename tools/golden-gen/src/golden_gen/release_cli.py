@@ -62,6 +62,7 @@ def main() -> None:
         "target-dir",
         "model-dir",
         "benchmark-binary",
+        "measurement-repo",
         "authoritative-manifest",
         "authoritative-marker",
         "performance-evidence",
@@ -106,6 +107,7 @@ def main() -> None:
                 args.model_dir,
                 args.benchmark_binary,
                 args.authoritative_manifest,
+                measurement_repo=args.measurement_repo,
             )
             result = dict(accepting=False, recorded_performance=str(path))
             files = [path]

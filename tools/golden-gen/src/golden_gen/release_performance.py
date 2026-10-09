@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import sys
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -129,11 +131,13 @@ def validate_performance(
     runtime: dict[str, Any],
     registry: Registry,
     build_source_id: str,
+    *,
+    supervision: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[Path]]:
     wrapper = json.loads(path.read_text())
     if (
         wrapper.get("protocol") != PROTOCOL
-        or wrapper.get("schema_version") != 1
+        or wrapper.get("schema_version") not in (1, 2)
         or wrapper.get("kind") != "recorded_gpu_performance"
         or wrapper.get("source") != source
         or _common_runtime(wrapper["runtime"]) != runtime
@@ -163,6 +167,34 @@ def validate_performance(
     if set(raw["workloads"]) != {"canonical_04", "canonical_05"}:
         raise ValueError("performance workload inventory differs")
     closure = [path, raw_path, guard_path]
+    if wrapper["schema_version"] == 2:
+        from golden_gen.guard_evidence import validate_guard_timeline
+        from golden_gen.supervision import validate_benchmark_invocation
+
+        if supervision is None:
+            raise ValueError("performance supervision lacks authoritative bindings")
+        policy_path = bound_file(root, wrapper["supervision_policy"])
+        digest = sha(policy_path)
+        if (
+            wrapper.get("supervision_source") != supervision["source"]
+            or digest != supervision["policy_sha256"]
+            or guard.get("supervision_source") != supervision["source"]
+            or guard.get("supervision_policy_sha256") != digest
+        ):
+            raise ValueError("performance supervision differs from authoritative evidence")
+        validate_guard_timeline(guard)
+        validate_benchmark_invocation(
+            guard,
+            json.loads(policy_path.read_text()),
+            source,
+            wrapper["binary_sha256"],
+            build_source_id,
+        )
+        closure.append(policy_path)
+    elif supervision is not None or any(
+        k in wrapper for k in ("supervision_source", "supervision_policy")
+    ):
+        raise ValueError("supervised performance cannot downgrade to legacy evidence")
     members = {m.case_id: m for group in registry.numerical_cases for m in group.plan.members}
     telemetry_refs = wrapper["telemetry"]
     expected_names = [
@@ -274,17 +306,42 @@ def validate_performance(
 
 
 def collect_performance(
-    repo: Path, directory: Path, model: Path, binary: Path, authoritative_manifest: Path
+    repo: Path,
+    directory: Path,
+    model: Path,
+    binary: Path,
+    authoritative_manifest: Path,
+    *,
+    measurement_repo: Path | None = None,
 ) -> Path:
     """GPU-owning stage, called only with separate stage authority; never during CPU tests."""
     from golden_gen.environment import collect_release_runtime
     from golden_gen.guard import run_guarded
 
+    repo, directory, model, binary, authoritative_manifest = (
+        path.absolute() for path in (repo, directory, model, binary, authoritative_manifest)
+    )
     result = evaluate_manifest(repo, authoritative_manifest, authoritative=True)
     if result.get("verdict") != "PASS" or result.get("accepting") is not True:
         raise ValueError("performance requires complete approved authoritative evidence")
-    source = source_identity(repo)
-    runtime = collect_release_runtime(model, repo).model_dump()
+    supervisor = source_identity(repo)
+    execution_repo = (measurement_repo or repo).resolve()
+    source = source_identity(execution_repo)
+    if source != result["source"]:
+        raise ValueError("performance requires the immutable authoritative measurement checkout")
+    context = None
+    if result.get("supervision_source") is not None:
+        from golden_gen.supervision import measurement_context
+
+        context = measurement_context(
+            repo, execution_repo, sys.executable, binary, binary_kind="benchmark"
+        )
+        if context["supervision_source"] != result["supervision_source"]:
+            raise ValueError("benchmark supervisor differs from authoritative evidence")
+        # Check the caller's original path first (including final symlinks),
+        # then execute the exact canonical path retained in the approved binding.
+        binary = Path(context["measurement_invocation"]["candidate_binary"]["path"])
+    runtime = collect_release_runtime(model, execution_repo).model_dump()
     if _common_runtime(runtime) != result["runtime_profile"]:
         raise ValueError("performance host differs from authoritative host")
     if directory.exists() or directory.is_symlink():
@@ -292,28 +349,41 @@ def collect_performance(
     directory.mkdir(mode=0o700)
     raw, guard = directory / "benchmark.json", directory / "guard.json"
     binary_hash = sha(binary)
+    env = dict(
+        os.environ,
+        PYTHONHASHSEED="0",
+        CUBLAS_WORKSPACE_CONFIG=":4096:8",
+        PYTHONPATH=str(execution_repo / "tools/golden-gen/src"),
+        PYTHONDONTWRITEBYTECODE="1",
+        UV_PROJECT_ENVIRONMENT=sys.prefix,
+    )
     run_guarded(
         [
             str(binary),
             "--model-path",
             str(model),
             "--prompts-dir",
-            str(repo / "tools/golden-gen/prompts"),
+            str(execution_repo / "tools/golden-gen/prompts"),
             "--output",
             str(raw),
             "--repo-root",
-            str(repo),
+            str(execution_repo),
             "--measurement-commit",
             source["commit"],
             "--measurement-tree",
             source["tree"],
         ],
         guard,
+        cwd=execution_repo,
+        env=env,
+        supervision=context,
+        timeout_seconds=1800,
     )
     if (
-        source_identity(repo) != source
+        source_identity(repo) != supervisor
+        or source_identity(execution_repo) != source
         or sha(binary) != binary_hash
-        or _common_runtime(collect_release_runtime(model, repo).model_dump())
+        or _common_runtime(collect_release_runtime(model, execution_repo).model_dump())
         != result["runtime_profile"]
     ):
         raise ValueError("performance source/binary/runtime changed during measurement")
@@ -321,12 +391,19 @@ def collect_performance(
     def ref(p: Path) -> dict[str, str]:
         return dict(path=p.name, sha256=sha(p))
 
+    roles: dict[str, Any] = {}
+    if context is not None:
+        from golden_gen.supervision import POLICY_PATH
+
+        policy_path = directory / "supervision-policy.json"
+        policy_path.write_bytes((repo / POLICY_PATH).read_bytes())
+        roles = dict(supervision_source=supervisor, supervision_policy=ref(policy_path))
     output = directory / "evidence.json"
     atomic_json(
         output,
         dict(
             protocol=PROTOCOL,
-            schema_version=1,
+            schema_version=2 if context is not None else 1,
             kind="recorded_gpu_performance",
             source=source,
             runtime=runtime,
@@ -334,6 +411,7 @@ def collect_performance(
             raw=ref(raw),
             guard=ref(guard),
             authoritative_manifest_sha256=sha(authoritative_manifest),
+            **roles,
             telemetry=[
                 ref(directory / f"{w}-repetition-{n}.telemetry.json")
                 for w in ("canonical_04", "canonical_05")

@@ -82,6 +82,14 @@ calibration/fault provenance and the full artifact closure remain mandatory.
 The earlier recovery policy and manifest schema 2 still require their exact
 original retained ledger. See [ADR-0021](../../docs/adr/0021-fresh-supervised-release-evidence.md).
 
+Supervised `release_cli performance` also requires `--measurement-repo` and the
+selected policy's separate `measurement_benchmark_binary` hash/build binding.
+It executes that checkout and records performance wrapper schema 2; a legacy
+wrapper cannot satisfy this gate. The native memory monitor requests 10 ms
+samples, checks each actual interval against 50 ms before truncation, and records
+the observed maximum interval rounded upward. See
+[ADR-0022](../../docs/adr/0022-bind-performance-measurement-and-monitoring.md).
+
 Fixed replay records exactly T predictions for prompt+continuation[:t], with a
 separate predicted and advance token. Recording the final advance does not claim
 another forward. Controls advance only their own raw greedy predictions. Public

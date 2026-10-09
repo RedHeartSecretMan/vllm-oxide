@@ -7,6 +7,7 @@ import subprocess
 from golden_gen.layered_artifacts import sha
 from golden_gen.supervision import POLICY_PATH
 from tests.supervised_evidence_fixture import supervised_release_inputs
+from tests.supervision_fixture_helpers import bind_synthetic_performance, synthetic_guard
 
 
 def fresh_release_inputs(tmp_path):
@@ -130,77 +131,5 @@ def fresh_release_inputs(tmp_path):
                 entry[variant + "_receipt"] = artifact(receipt_path)
                 guards.append((guard_path, receipt_path, entry, variant))
     manifest_path.write_text(json.dumps(manifest))
+    bind_synthetic_performance(run, entries, policy, measured, evaluator, policy_path)
     return repo, run, measured, evaluator, entries, guards
-
-
-def synthetic_guard(pid):
-    """A short owner with complete before/after queries and active RAM/process samples."""
-    ram = 32 * 1024**3
-    samples = []
-    events = []
-    for index, (phase, start, end) in enumerate((("before", 0.0, 0.05), ("after", 0.17, 0.22))):
-        samples.append(
-            dict(
-                started_seconds=start,
-                completed_seconds=end,
-                elapsed_seconds=end,
-                available_ram_bytes=ram,
-                disk_free_bytes=1000,
-                gpu_memory="0, 1, 2",
-                compute_processes="",
-            )
-        )
-        events.append(
-            dict(
-                attempt=index,
-                phase=phase,
-                started_seconds=start,
-                ended_seconds=end,
-                outcome="fresh",
-                snapshot_index=index,
-                error=None,
-                queries=[
-                    dict(
-                        kind=kind,
-                        pid=200 + index * 2 + offset,
-                        timeout_seconds=5,
-                        started_seconds=start + 0.01 + offset * 0.02,
-                        ended_seconds=start + 0.02 + offset * 0.02,
-                        outcome="ok",
-                        error=None,
-                    )
-                    for offset, kind in enumerate(("gpu_memory", "compute_processes"))
-                ],
-            )
-        )
-    return dict(
-        schema_version=2,
-        child_pid=pid,
-        owned_pgid=pid,
-        child_returncode=0,
-        failure=None,
-        cleanup_failure=None,
-        telemetry_cleanup_failure=None,
-        remaining_owned_pids=[],
-        remaining_telemetry_pids=[],
-        ram_poll_interval_ms=100,
-        telemetry_interval_ms=1000,
-        child_started_seconds=0.06,
-        child_exit_observed_seconds=0.15,
-        owner_cleanup_completed_seconds=0.16,
-        elapsed_seconds=0.25,
-        fast_ram_samples=[
-            dict(elapsed_seconds=t, available_ram_bytes=ram) for t in (0.0, 0.1, 0.25)
-        ],
-        ram_sample_count=3,
-        maximum_fast_poll_gap_seconds=0.25 - 0.1,
-        owned_process_samples=[dict(elapsed_seconds=0.1, pids=[pid])],
-        resource_samples=samples,
-        telemetry_events=events,
-        before=samples[0],
-        after=samples[1],
-        minimum_available_ram_bytes=ram,
-        minimum_disk_free_bytes=1000,
-        peak_gpu_used_mib=1,
-        minimum_gpu_free_mib=2,
-    )
