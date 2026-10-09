@@ -8,7 +8,7 @@ def test_supervision_policy_uses_selected_definition_binding():
     repo = Path(__file__).resolve().parents[3]
     relative = "docs/validation/layered-supervision-policy.json"
     policy, digest = definition_document(repo, relative)
-    assert policy["policy_id"] == "bounded-telemetry-recovery-v1"
+    assert policy["policy_id"] in ("bounded-telemetry-recovery-v1", "bounded-telemetry-fresh-v1")
     assert digest == sha(repo / relative)
     from golden_gen.supervision import load_policy
 

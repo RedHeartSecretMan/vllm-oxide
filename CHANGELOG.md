@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] — Release preparation
+## [0.2.0]
+
+Publication status and evidence requirements follow the [release notes](docs/releases/v0.2.0.md).
 
 - Rebuilt the `goldens-v0.2` workflow around pinned model/tokenizer/runtime and
-  kernel identities, bit-identical oracle/candidate replay, a sealed four-case
-  tolerance holdout, fixed private benchmark telemetry, content-bound stage
-  markers, and a separately authorized exact-two-asset publication stage.
+  kernel identities, independent operator checks, same-prefix three-engine
+  comparisons, bit-identical replay, and calibrated per-case budgets. Fixed
+  benchmark telemetry, content-bound stage markers, and separately authorized
+  exact-two-asset publication preserve the complete evidence chain.
 
 ### Changed
 

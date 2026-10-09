@@ -1,8 +1,10 @@
 ---
-status: proposed
+status: superseded by ADR-0024
 ---
 
 # Propose an explicit FP32 GEMM reduction reference
+
+This proposal was accepted by [ADR-0024](0024-approve-explicit-gemm-reduction.md). The original proposal and experimental findings below are retained as decision history.
 
 This experimental branch proposes full FP32 intermediate reductions for BF16 GEMMs in both the Transformers reference and the Rust candidate. Weights, stored activations, logits materialization, token histories, corpus splits and all four numerical budget values remain unchanged. The reference still uses PyTorch SDPA MATH. This is a proposed precision-scope revision, not approval under ADR-0018 and not release acceptance.
 

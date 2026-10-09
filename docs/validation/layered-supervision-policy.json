@@ -1,17 +1,17 @@
 {
-  "protocol": "layered-supervision-policy-v1",
-  "schema_version": 1,
-  "policy_id": "bounded-telemetry-recovery-v1",
+  "protocol": "layered-supervision-policy-v2",
+  "schema_version": 2,
+  "policy_id": "bounded-telemetry-fresh-v1",
   "measurement_source": {
-    "commit": "8f21331a9d00b36b372eed0039d97f162e2f9e25",
-    "tree": "7f6fb19b7046cb0342dec2b6776dc102fc42ae70"
+    "commit": "880e22c8823d30c0a52775b26a193f175824e80c",
+    "tree": "fb39df4d40239700bbf76ccfa76d341f924382b5"
   },
   "measurement_binary": {
-    "sha256": "f5a7442fdd0cb1fb67e77af199b5d5d118f2aef8275fa3e8f860763dd96f6555",
-    "build_source_id": "404f3d9b846139678998208142c0ab4116d63e4e"
+    "sha256": "996a1b6b6709bd7bde2f11c7c458558b6833f70a267a8f5651f0dc4e881a9656",
+    "build_source_id": "c8a3314b971f76c571d67458a4bdd00092ce1071"
   },
   "registry_sha256": "88f89084fe7b0c14a877c4c72f275314ad2a8e593d6fbc3ac63a194b91fb98f4",
-  "numerical_policy_sha256": "c20a2ba1eaf75e2ad834bdf77298f9de20d555b3dffed873c509b55c389f58fd",
+  "numerical_policy_sha256": "69222a5e4e5fe5ae1bd0474de3d5c330cc9d72c302ce34e3a382311aa5ad894e",
   "ram_floor_bytes": 17179869184,
   "fast_poll_interval_ms": 100,
   "telemetry_interval_ms": 1000,
@@ -24,10 +24,7 @@
   "require_fresh_after_cleanup": true,
   "require_single_flight": true,
   "require_owned_and_telemetry_cleanup": true,
-  "retained_ledger_sha256": "4e3670cbc523c8bbd67441a77f2e9c314cb93b39e857a60e6fe13698cb2daceb",
-  "retained_owner_count": 445,
-  "retained_index_start": 0,
-  "retained_index_end_inclusive": 444,
+  "retained_owner_count": 0,
   "unchanged_measurement_paths": [
     "Cargo.lock",
     "Cargo.toml",
@@ -55,6 +52,15 @@
     "tools/golden-gen/src/golden_gen/operator_verification.py",
     "tools/golden-gen/src/golden_gen/oracles",
     "tools/golden-gen/src/golden_gen/replay.py",
-    "tools/golden-gen/src/golden_gen/worker_determinism.py"
-  ]
+    "tools/golden-gen/src/golden_gen/worker_determinism.py",
+    "crates/vllm-oxide-cli/src",
+    "crates/vllm-oxide-test/src/benchmark.rs",
+    "crates/vllm-oxide-test/src/benchmark",
+    "crates/vllm-oxide-test/src/bin/benchmark.rs",
+    "tools/golden-gen/prompts"
+  ],
+  "measurement_benchmark_binary": {
+    "sha256": "3eb06a8ab3a3d3b5d43e33102c08331309a26a0b76f9bdfe9213e544238262f3",
+    "build_source_id": "c8a3314b971f76c571d67458a4bdd00092ce1071"
+  }
 }

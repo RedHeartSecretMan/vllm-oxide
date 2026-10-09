@@ -2,10 +2,11 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> **v0.2.0 release preparation — single-GPU Qwen3 offline inference.**
-> Current verification status, supported scope and remaining publication gates are
-> recorded in the [v0.2.0 release notes](docs/releases/v0.2.0.md).
-> The v0.2.0 tag shown below becomes available with the formal release.
+> **v0.2.0 — single-GPU Qwen3 offline inference.**
+> Supported scope and formal release evidence requirements are recorded in the
+> [v0.2.0 release notes](docs/releases/v0.2.0.md). Published tags and assets are
+> listed in [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases).
+> The tagged dependency example requires the corresponding published Release.
 
 [![CI][ci-badge]][ci-url]
 [![License: Apache-2.0][license-badge]][license-url]
