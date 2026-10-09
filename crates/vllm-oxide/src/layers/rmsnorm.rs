@@ -74,7 +74,7 @@ impl RMSNorm {
         #[allow(clippy::cast_precision_loss)]
         let hidden_f = hidden_size as f64;
         let var = (sum_fp32.sqr()?.sum_keepdim(Minus1)? / hidden_f)?;
-        let normed_fp32 = sum_fp32.broadcast_mul(&(var + self.eps)?.sqrt()?.recip()?)?;
+        let normed_fp32 = sum_fp32.broadcast_div(&(var + self.eps)?.sqrt()?)?;
         let normed = normed_fp32
             .to_dtype(orig_dtype)?
             .broadcast_mul(&self.weight)?;
