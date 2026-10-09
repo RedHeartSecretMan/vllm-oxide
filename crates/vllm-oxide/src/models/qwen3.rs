@@ -166,14 +166,12 @@ impl Qwen3Attention {
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
     ) -> CandleResult<Tensor> {
+        let qkv = self.qkv_proj.forward(hidden)?;
         let qs = self.num_heads * self.head_dim;
         let ks = self.num_kv_heads * self.head_dim;
-        // Diagnostic-only experiment: keep BF16 inputs/weights and change
-        // only GEMM projection geometry to the three reference projections.
-        let weight = self.qkv_proj.weight();
-        let q = hidden.matmul(&weight.narrow(0, 0, qs)?.t()?)?;
-        let k = hidden.matmul(&weight.narrow(0, qs, ks)?.t()?)?;
-        let v = hidden.matmul(&weight.narrow(0, qs + ks, ks)?.t()?)?;
+        let q = qkv.i((.., 0..qs))?;
+        let k = qkv.i((.., qs..qs + ks))?;
+        let v = qkv.i((.., qs + ks..qs + 2 * ks))?;
         #[cfg(feature = "internal-golden")]
         if let Some(trace) = trace.as_deref_mut() {
             for (name, value) in [("layer0_q", &q), ("layer0_k", &k), ("layer0_v", &v)] {
