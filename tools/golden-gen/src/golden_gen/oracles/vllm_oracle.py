@@ -23,7 +23,11 @@ from golden_gen.config import (
 from golden_gen.environment import validate_release_model
 from golden_gen.oracles.base import OracleResult
 from golden_gen.schema import PromptSpec
-from golden_gen.worker_determinism import BaselineWorkerEvidence, seed_and_enable_determinism
+from golden_gen.worker_determinism import (
+    BaselineSchedulingEvidence,
+    BaselineWorkerEvidence,
+    seed_and_enable_determinism,
+)
 
 
 def baseline_engine_kwargs() -> dict[str, Any]:
@@ -103,8 +107,17 @@ class VllmOracle:
         execution_options: dict[str, Any] | None = None,
     ) -> None:
         source = str(validate_release_model(model_dir))
+        # Each release owner is already isolated. A separate EngineCore process
+        # can step while generate() is still submitting its batch, making GEMM
+        # geometry depend on host timing despite deterministic arithmetic flags.
+        import os
+
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         import torch
-        from vllm import LLM
+        from vllm import LLM, envs
+
+        if envs.VLLM_ENABLE_V1_MULTIPROCESSING is not False:
+            raise ValueError("baseline multiprocessing setting was cached before configuration")
 
         _configure_determinism(torch)
         contract = baseline_engine_kwargs()
@@ -124,6 +137,7 @@ class VllmOracle:
             raise ValueError("legacy baseline does not accept layered execution options")
         self.llm = LLM(**contract)
         self._worker_ready = self._worker_evidence("ready")
+        self.scheduling_evidence()
 
     def _worker_evidence(self, phase: str) -> BaselineWorkerEvidence:
         records = self.llm.collective_rpc("release_worker_evidence", args=(phase,), timeout=30)
@@ -136,6 +150,21 @@ class VllmOracle:
         if completed.pid != self._worker_ready.pid:
             raise ValueError("baseline GPU worker changed during generation")
         return [self._worker_ready, completed]
+
+    def scheduling_evidence(self) -> BaselineSchedulingEvidence:
+        import os
+
+        from vllm import envs
+
+        client = type(self.llm.llm_engine.engine_core)
+        return BaselineSchedulingEvidence.model_validate(
+            dict(
+                engine_core_class=f"{client.__module__}.{client.__qualname__}",
+                multiprocessing_enabled=envs.VLLM_ENABLE_V1_MULTIPROCESSING,
+                driver_pid=os.getpid(),
+                worker_pid=self._worker_ready.pid,
+            )
+        )
 
     def _generate_canonical(self, prompt: PromptSpec) -> OracleResult:
         from vllm import SamplingParams

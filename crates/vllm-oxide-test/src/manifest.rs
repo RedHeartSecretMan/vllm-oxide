@@ -609,7 +609,7 @@ mod tests {
             "runtime": runtime_json(),
             "kernel_paths": {
                 "reference": "transformers-4.57.6/torch-2.10.0/fp32-gemm-reduction/sdpa-math",
-                "baseline": "vllm-0.18.1/flash-attn-v2/eager",
+                "baseline": "vllm-0.18.1/flash-attn-v2/eager/inproc-scheduler",
                 "candidate": "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2+call-layout-v1"
             },
             "generation": {

@@ -20,7 +20,7 @@ pub const MODEL_WEIGHTS_SHA256: &str =
     "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b";
 pub const REFERENCE_KERNEL_PATH: &str =
     "transformers-4.57.6/torch-2.10.0/fp32-gemm-reduction/sdpa-math";
-pub const BASELINE_KERNEL_PATH: &str = "vllm-0.18.1/flash-attn-v2/eager";
+pub const BASELINE_KERNEL_PATH: &str = "vllm-0.18.1/flash-attn-v2/eager/inproc-scheduler";
 pub const CANDIDATE_KERNEL_PATH: &str =
     "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2+call-layout-v1";
 

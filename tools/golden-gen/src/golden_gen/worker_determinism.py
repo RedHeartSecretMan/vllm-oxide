@@ -19,6 +19,29 @@ class DeterminismState(BaseModel):
     cuda_initialized: bool
 
 
+class BaselineSchedulingEvidence(BaseModel):
+    """One isolated owner queues its full batch before stepping its GPU worker."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    engine_core_class: Literal["vllm.v1.engine.core_client.InprocClient"]
+    multiprocessing_enabled: Literal[False]
+    driver_pid: int = Field(gt=0)
+    worker_pid: int = Field(gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_disabled_flag(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("multiprocessing_enabled") is not False:
+            raise ValueError("baseline multiprocessing must be explicitly disabled")
+        return value
+
+    @model_validator(mode="after")
+    def same_process(self) -> BaselineSchedulingEvidence:
+        if self.driver_pid != self.worker_pid:
+            raise ValueError("baseline GPU worker must share its isolated owner's process")
+        return self
+
+
 def seed_and_enable_determinism(torch: Any) -> None:
     random.seed(0)
     np.random.seed(0)

@@ -447,6 +447,7 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
                     )
                 )
                 evidence["worker_states"] = [x.model_dump() for x in oracle.protocol_evidence()]
+                evidence["scheduling"] = oracle.scheduling_evidence().model_dump()
             else:
                 import torch
 
