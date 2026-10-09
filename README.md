@@ -6,6 +6,7 @@
 > Supported scope and formal release evidence requirements are recorded in the
 > [v0.2.0 release notes](docs/releases/v0.2.0.md). Published tags and assets are
 > listed in [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases).
+> The tagged dependency example requires the corresponding published Release.
 
 [![CI][ci-badge]][ci-url]
 [![License: Apache-2.0][license-badge]][license-url]
