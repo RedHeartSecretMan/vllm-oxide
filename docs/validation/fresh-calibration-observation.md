@@ -13,6 +13,9 @@
 先准备干净 checkout、锁定的完整 Python runtime、与 checkout 对应的 CUDA candidate
 binary，以及固定 revision 的本地模型。环境和资源要求继续遵守分层精度协议：
 16 GiB 可用 host RAM、独占 GPU owner、完整 watchdog、日志及子进程清理。
+运行环境的 editable `golden-gen` 必须安装自这个 checkout；从另一个 checkout 复用
+环境时应重新执行锁定安装。采集器把 `uv --check` 绑定到实际 Python 的 `sys.prefix`，
+不会以另一个环境同步成功作为当前 worker 的安装证明。
 
 以下仅示范一个 owner，不能构成完整校准证据。`PYTHON` 指向上述 Python runtime，
 `QWEN3_MODEL_DIR` 指向已经验证的固定模型目录，`RUN_DIR` 必须是尚未使用的

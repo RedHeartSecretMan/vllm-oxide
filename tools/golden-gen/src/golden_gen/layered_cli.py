@@ -231,6 +231,7 @@ def collect_group(
         worker_env = dict(os.environ)
         worker_env["PYTHONPATH"] = str(execution_repo.resolve() / "tools/golden-gen/src")
         worker_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        worker_env["UV_PROJECT_ENVIRONMENT"] = sys.prefix
         run_guarded(command, guard_path, cwd=execution_repo.resolve(), env=worker_env)
     elif context is None:
         run_guarded(command, guard_path)

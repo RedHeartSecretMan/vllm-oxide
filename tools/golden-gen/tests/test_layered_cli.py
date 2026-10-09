@@ -18,6 +18,7 @@ def test_fresh_calibration_uses_current_source_and_guard(
 
     source = {"commit": "a" * 40, "tree": "b" * 40}
     monkeypatch.setattr(layered_cli, "source_identity", lambda repo: source)
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/unrelated-environment")
     model, binary = Path("/synthetic-model"), Path("/synthetic-binary")
     repo, run = REPO, ticket_artifact_root
     if relative_paths:
@@ -32,6 +33,7 @@ def test_fresh_calibration_uses_current_source_and_guard(
         assert cwd == REPO.resolve()
         assert env["PYTHONPATH"] == str(REPO / "tools/golden-gen/src")
         assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+        assert env["UV_PROJECT_ENVIRONMENT"] == sys.prefix
         assert command[command.index("--repo-root") + 1] == str(REPO)
         assert command[command.index("--run-dir") + 1] == str(ticket_artifact_root)
         assert command[command.index("--model-dir") + 1] == "/synthetic-model"
