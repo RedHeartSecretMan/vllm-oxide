@@ -35,6 +35,16 @@ impl QueryWork {
     }
 }
 
+/// Keep small multi-query causal suffixes on the full-prefill GEMM row layout.
+/// The extra zero query rows exist only inside QK and are cropped before masking.
+pub(crate) fn score_rows(queries: usize, keys: usize, chunk: usize) -> usize {
+    if chunk < 32 && keys > chunk && (chunk > 1 || queries > 1) {
+        32
+    } else {
+        chunk
+    }
+}
+
 fn product(values: &[usize]) -> Option<usize> {
     values
         .iter()
@@ -52,19 +62,36 @@ impl MathLimits {
         // Conservative live-buffer allowance: packing/casts/output assembly,
         // expanded GQA K/V, then scores, probabilities and masking workspace.
         sum(&[
-            product(&[batch, queries, self.query_heads, self.head_dim, 32]),
+            product(&[
+                batch,
+                queries.max(score_rows(queries, keys, chunk)),
+                self.query_heads,
+                self.head_dim,
+                32,
+            ]),
             product(&[batch, keys, self.query_heads, self.head_dim, 16]),
-            product(&[batch, self.query_heads, chunk, keys, 24]),
+            product(&[
+                batch,
+                self.query_heads,
+                score_rows(queries, keys, chunk),
+                keys,
+                24,
+            ]),
         ])
     }
 
     fn split_bytes(&self, queries: usize, keys: usize, chunk: usize) -> Option<usize> {
         sum(&[
-            product(&[queries, self.query_heads, self.head_dim, 8]),
+            product(&[
+                queries.max(score_rows(queries, keys, chunk)),
+                self.query_heads,
+                self.head_dim,
+                8,
+            ]),
             product(&[keys, self.kv_heads, self.head_dim, 4]),
             product(&[keys, self.head_dim, 16]),
             product(&[queries, self.head_dim, 16]),
-            product(&[chunk, keys, 24]),
+            product(&[score_rows(queries, keys, chunk), keys, 24]),
         ])
     }
 

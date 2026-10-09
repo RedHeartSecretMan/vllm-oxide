@@ -72,7 +72,17 @@ fn dense(
     let mut outputs = Vec::new();
     for start in (0..queries).step_by(chunk) {
         let count = (queries - start).min(chunk);
-        let scores = query.narrow(1, start, count)?.matmul(&key)?;
+        let input = query.narrow(1, start, count)?;
+        let rows = super::math_layout::score_rows(queries, keys, count);
+        let scores = if rows > count {
+            let zeros = Tensor::zeros((batch * heads, rows - count, dim), DType::F32, q.device())?;
+            Tensor::cat(&[&input, &zeros], 1)?
+                .matmul(&key)?
+                .narrow(1, 0, count)?
+                .contiguous()?
+        } else {
+            input.matmul(&key)?
+        };
         let probabilities = math_ops::softmax(
             &scores,
             prepared,
