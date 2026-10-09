@@ -454,6 +454,8 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
                     deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
                     warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
                     attention_backend="SDPBackend.MATH",
+                    allow_bf16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+                    allow_tf32=torch.backends.cuda.matmul.allow_tf32,
                 )
             atomic_json(output / "capture.json", capture)
         finally:

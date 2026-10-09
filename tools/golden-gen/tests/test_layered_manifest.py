@@ -495,6 +495,8 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
                     deterministic_algorithms=True,
                     warn_only=False,
                     attention_backend="SDPBackend.MATH",
+                    allow_bf16_reduced_precision_reduction=False,
+                    allow_tf32=False,
                 )
             else:
                 receipt["engine_evidence"] = dict(

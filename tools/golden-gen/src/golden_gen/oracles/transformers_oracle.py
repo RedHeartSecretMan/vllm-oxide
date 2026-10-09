@@ -1,4 +1,4 @@
-"""HF Transformers oracle adapter."""
+"""Experimental explicit-FP32-reduction oracle; no Definition approval is implied."""
 
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ def reference_model_kwargs() -> dict[str, object]:
         "tokenizer_revision": MODEL_REVISION,
         "torch_dtype": "bfloat16",
         "attn_implementation": ATTN_IMPLEMENTATION,
+        "allow_bf16_reduced_precision_reduction": False,
+        "allow_tf32": False,
     }
 
 
@@ -41,6 +43,8 @@ def _configure_determinism(torch: object) -> None:
     torch.manual_seed(0)  # type: ignore[attr-defined]
     torch.cuda.manual_seed_all(0)  # type: ignore[attr-defined]
     torch.use_deterministic_algorithms(True, warn_only=False)  # type: ignore[attr-defined]
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False  # type: ignore[attr-defined]
+    torch.backends.cuda.matmul.allow_tf32 = False  # type: ignore[attr-defined]
 
 
 class TransformersOracle:
