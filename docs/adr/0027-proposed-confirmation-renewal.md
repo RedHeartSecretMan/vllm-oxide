@@ -22,7 +22,8 @@ reject any reachable prediction-history overlap with all previous cases,
 including the first confirmation cohort and public/setup calls.
 
 The registry requires complete, disjoint cohort membership and exactly one
-independent cohort. A behavior cannot borrow another cohort's execution group.
+independent cohort with actual prediction history. Error-only public calls cannot
+stand in for new model evidence. A behavior cannot borrow another cohort's execution group.
 The evaluator still requires every old and new owner and includes the frozen
 cohort roles in its evidence report. A passing new cohort never waives an old
 failure, missing owner or invalid replay/control.

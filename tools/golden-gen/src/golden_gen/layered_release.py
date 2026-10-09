@@ -207,6 +207,8 @@ def _check_confirmation_independence(registry: Registry) -> None:
                 ranges[
                     (case.case_id in fresh_behaviors, tuple(public_prompt), params.max_tokens)
                 ] = case.case_id
+    if not any(fresh for fresh, _, _ in ranges):
+        raise ValueError("independent confirmation has no prediction history")
     observed = [
         (prompt, steps, name) for (fresh, prompt, steps), name in ranges.items() if not fresh
     ]

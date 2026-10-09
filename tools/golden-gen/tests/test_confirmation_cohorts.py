@@ -146,3 +146,32 @@ def test_historical_confirmation_failure_cannot_be_waived_by_fresh_passes() -> N
     ]
     result = release_verdict(registry, policy, cases, operators, behaviors)
     assert result["verdict"] == "FAIL" and result["accepting"] is False
+
+
+def test_independent_error_only_behavior_is_not_new_prediction_evidence() -> None:
+    data = registry_data()
+    fresh = data["confirmation_cohorts"][1]
+    case = next(
+        c
+        for c in data["behavior_cases"]
+        if c["case_id"] in fresh["behavior_cases"]
+        and c["mode"] == "free_generation"
+        and any(call["expected"] == "error" for call in c["scenario"].get("calls", []))
+    )
+    data["numerical_cases"] = [
+        g
+        for g in data["numerical_cases"]
+        if g["plan"]["execution_group_id"] not in fresh["execution_groups"]
+    ]
+    data["behavior_cases"] = [
+        c
+        for c in data["behavior_cases"]
+        if c["case_id"] not in fresh["behavior_cases"] or c is case
+    ]
+    fresh["execution_groups"] = []
+    fresh["behavior_cases"] = [case["case_id"]]
+    case["scenario"]["calls"] = [
+        call for call in case["scenario"]["calls"] if call["expected"] == "error"
+    ]
+    with pytest.raises(ValueError, match="independent confirmation has no prediction history"):
+        Registry.model_validate(data)
