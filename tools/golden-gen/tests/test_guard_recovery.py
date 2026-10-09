@@ -451,3 +451,49 @@ def test_guard_rejects_erased_active_monitoring_interval():
     )
     with pytest.raises(ValueError, match="monitoring|coverage"):
         validate_guard_timeline(record)
+
+
+def test_benchmark_owner_uses_the_real_guard_and_bound_invocation(tmp_path, monkeypatch):
+    """Real harmless subprocess and fake telemetry; not benchmark acceptance."""
+    import os
+    from pathlib import Path
+
+    from golden_gen.guard_evidence import validate_guard_timeline
+
+    fake_query(tmp_path, monkeypatch, {})
+    executable = str(Path(sys.executable).resolve())
+    source = dict(commit="a" * 40, tree="b" * 40)
+    pythonpath = str(tmp_path / "tools/golden-gen/src")
+    context = dict(
+        role="benchmark_owner",
+        measurement_source=source,
+        supervision_source=source,
+        supervision_policy_sha256="c" * 64,
+        measurement_invocation=dict(
+            cwd=str(tmp_path),
+            pythonpath=pythonpath,
+            pythondontwritebytecode="1",
+            candidate_binary=dict(path=executable),
+        ),
+    )
+    evidence = tmp_path / "benchmark-guard.json"
+    run_guarded(
+        [executable, "-c", "import time; time.sleep(.2)"],
+        evidence,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": pythonpath, "PYTHONDONTWRITEBYTECODE": "1"},
+        supervision=context,
+        timeout_seconds=5,
+    )
+    record = json.loads(evidence.read_text())
+    assert record["role"] == "benchmark_owner" and record["child_returncode"] == 0
+    validate_guard_timeline(record)
+    with pytest.raises(ValueError, match="bound binary"):
+        run_guarded(
+            ["/another/binary"],
+            tmp_path / "wrong-guard.json",
+            cwd=tmp_path,
+            env={**os.environ, "PYTHONPATH": pythonpath, "PYTHONDONTWRITEBYTECODE": "1"},
+            supervision=context,
+            timeout_seconds=5,
+        )

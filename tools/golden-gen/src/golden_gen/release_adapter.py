@@ -135,6 +135,13 @@ def validate_evidence(
         result["runtime_profile"],
         registry,
         next(iter(build_ids)),
+        supervision=(
+            dict(
+                source=manifest.supervision_source, policy_sha256=manifest.supervision_policy.sha256
+            )
+            if manifest.supervision_policy is not None
+            else None
+        ),
     )
     wrapper = json.loads(paths["performance"].read_text())
     if wrapper.get("authoritative_manifest_sha256") != sha(paths["authoritative_manifest"]):

@@ -2,10 +2,10 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> **v0.2.0-rc.1 is an experimental source prerelease, not a numerically qualified v0.2.0 release.**
-> The recorded numerical run failed 18 of 66 cases under the unchanged budgets.
-> See the [RC1 release notes](docs/releases/v0.2.0-rc.1.md) for evidence identities,
-> supported usage and remaining release gates. No passing `goldens-v0.2` bundle is published with RC1.
+> **v0.2.0 release preparation — single-GPU Qwen3 offline inference.**
+> Current verification status, supported scope and remaining publication gates are
+> recorded in the [v0.2.0 release notes](docs/releases/v0.2.0.md).
+> The v0.2.0 tag shown below becomes available with the formal release.
 
 [![CI][ci-badge]][ci-url]
 [![License: Apache-2.0][license-badge]][license-url]
@@ -155,7 +155,7 @@ Add `vllm_oxide` as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0-rc.1", features = ["cuda"] }
+vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0", features = ["cuda"] }
 anyhow = "1"
 ```
 

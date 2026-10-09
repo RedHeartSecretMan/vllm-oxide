@@ -7,12 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — Release preparation
+
 - Rebuilt the `goldens-v0.2` workflow around pinned model/tokenizer/runtime and
   kernel identities, bit-identical oracle/candidate replay, a sealed four-case
   tolerance holdout, fixed private benchmark telemetry, content-bound stage
   markers, and a separately authorized exact-two-asset publication stage.
 
 ### Changed
+
+- Rust 1.94 is the minimum supported toolchain; production requires `--features cuda`.
+- Qwen3 uses independent projections, reference-ordered CUDA RMS statistics and
+  bounded FP32 causal attention over BF16/F16 weights and paged KV storage.
+  Batch padding and workspace planning preserve correctness without per-layer
+  host mask/index uploads.
+- Greedy batch sampling selects all rows in one CUDA launch, and step histories
+  share immutable token buffers.
+- Release validation records complete CPU checks, public GPU API/CLI smoke,
+  and fresh source-bound calibration with strict per-owner resource evidence.
+  These checks do not replace the numerical, performance or publication gates.
 
 - **Breaking (v0.2.0):** contracted the default `vllm_oxide` crate root to
   exactly `LLM`, `EngineOptions`, `Prompt`, `SamplingParams`, `RequestOutput`,
@@ -64,5 +77,6 @@ transitive external signature types, not new crate-root re-exports.
 - ADR-0001 through ADR-0004: parametric parallel layers, weight loader seam, model registry + RoPE, engine dependency DAG
 - ADR-0005: golden generation correctness strategy
 
-[Unreleased]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0

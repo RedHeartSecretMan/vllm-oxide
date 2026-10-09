@@ -2,10 +2,9 @@
 
 [English](README.md) | **简体中文**
 
-> **v0.2.0-rc.1 是实验性源码预发布，不是已通过精度验收的正式 v0.2.0。**
-> 原始数值验收在未修改的预算下有 18/66 个 case 失败。
-> 证据身份、使用方式及剩余门禁见 [RC1 发布说明](docs/releases/v0.2.0-rc.1.md)。
-> RC1 不附带宣称通过验收的 `goldens-v0.2` bundle。
+> **v0.2.0 发布准备中：单 GPU Qwen3 离线推理。**
+> 当前验证状态、支持范围和剩余发布门禁见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
+> 下文的 v0.2.0 标签将在正式发布时提供。
 
 [CI][ci-url]
 [License: Apache-2.0][license-url]
@@ -154,7 +153,7 @@ cargo run --release --example generate_qwen3 --features cuda -- hub:Qwen/Qwen3-0
 
 ```toml
 [dependencies]
-vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0-rc.1", features = ["cuda"] }
+vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0", features = ["cuda"] }
 anyhow = "1"
 ```
 

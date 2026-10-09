@@ -162,3 +162,28 @@ hash = "sha256:{digest}"
     origin.write_bytes(prefix.replace(b"33d6", b"44d6"))
     with pytest.raises(ValueError, match="hash-bound locked archive"):
         collect_installed_wheels(lock, distributions=[Distribution()], cache_root=cache)
+
+
+def test_release_preflight_checks_the_invoking_environment_even_with_a_stale_override(
+    tmp_path, monkeypatch
+):
+    import sys
+
+    import golden_gen.environment as environment
+
+    monkeypatch.setenv("PYTHONHASHSEED", "0")
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(tmp_path / "unrelated-environment"))
+
+    class ObservedPreflightError(Exception):
+        pass
+
+    def command(*args, env=None):
+        assert args[:2] == ("uv", "sync")
+        assert env["UV_PROJECT_ENVIRONMENT"] == sys.prefix
+        assert "--check" in args and "--offline" in args
+        raise ObservedPreflightError
+
+    monkeypatch.setattr(environment, "_command", command)
+    with pytest.raises(ObservedPreflightError):
+        environment.collect_release_runtime(tmp_path / "model", tmp_path)

@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 from golden_gen.layered_artifacts import bound_file, sha, source_identity, worker_metadata
 from golden_gen.layered_inventory import owner_key
@@ -83,6 +83,8 @@ def measurement_context(
     measurement_repo: Path,
     python: str,
     binary: Path | None,
+    *,
+    binary_kind: Literal["capture", "benchmark"] = "capture",
 ) -> dict[str, Any]:
     """Bind the actual immutable checkout and binary before constructing a worker."""
     policy, digest = load_policy(repo)
@@ -93,12 +95,23 @@ def measurement_context(
         raise ValueError("measurement checkout identity mismatch")
     root = str(measurement_repo.resolve())
     candidate = None
+    binary_key = (
+        "measurement_binary" if binary_kind == "capture" else "measurement_benchmark_binary"
+    )
+    if binary_kind == "benchmark" and binary is None:
+        raise ValueError("benchmark requires its approved measurement binary")
     if binary is not None:
-        if binary.is_symlink() or sha(binary) != policy["measurement_binary"]["sha256"]:
+        expected = policy.get(binary_key)
+        if (
+            not isinstance(expected, dict)
+            or set(expected) != {"sha256", "build_source_id"}
+            or binary.is_symlink()
+            or sha(binary) != expected["sha256"]
+        ):
             raise ValueError("measurement binary identity mismatch")
-        candidate = dict(path=str(binary.resolve()), **policy["measurement_binary"])
+        candidate = dict(path=str(binary.resolve()), **expected)
     return dict(
-        role="measurement_owner",
+        role="measurement_owner" if binary_kind == "capture" else "benchmark_owner",
         measurement_source=measured,
         supervision_source=supervisor,
         supervision_policy_sha256=digest,
@@ -174,6 +187,66 @@ def validate_invocation(
             raise ValueError("measurement invocation binary mismatch")
     elif binary is not None:
         raise ValueError("unexpected measurement binary invocation")
+
+
+def validate_benchmark_invocation(
+    guard: dict[str, Any],
+    policy: dict[str, Any],
+    source: dict[str, str],
+    binary_sha256: str,
+    build_source_id: str,
+) -> None:
+    """Bind the native benchmark command to the separately approved binary."""
+    invocation = guard.get("measurement_invocation", {})
+    root = invocation.get("repo_root")
+    expected = policy.get("measurement_benchmark_binary")
+    binary = invocation.get("candidate_binary")
+    if (
+        guard.get("role") != "benchmark_owner"
+        or guard.get("measurement_source") != source
+        or policy.get("measurement_source") != source
+        or expected != dict(sha256=binary_sha256, build_source_id=build_source_id)
+        or not isinstance(root, str)
+        or not Path(root).is_absolute()
+        or invocation.get("cwd") != root
+        or invocation.get("pythonpath") != str(Path(root) / "tools/golden-gen/src")
+        or invocation.get("pythondontwritebytecode") != "1"
+        or not isinstance(binary, dict)
+        or binary.get("sha256") != binary_sha256
+        or binary.get("build_source_id") != build_source_id
+    ):
+        raise ValueError("false benchmark invocation/source/binary")
+    command = guard.get("command", [])
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(value, str) for value in command)
+        or command[0] != binary.get("path")
+        or not Path(command[0]).is_absolute()
+        or len(command[1:]) % 2
+    ):
+        raise ValueError("invalid native benchmark command")
+    pairs = list(zip(command[1::2], command[2::2], strict=True))
+    options = dict(pairs)
+    if (
+        len(pairs) != len(options)
+        or set(options)
+        != {
+            "--model-path",
+            "--prompts-dir",
+            "--output",
+            "--repo-root",
+            "--measurement-commit",
+            "--measurement-tree",
+        }
+        or options["--repo-root"] != root
+        or options["--prompts-dir"] != str(Path(root) / "tools/golden-gen/prompts")
+        or options["--measurement-commit"] != source["commit"]
+        or options["--measurement-tree"] != source["tree"]
+        or not Path(options["--output"]).is_absolute()
+        or Path(options["--output"]).name != "benchmark.json"
+    ):
+        raise ValueError("benchmark command differs from measured source")
 
 
 def _git(repo: Path, *args: str) -> bytes:
