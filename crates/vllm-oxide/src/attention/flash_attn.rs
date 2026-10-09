@@ -11,7 +11,7 @@ pub(crate) const PAGED_WINDOW_RIGHT: Option<usize> = Some(0);
 fn dense(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
     let (queries, heads, dim) = q.dims3()?;
     let (keys, kv_heads, _) = k.dims3()?;
-    if queries > 1024 || keys > 1024 || keys < queries || heads % kv_heads != 0 {
+    if queries > 4096 || keys > 4096 || keys < queries || heads % kv_heads != 0 {
         candle_core::bail!("experimental dense attention exceeds bounded diagnostic scope");
     }
     let expand = |input: &Tensor| -> Result<Tensor> {
@@ -28,22 +28,28 @@ fn dense(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
     let k32 = expand(k)?;
     let v32 = expand(v)?;
     let root_scale = f64::from(scale).sqrt();
-    let scores = (q32 * root_scale)?.matmul(&(k32 * root_scale)?.transpose(1, 2)?)?;
-    let mask = (0..queries)
-        .flat_map(|row| {
-            (0..keys).map(move |col| {
-                if col <= keys - queries + row {
-                    0.0_f32
-                } else {
-                    f32::NEG_INFINITY
-                }
+    let scaled_q = (q32 * root_scale)?;
+    let scaled_k = (k32 * root_scale)?.transpose(1, 2)?;
+    let mut output_chunks = Vec::new();
+    for start in (0..queries).step_by(128) {
+        let count = (queries - start).min(128);
+        let scores = scaled_q.narrow(1, start, count)?.matmul(&scaled_k)?;
+        let mask = (start..start + count)
+            .flat_map(|row| {
+                (0..keys).map(move |col| {
+                    if col <= keys - queries + row {
+                        0.0_f32
+                    } else {
+                        f32::NEG_INFINITY
+                    }
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    let mask = Tensor::from_vec(mask, (queries, keys), q.device())?;
-    let probabilities = candle_nn::ops::softmax_last_dim(&scores.broadcast_add(&mask)?)?;
-    probabilities
-        .matmul(&v32)?
+            .collect::<Vec<_>>();
+        let mask = Tensor::from_vec(mask, (count, keys), q.device())?;
+        let probabilities = candle_nn::ops::softmax_last_dim(&scores.broadcast_add(&mask)?)?;
+        output_chunks.push(probabilities.matmul(&v32)?);
+    }
+    Tensor::cat(&output_chunks, 1)?
         .transpose(0, 1)?
         .contiguous()?
         .to_dtype(q.dtype())
