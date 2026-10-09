@@ -16,6 +16,14 @@ binary，以及固定 revision 的本地模型。环境和资源要求继续遵�
 运行环境的 editable `golden-gen` 必须安装自这个 checkout；从另一个 checkout 复用
 环境时应重新执行锁定安装。采集器把 `uv --check` 绑定到实际 Python 的 `sys.prefix`，
 不会以另一个环境同步成功作为当前 worker 的安装证明。
+正式预检要求精确的 `gpu` extra 环境；开发工具使用另一个环境。设
+`GOLDEN_RUNTIME_DIR` 为这个 checkout 专用的绝对虚拟环境目录，在仓库根目录执行：
+
+```bash
+UV_PROJECT_ENVIRONMENT="$GOLDEN_RUNTIME_DIR" uv sync \
+  --project tools/golden-gen --locked --extra gpu
+PYTHON="$GOLDEN_RUNTIME_DIR/bin/python"
+```
 
 以下仅示范一个 owner，不能构成完整校准证据。`PYTHON` 指向上述 Python runtime，
 `QWEN3_MODEL_DIR` 指向已经验证的固定模型目录，`RUN_DIR` 必须是尚未使用的
