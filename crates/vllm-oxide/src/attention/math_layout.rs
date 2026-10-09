@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn large_context_splits_heads_then_reduces_query_chunk_or_fails() {
         let m = build_prefill_metadata(&[1024], &[1024], &vec![0; 1024]);
-        let bytes = limits().split_bytes(1024, 1024, 16).unwrap() + 1024 * 16 * 128 * 8;
+        let bytes = limits().split_bytes(1024, 1024, 32).unwrap() + 1024 * 16 * 128 * 8;
         let (_, work) = MathLimits {
             workspace_bytes: bytes,
             ..limits()
@@ -244,7 +244,7 @@ mod tests {
         .plan(&m)
         .unwrap();
         assert!(work[0].split_heads);
-        assert_eq!(work[0].query_chunk, 16);
+        assert_eq!(work[0].query_chunk, 32);
         assert!(MathLimits {
             workspace_bytes: 1,
             ..limits()
