@@ -83,7 +83,7 @@ class KernelPaths(BaseModel):
     baseline: Literal["vllm-0.18.1/flash-attn-v2/eager"]
     candidate: Literal[
         "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/"
-        "flash-attn-varlen+paged-windowed"
+        "fp32-causal-math-v1"
     ]
 
     @property

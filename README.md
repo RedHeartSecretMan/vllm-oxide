@@ -42,7 +42,7 @@ A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending
 
 ## What is this?
 
-vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https://github.com/huggingface/candle) (CUDA kernels, safe tensor ops) and flash-attention (paged attention kernels), it provides a synchronous, in-process engine with:
+vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https://github.com/huggingface/candle) and project-owned CUDA kernels, it provides a synchronous, in-process engine with:
 
 - Continuous batching and prefix caching
 - Paged KV cache (`block_size = 256`)
@@ -77,7 +77,7 @@ The engine runs a synchronous `step()` loop: schedule tokens, prepare tensors, r
 
 Key design decisions (see `CONTEXT.md` for the full vocabulary):
 
-- **Paged attention**: K/V cache stored in fixed-size blocks (`block_size = 256`). Prefill uses unpaged `flash_attn_varlen`; decode uses paged `flash_attn_varlen_paged_windowed`.
+- **Paged attention**: K/V cache stored in fixed-size blocks (`block_size = 256`). Initial prefill reads projection K/V; continued prefill and decode read the paged cache. Both use bounded FP32 attention math over BF16/F16 storage ([ADR-0020](docs/adr/0020-bounded-reference-arithmetic.md)).
 - **Prefix caching**: Chained XXH64 hash table in `BlockPool` deduplicates common prompt prefixes across requests (CoW semantics).
 - **TP seam**: The internal `ParallelStyle` trait + `TpConfig` enum preserve a future feasibility seam. v0.2.0 supports `TpConfig::Single` only; TP/NCCL is not a runtime capability.
 - **CausalLM trait**: An internal engine-facing model contract. The inventory registry, loader, scheduler, cache, attention metadata, and sampler are implementation details behind `LLM`.
@@ -239,7 +239,7 @@ vllm-oxide uses a `cuda` feature gate to separate CPU-only development from GPU 
 ```toml
 [features]
 default = []        # CPU-only — tests and dev iteration run without CUDA.
-cuda = ["dep:candle-flash-attn", "candle-core/cuda"]  # Production backend.
+cuda = ["candle-core/cuda"]  # Production backend.
 ```
 
 Default is CPU-only so `cargo test` runs on CI without a GPU. Production callers (the CLI, the engine) pass `--features cuda`.

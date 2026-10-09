@@ -378,7 +378,7 @@ impl AttentionCall {
         }
         Ok(
             serde_json::json!({"diagnostic_only":true,"accepting":false,"step":step,
-            "raw":{"backend":if self.causal.is_some(){"flash_attn_varlen"}else{"flash_attn_varlen_paged_windowed"},
+            "raw":{"backend":if self.causal.is_some(){"fp32-causal-math-v1/unpaged"}else{"fp32-causal-math-v1/paged"},
                 "cu_seqlens_q":self.cu_q,"cu_seqlens_k":self.cu_k,"max_seqlen_q":self.max_q,"max_seqlen_k":self.max_k,
                 "causal_argument":self.causal,"window_left":self.window.0,"window_right":self.window.1,
                 "scale_f32_bits":self.scale.to_bits()},

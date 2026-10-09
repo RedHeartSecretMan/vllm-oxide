@@ -69,12 +69,11 @@ mod ffi {
 macro_rules! cuda_ptr {
     ($tensor:expr, $ty:ty, $label:literal, $storage:ident, $view:ident, $ptr:ident, $guard:ident) => {
         let ($storage, layout) = $tensor.storage_and_layout();
-        let cuda_storage = match &*$storage {
-            Storage::Cuda(storage) => storage,
-            _ => candle_core::bail!(concat!(
+        let Storage::Cuda(cuda_storage) = &*$storage else {
+            candle_core::bail!(concat!(
                 "sampler CUDA adapter expected CUDA storage for ",
                 $label
-            )),
+            ))
         };
         let offsets = layout.contiguous_offsets().ok_or_else(|| {
             Error::msg(concat!(

@@ -13,7 +13,7 @@ A linear projection whose weight is sharded along the input dimension (dim 1). T
 _Avoid_: input-sharded, row-shard.
 
 **Fused projection**:
-Multiple sub-projections (Q/K/V for attention, or gate/up for SwiGLU MLP) concatenated into a single weight matrix, computed in one matmul, then split by the caller. At TP=1 the layout is `[Q | K | V]` or `[gate | up]` along dim 0.
+Multiple sub-projections (Q/K/V for attention, or gate/up for SwiGLU MLP) stored together in one weight matrix. Packing describes storage; each sub-projection may execute independently. At TP=1 the layout is `[Q | K | V]` or `[gate | up]` along dim 0.
 _Avoid_: packed projection, merged matmul.
 
 **TP seam**:
@@ -21,7 +21,7 @@ The abstraction boundary where future tensor-parallelism wiring can attach witho
 _Avoid_: TP interface, parallelism hook.
 
 **Paged attention**:
-An attention computation that reads K/V from a paged block cache (fixed-size blocks, `block_size=256`) rather than contiguous per-sequence buffers. Prefill uses unpaged `flash_attn_varlen`; decode uses paged `flash_attn_varlen_paged_windowed`.
+An attention computation that reads K/V from a paged block cache rather than contiguous per-sequence buffers. Continued prefill and decode use the complete cached key/value history, while initial prefill can use its projections directly.
 _Avoid_: paged KV cache attention, block attention.
 
 **CausalLM (trait)**:

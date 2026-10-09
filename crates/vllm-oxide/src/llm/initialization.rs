@@ -155,6 +155,13 @@ pub(super) fn initialize_model_with_available_memory(
         options.gpu_memory_utilization,
         options.max_model_len,
     )?;
+    // Keep a conservative half of the remaining headroom for model/sampler
+    // activations and library workspaces, and bound attention packing by the
+    // existing execution token budget. No new public tuning parameter.
+    let remaining = memory
+        .free_bytes
+        .saturating_sub(plan.num_blocks * plan.bytes_per_block);
+    attn_ctx.set_compute_limits(options.max_num_batched_tokens, remaining / 2)?;
     warmup_model(model, attn_ctx, device, warmup_prefill_tokens)?;
     Ok(KvCacheAllocation {
         free_bytes: memory.free_bytes,

@@ -1,15 +1,15 @@
-//! `attention/` — T4 paged-attention contract.
+//! Causal attention and the per-step prepared metadata lifecycle.
 //!
-//! Model code calls `flash_attn_varlen` (initial prefill) /
-//! `flash_attn_varlen_paged_windowed` (continued prefill and decode) directly —
-//! NO `AttentionBackend` trait for v0.1 (YAGNI). The
-//! `engine ↔ attention` cycle is broken by `attention/` never importing
-//! `engine/`; EngineCore prepares scheduler-owned `AttnMetadata` through the
-//! shared `AttentionContext` before model execution.
+//! Initial prefill reads projected K/V; continued prefill and decode read the
+//! paged cache. Both use bounded FP32 math (ADR-0020). The engine prepares
+//! scheduler-owned metadata once, and model layers borrow the same epoch.
 
 #![allow(dead_code)]
 
-pub(crate) mod flash_attn;
+pub(crate) mod math;
+pub(crate) mod math_layout;
+#[cfg(feature = "cuda")]
+mod math_ops;
 pub(crate) mod metadata;
 
 #[cfg(feature = "cuda")]
@@ -39,6 +39,7 @@ pub(crate) use metadata::{build_decode_metadata, build_prefill_metadata, AttnMet
 pub(crate) struct AttentionContext {
     pub(crate) paged_kv: Arc<Mutex<PagedKVCache>>,
     runtime: Arc<Mutex<AttentionState>>,
+    query_heads: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,7 @@ struct AttentionState {
     bound_consumer: Option<AttentionEpoch>,
     prepare_calls: usize,
     device_tensor_uploads: usize,
+    compute_limits: Option<(usize, usize)>,
 }
 
 impl Default for AttentionState {
@@ -80,6 +82,7 @@ impl Default for AttentionState {
             bound_consumer: None,
             prepare_calls: 0,
             device_tensor_uploads: 0,
+            compute_limits: None,
         }
     }
 }
@@ -89,7 +92,31 @@ impl AttentionContext {
         Self {
             paged_kv,
             runtime: Arc::new(Mutex::new(AttentionState::default())),
+            query_heads: None,
         }
+    }
+
+    pub(crate) fn new_with_query_heads(
+        paged_kv: Arc<Mutex<PagedKVCache>>,
+        query_heads: usize,
+    ) -> Self {
+        Self {
+            query_heads: Some(query_heads),
+            ..Self::new(paged_kv)
+        }
+    }
+
+    pub(crate) fn set_compute_limits(
+        &self,
+        max_query_tokens: usize,
+        workspace_bytes: usize,
+    ) -> Result<()> {
+        let mut state = lock_attention_state(self.runtime_state())?;
+        if !matches!(state.lifecycle, AttentionLifecycle::Idle) || state.bound_consumer.is_some() {
+            candle_core::bail!("attention compute limits require an idle context")
+        }
+        state.compute_limits = Some((max_query_tokens, workspace_bytes));
+        Ok(())
     }
 
     /// Prepare and publish one complete metadata value for `epoch`.
@@ -207,7 +234,30 @@ impl AttentionContext {
             epoch,
             armed: true,
         };
-        let prepared = PreparedAttention::prepare(epoch, logical, device)?;
+        let math_limits = if let Some(query_heads) = self.query_heads {
+            let (max_query_tokens, workspace_bytes) = lock_attention_state(self.runtime_state())?
+                .compute_limits
+                .ok_or_else(|| {
+                    candle_core::Error::msg("model attention compute limits are not initialized")
+                })?;
+            let cache = self
+                .paged_kv
+                .lock()
+                .map_err(|_| candle_core::Error::msg("paged KV lock poisoned"))?;
+            let geometry = cache.geometry();
+            Some(math_layout::MathLimits {
+                query_heads,
+                kv_heads: geometry.num_kv_heads,
+                head_dim: geometry.head_dim,
+                block_size: geometry.block_size,
+                num_blocks: cache.num_blocks(),
+                max_query_tokens,
+                workspace_bytes,
+            })
+        } else {
+            None
+        };
+        let prepared = PreparedAttention::prepare_with_limits(epoch, logical, device, math_limits)?;
         let device_tensor_uploads = prepared.device_tensor_uploads();
         let prepared = Arc::new(prepared);
 
@@ -758,6 +808,13 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "cuda"))]
+// These small fixed GPU fixtures use bounded integer dimensions and fail
+// immediately on any setup/operation error.
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 mod gpu_tests {
     use super::*;
 
@@ -870,7 +927,7 @@ mod gpu_tests {
     }
 
     #[test]
-    fn flash_attn_prefill_runs() {
+    fn math_prefill_runs() {
         let dev = cuda_device();
         if !dev.is_cuda() {
             eprintln!("[gpu_tests] skipping — no CUDA device");
@@ -909,7 +966,7 @@ mod gpu_tests {
         let prepared = context.prepared_for_bound_consumer().unwrap();
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let out = super::flash_attn::prefill_attn(&q, &k, &v, &prepared, scale).unwrap();
+        let out = super::math::prefill_attn(&q, &k, &v, &prepared, scale).unwrap();
         consumer.finish().unwrap();
         step.finish().unwrap();
 
@@ -925,7 +982,7 @@ mod gpu_tests {
     }
 
     #[test]
-    fn flash_attn_decode_runs() {
+    fn math_decode_runs() {
         let dev = cuda_device();
         if !dev.is_cuda() {
             eprintln!("[gpu_tests] skipping — no CUDA device");
@@ -973,8 +1030,7 @@ mod gpu_tests {
         let prepared = context.prepared_for_bound_consumer().unwrap();
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let out =
-            super::flash_attn::paged_attn(&q, &k_cache, &v_cache, &prepared, scale, 256).unwrap();
+        let out = super::math::paged_attn(&q, &k_cache, &v_cache, &prepared, scale, 256).unwrap();
         consumer.finish().unwrap();
         step.finish().unwrap();
 

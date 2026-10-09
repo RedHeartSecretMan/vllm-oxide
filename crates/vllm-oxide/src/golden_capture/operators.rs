@@ -212,7 +212,7 @@ fn gpu_rule(rule: &str, device: &Device) -> Result<(Tensor, Vec<usize>, &'static
         };
         let prepared = PreparedAttention::prepare(AttentionEpoch::WarmupPrefill, metadata, device)?;
         return Ok((
-            crate::attention::flash_attn::prefill_attn(&q, &k, &v, &prepared, scale)?,
+            crate::attention::math::prefill_attn(&q, &k, &v, &prepared, scale)?,
             vec![5, 16, 128],
             "bfloat16",
         ));
@@ -249,7 +249,7 @@ fn gpu_rule(rule: &str, device: &Device) -> Result<(Tensor, Vec<usize>, &'static
     };
     let prepared = PreparedAttention::prepare(AttentionEpoch::WarmupDecode, metadata, device)?;
     Ok((
-        crate::attention::flash_attn::paged_attn(&q, &kc, &vc, &prepared, scale, 256)?,
+        crate::attention::math::paged_attn(&q, &kc, &vc, &prepared, scale, 256)?,
         vec![1, 16, 128],
         "bfloat16",
     ))
