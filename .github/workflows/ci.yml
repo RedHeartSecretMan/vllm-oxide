@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -11,29 +15,95 @@ concurrency:
 
 jobs:
   ci:
+    name: Rust ${{ matrix.toolchain }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.94.0", "stable"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
-          cache: cargo
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cpu-${{ matrix.toolchain }}
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo +${{ matrix.toolchain }} fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo +${{ matrix.toolchain }} clippy --locked --workspace --all-targets --features internal-golden -- -D warnings
 
-      - name: Test
-        run: cargo test
+      - name: Default tests and doc tests
+        run: cargo +${{ matrix.toolchain }} test --locked --workspace
+      - name: Internal release-tooling tests
+        run: cargo +${{ matrix.toolchain }} test --locked --workspace --features internal-golden
+
+      - name: Build CPU transport reader
+        if: matrix.toolchain == '1.94.0'
+        run: |
+          cargo +1.94.0 build --locked -p vllm_oxide_test --bin vllm-oxide-verify-bundle
+          strip -o "$RUNNER_TEMP/vllm-oxide-verify-bundle" target/debug/vllm-oxide-verify-bundle
+      - uses: actions/upload-artifact@v4
+        if: matrix.toolchain == '1.94.0'
+        with:
+          name: cpu-transport-${{ github.sha }}
+          path: ${{ runner.temp }}/vllm-oxide-verify-bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  python:
+    name: Python quality and complete CPU adapters
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.10.9"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: tools/golden-gen/uv.lock
+      - uses: actions/download-artifact@v5
+        with:
+          name: cpu-transport-${{ github.sha }}
+          path: ${{ runner.temp }}/transport
+      - name: Prepare locked development and worker environments
+        run: |
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/golden-dev" uv sync --project tools/golden-gen --locked --extra dev
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/golden-worker" uv sync --project tools/golden-gen --locked --all-extras
+          chmod +x "$RUNNER_TEMP/transport/vllm-oxide-verify-bundle"
+      - name: Python tests (no missing adapters or skipped cases)
+        env:
+          GOLDEN_WORKER_TEST_PYTHON: ${{ runner.temp }}/golden-worker/bin/python
+          GOLDEN_TRANSPORT_TEST_BINARY: ${{ runner.temp }}/transport/vllm-oxide-verify-bundle
+          PYTEST_ADDOPTS: ""
+          PYTHONNOUSERSITE: "1"
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/golden-dev/bin/python" -m pytest tools/golden-gen/tests -q | tee "$RUNNER_TEMP/python-tests.log"
+          "$RUNNER_TEMP/golden-dev/bin/python" - <<'PY'
+          import os
+          from pathlib import Path
+          from golden_gen.release_cpu import _output_ok
+          _output_ok("python", (Path(os.environ["RUNNER_TEMP"]) / "python-tests.log").read_text(), "")
+          PY
+      - name: Ruff and mypy (CPU development environment)
+        run: |
+          "$RUNNER_TEMP/golden-dev/bin/python" -m ruff check tools/golden-gen/src tools/golden-gen/tests tools/golden-gen/scripts
+          "$RUNNER_TEMP/golden-dev/bin/python" -m mypy --config-file tools/golden-gen/pyproject.toml tools/golden-gen/src tools/golden-gen/scripts
 
   deps:
     name: Dependency audit (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Supply-chain gate: vulnerabilities, licenses, duplicate crates, allowed
       # sources — policy lives in deny.toml. A newly-published RUSTSEC advisory
       # fails this job; that is the intended early-warning behaviour.

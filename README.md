@@ -94,7 +94,7 @@ Key design decisions (see `CONTEXT.md` for the full vocabulary):
 
 ### Toolchain
 
-- **Rust**: edition 2021; use Rust 1.94.0 for RC1. The historical manifest minimum of 1.75 is not validated for this prerelease.
+- **Rust**: edition 2021, MSRV **1.94.0**, pinned by `rust-toolchain.toml`. CPU CI also tests the current stable toolchain.
 - **System**: Linux (the only supported NVIDIA CUDA platform). Windows and macOS GPU inference are outside v0.2.0.
 
 ## Quick Start
@@ -114,10 +114,12 @@ cargo build --features cuda --release
 The thin CLI (`crates/vllm-oxide-cli`) accepts a model source and an optional prompt:
 
 ```bash
-cargo run --release -p vllm_oxide_cli --features cuda -- \
-    --model Qwen/Qwen3-0.6B \
-    "The meaning of life is"
+export QWEN3_MODEL_DIR=/absolute/path/to/Qwen3-0.6B
+cargo run --locked --release -p vllm_oxide_cli --features cuda -- \
+    --model "$QWEN3_MODEL_DIR" --max-tokens 2 "The capital of France is"
 ```
+
+The directory must contain `Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234`. The [public GPU smoke gate](docs/validation/public-gpu-smoke.md) verifies the model hashes and executes this exact command, real warmup, 100 repeated calls and mixed requests. Hub IDs remain convenient for exploration but do not pin a revision through the CLI.
 
 If no prompt is given on the command line, the CLI reads from stdin:
 
@@ -255,7 +257,7 @@ vllm-oxide has two distinct test tiers with different guarantees:
 cargo test
 ```
 
-Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation, config parsing, `Source` classification, and CLI argument parsing.
+Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation, config parsing, `Source` classification, and CLI argument parsing. CI additionally runs workspace/internal-golden tests, Clippy, formatting, dependency auditing, and complete Python pytest/Ruff/mypy checks on their locked environments. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full matrix.
 
 ### Tier 2: Release gate (manual, GPU)
 
@@ -279,7 +281,7 @@ No GPU collection or publication is implied by CPU tests. GPU stages and publica
 |---|---|---|
 | **When** | Every push | Manual, before tagging |
 | **Where** | CPU-only | GPU (sm_89+) |
-| **What** | Property tests | Golden comparison vs transformers oracle |
+| **What** | Rust/MSRV, Python, lint and dependency checks | Public CUDA smoke plus complete golden comparison |
 | **Proves** | Compiles + types correct | Numerically correct within tolerance |
 
 ## Documentation
@@ -294,7 +296,7 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for br
 
 ## Minimum Supported Rust Version (MSRV)
 
-The workspace historically declares **1.75**, but RC1 does not claim a successful build on that toolchain. Use **Rust 1.94.0**, the recorded validation toolchain. Verification of the declared minimum remains part of the unfinished formal release gate.
+The supported minimum is **Rust 1.94.0**. The workspace manifest and `rust-toolchain.toml` agree, and CI runs the Rust checks on both 1.94.0 and stable. This replaces the unverified historical 1.75 declaration; it does not assert numerical release acceptance.
 
 ## Security
 

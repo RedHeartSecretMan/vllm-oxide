@@ -294,7 +294,7 @@ impl LLM {
             if tokens
                 .len()
                 .checked_add(params.max_tokens)
-                .map_or(true, |length| length > self.max_model_len)
+                .is_none_or(|length| length > self.max_model_len)
             {
                 bail!(
                     "generate: prompt[{position}] context budget exceeds max_model_len {}",
@@ -387,7 +387,9 @@ impl LLM {
 
         while self.engine.is_running() {
             #[cfg(feature = "internal-golden")]
-            if capture.is_some() || benchmark.is_some() || replay.is_some() {
+            if self.device.is_cuda()
+                && (capture.is_some() || benchmark.is_some() || replay.is_some())
+            {
                 if let Err(error) = require_diagnostic_host_ram_floor() {
                     return Err(self.abort_after_capture_error(error));
                 }
@@ -531,6 +533,11 @@ fn duration_ns(duration: std::time::Duration) -> Result<u64> {
 fn require_diagnostic_host_ram_floor() -> Result<()> {
     let meminfo = std::fs::read_to_string("/proc/meminfo")
         .context("reading host memory guard from /proc/meminfo")?;
+    validate_diagnostic_host_ram_floor(&meminfo)
+}
+
+#[cfg(feature = "internal-golden")]
+fn validate_diagnostic_host_ram_floor(meminfo: &str) -> Result<()> {
     let available_kib = meminfo
         .lines()
         .find_map(|line| {
@@ -2442,6 +2449,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         const CHILD_ENV: &str = "VLLM_OXIDE_INTERNAL_GOLDEN_TEST_CHILD";
+
+        #[test]
+        fn gpu_diagnostic_ram_floor_rejects_low_or_unknown_memory() {
+            assert!(validate_diagnostic_host_ram_floor("MemAvailable: 16777216 kB\n").is_ok());
+            assert!(validate_diagnostic_host_ram_floor("MemAvailable: 16777215 kB\n").is_err());
+            assert!(validate_diagnostic_host_ram_floor("MemAvailable: invalid kB\n").is_err());
+            assert!(validate_diagnostic_host_ram_floor("MemTotal: 33554432 kB\n").is_err());
+        }
 
         struct EnvironmentRestore {
             previous: Vec<(&'static str, Option<OsString>)>,

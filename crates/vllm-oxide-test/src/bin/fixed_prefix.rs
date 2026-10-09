@@ -150,7 +150,7 @@ fn main() -> Result<()> {
             m.prompt
                 .len()
                 .checked_add(m.continuation.len())
-                .map_or(true, |n| n > options.max_model_len)
+                .is_none_or(|n| n > options.max_model_len)
         }) {
             bail!("fixed-prefix prompt plus completion budget exceeds declared context");
         }

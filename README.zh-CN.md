@@ -93,7 +93,7 @@ flowchart TD
 
 ### 工具链
 
-- **Rust**：edition 2021；RC1 请使用 Rust 1.94.0。manifest 历史声明的 1.75 下限尚未在本预发布中验证。
+- **Rust**：edition 2021，MSRV 为 **1.94.0**，由 `rust-toolchain.toml` 固定；CPU CI 同时检查当前 stable 工具链。
 - **系统**：Linux（唯一支持的 NVIDIA CUDA 平台）。Windows 和 macOS GPU 推理不在 v0.2.0 范围内。
 
 ## 快速开始
@@ -113,10 +113,12 @@ cargo build --features cuda --release
 精简 CLI（`crates/vllm-oxide-cli`）接受模型来源和可选提示：
 
 ```bash
-cargo run --release -p vllm_oxide_cli --features cuda -- \
-    --model Qwen/Qwen3-0.6B \
-    "The meaning of life is"
+export QWEN3_MODEL_DIR=/absolute/path/to/Qwen3-0.6B
+cargo run --locked --release -p vllm_oxide_cli --features cuda -- \
+    --model "$QWEN3_MODEL_DIR" --max-tokens 2 "The capital of France is"
 ```
+
+模型目录必须对应 `Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234`。[公开 GPU smoke 门禁](docs/validation/public-gpu-smoke.md) 校验模型文件哈希，并执行上述原样命令、真实 warmup、100 次重复调用和混合请求。CLI 的 Hub ID 形式仍可用于试用，但不固定 revision。
 
 如果命令行未提供提示，CLI 会从标准输入读取：
 
@@ -254,7 +256,7 @@ vllm-oxide 有两个不同的测试层级，提供不同层次的保证：
 cargo test
 ```
 
-覆盖 `EngineOptions` 默认值、`Prompt` 变体、`SamplingParams` 验证、配置解析、`Source` 分类和 CLI 参数解析。
+覆盖 `EngineOptions` 默认值、`Prompt` 变体、`SamplingParams` 验证、配置解析、`Source` 分类和 CLI 参数解析。CI 还运行 workspace/internal-golden 测试、Clippy、格式和依赖审计，以及锁定环境下完整的 Python pytest/Ruff/mypy 检查；完整矩阵见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### 第二层：发布门禁（手动，GPU）
 
@@ -278,7 +280,7 @@ CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最
 |---|---|---|
 | **时机** | 每次推送 | 手动，打标签前 |
 | **环境** | 仅 CPU | GPU（sm_89+） |
-| **内容** | 属性测试 | 与 transformers 预言机的黄金比较 |
+| **内容** | Rust/MSRV、Python、lint 和依赖检查 | 公开 CUDA smoke 加完整黄金比较 |
 | **证明** | 编译通过 + 类型正确 | 数值在容差范围内正确 |
 
 ## 文档
@@ -293,7 +295,7 @@ CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最
 
 ## 最低支持的 Rust 版本 (MSRV)
 
-workspace 历史声明为 **1.75**，但 RC1 不宣称已在该工具链上构建通过。请使用记录的验证工具链 **Rust 1.94.0**。声明下限的验证仍属于未完成的正式发布门禁。
+最低支持 **Rust 1.94.0**。workspace manifest 与 `rust-toolchain.toml` 保持一致，CI 在 1.94.0 与 stable 上运行 Rust 检查。这取代未验证的历史 1.75 声明，不代表 GPU 数值验收已通过。
 
 ## 安全
 

@@ -1,0 +1,50 @@
+name: CUDA public API and Quick Start
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_directory:
+        description: Absolute local directory of the pinned Qwen3-0.6B revision
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cuda-release-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux, x64, cuda]
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.10.9"
+          python-version: "3.12"
+          enable-cache: false
+      - name: Prepare locked dependencies before offline GPU stages
+        run: |
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/golden-dev" uv sync --project tools/golden-gen --locked --extra dev
+          cargo fetch --locked
+      - name: Guarded real warmup, repeated calls, mixed batch and exact Quick Start
+        env:
+          QWEN3_MODEL_DIR: ${{ inputs.model_directory }}
+        run: |
+          "$RUNNER_TEMP/golden-dev/bin/python" -m golden_gen.public_gpu_smoke \
+            --repo-root "$GITHUB_WORKSPACE" --model-dir "$QWEN3_MODEL_DIR" \
+            --output "$RUNNER_TEMP/public-gpu-smoke"
+      - name: Retain original stage and resource logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-gpu-smoke-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-gpu-smoke
+          if-no-files-found: error
+          retention-days: 30

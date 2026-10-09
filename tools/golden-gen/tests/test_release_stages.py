@@ -30,8 +30,9 @@ def test_release_stage_rejects_traversal_and_symlink_before_creating_run(ticket_
         alias.unlink()
 
 
+@pytest.mark.parametrize("available_kib", [8 * 1024**2, 32 * 1024**2])
 def test_observe_primary_process_failure_does_not_write_successor_marker(
-    tmp_path, ticket_artifact_root
+    tmp_path, ticket_artifact_root, available_kib
 ):
     repo = tmp_path / "repo"
     (repo / "tools").mkdir(parents=True)
@@ -63,13 +64,27 @@ if command == "observe":
     cargo = executables / "cargo"
     cargo.write_text("#!/bin/sh\nexit 0\n")
     cargo.chmod(0o755)
+    # This test already substitutes the model worker and compiler. Control the
+    # shell preflight input too, while exercising both sides of the RAM gate.
+    awk = executables / "awk"
+    awk.write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "assert sys.argv[1:] == ['/MemAvailable:/ {print $2}', '/proc/meminfo']\n"
+        f"print({available_kib})\n"
+    )
+    awk.chmod(0o755)
     result = subprocess.run(
         ["bash", str(repo / "tools/validate-release.sh"), "observe", str(run)],
         env={**os.environ, "PATH": f"{executables}:{os.environ['PATH']}"},
         capture_output=True,
     )
-    assert result.returncode == 7, result.stderr.decode()
-    assert log.read_text().splitlines() == ["verify-stage-marker", "guard"]
+    if available_kib < 16 * 1024**2:
+        assert result.returncode == 4, result.stderr.decode()
+        assert b"RAM is below 16 GiB" in result.stderr
+        assert log.read_text().splitlines() == ["verify-stage-marker"]
+    else:
+        assert result.returncode == 7, result.stderr.decode()
+        assert log.read_text().splitlines() == ["verify-stage-marker", "guard"]
     assert not (run / "markers/observe.complete.json").exists()
 
 

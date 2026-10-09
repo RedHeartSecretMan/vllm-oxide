@@ -61,7 +61,7 @@ impl UstarStructureTracker {
         if state.capture_from.is_none()
             || state.overflowed
             || state.trailing.len() < USTAR_END_MARKER_BYTES
-            || state.trailing.len() % USTAR_BLOCK_BYTES != 0
+            || !state.trailing.len().is_multiple_of(USTAR_BLOCK_BYTES)
             || state.trailing.iter().any(|byte| *byte != 0)
         {
             anyhow::bail!(
@@ -497,13 +497,13 @@ fn validate_archive_name(name: &str) -> Result<()> {
 fn validate_tar_metadata(header: &tar::Header, name: &str) -> Result<()> {
     let empty_link = header
         .link_name_bytes()
-        .map_or(true, |link_name| link_name.is_empty());
+        .is_none_or(|link_name| link_name.is_empty());
     if header.mode()? != 0o644
         || header.uid()? != 0
         || header.gid()? != 0
         || header.mtime()? != 0
-        || !header.username_bytes().map_or(true, <[u8]>::is_empty)
-        || !header.groupname_bytes().map_or(true, <[u8]>::is_empty)
+        || !header.username_bytes().is_none_or(<[u8]>::is_empty)
+        || !header.groupname_bytes().is_none_or(<[u8]>::is_empty)
         || !empty_link
     {
         anyhow::bail!("archive entry metadata is not normalized: {name}");
