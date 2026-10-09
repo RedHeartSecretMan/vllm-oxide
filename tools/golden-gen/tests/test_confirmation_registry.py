@@ -113,3 +113,33 @@ def test_confirmation_stays_sealed_when_policy_targets_the_observed_registry(
             layered_cli._auxiliary_definition(ROOT, "confirmation-behavior-repeated")
         else:
             layered_cli._group(ROOT, "confirmation-length-1")
+
+
+def test_confirmation_behavior_only_still_rejects_reused_history() -> None:
+    data = registry_data()
+    data["numerical_cases"] = [g for g in data["numerical_cases"] if g["split"] != "confirmation"]
+    data["behavior_cases"] = [
+        b
+        for b in data["behavior_cases"]
+        if b["split"] != "confirmation" or b["case_id"] == "confirmation-behavior-repeated"
+    ]
+    prior = next(g for g in data["numerical_cases"] if g["split"] == "calibration")
+    fresh = next(b for b in data["behavior_cases"] if b["split"] == "confirmation")
+    data["expected_counts"]["confirmation"] = dict(
+        owner_inventory=[
+            dict(
+                kind="standalone_behavior",
+                verification_id=fresh["case_id"],
+                engine="candidate",
+                variant=v,
+                calls=len(fresh["scenario"]["calls"]),
+            )
+            for v in ("primary", "replay")
+        ],
+        unique_gpu_owners=2,
+    )
+    data["auxiliary_operators"]["total_unique_gpu_owners_including_groups_and_public"] = 489
+    assert len(frozen_owner_inventory(Registry.model_validate(data), authoritative=True)) == 489
+    fresh["scenario"]["calls"][0]["prompts"][0] = prior["plan"]["members"][0]["prompt"]
+    with pytest.raises(ValueError, match="confirmation may reuse observed prediction history"):
+        Registry.model_validate(data)

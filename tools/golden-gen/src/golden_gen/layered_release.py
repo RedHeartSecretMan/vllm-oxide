@@ -119,7 +119,9 @@ def _check_confirmation_independence(registry: Registry) -> None:
     be disjoint. This includes every setup and successful public call, rather
     than only checking the fixed continuation rows or changing case identifiers.
     """
-    if not any(group.split == "confirmation" for group in registry.numerical_cases):
+    if not any(group.split == "confirmation" for group in registry.numerical_cases) and not any(
+        case.split == "confirmation" for case in registry.behavior_cases
+    ):
         return
     from golden_gen.behavior_verification import BehaviorScenario
 
