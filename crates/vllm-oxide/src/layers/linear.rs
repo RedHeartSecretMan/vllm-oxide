@@ -18,6 +18,9 @@ use std::marker::PhantomData;
 
 use super::parallel::{GateUpMerged, ParallelStyle, QkvMerged, Row};
 
+#[cfg(feature = "cuda")]
+mod cuda;
+
 /// Neutral geometry for a [`Linear<P>`]. Closes the ADR-0002 seam so `layers/`
 /// stays fully model-agnostic — model code unpacks its own `Config` into this
 /// struct; `Linear<P>` never imports `Qwen3Config` or any architecture type.
@@ -40,6 +43,8 @@ pub struct LinearSpec {
 ///
 /// Keeping a small call's row floor across admission and early completion
 /// avoids switching between the matrix-vector and small-matrix reduction paths.
+/// Multi-request matrix tiles also exclude workspace-dependent split reductions;
+/// the one/two-row path and single-request layout retain their existing behavior.
 /// This is a compatibility layout, not a promise of shape-invariant arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProjectionLayout {
@@ -155,10 +160,23 @@ fn project(x: &Tensor, weight: &Tensor, layout: ProjectionLayout) -> Result<Tens
                 x.device(),
             )?;
             let padded = Tensor::cat(&[x, &zeros], 0)?;
-            return padded.matmul(&weight.t()?)?.narrow(0, 0, rows);
+            return stable_batched_matmul(&padded, &weight.t()?, layout)?.narrow(0, 0, rows);
         }
     }
-    x.matmul(&weight.t()?)
+    stable_batched_matmul(x, &weight.t()?, layout)
+}
+
+// Workspace selection belongs to the projection layout and never escapes a GEMM.
+fn stable_batched_matmul(x: &Tensor, weight: &Tensor, layout: ProjectionLayout) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Device::Cuda(device) = x.device() {
+        if x.dtype() == candle_core::DType::BF16 && layout.minimum_rows > 1 && x.dim(0)? > 2 {
+            return cuda::without_workspace(device, || x.matmul(weight));
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = layout;
+    x.matmul(weight)
 }
 
 /// Per-style checkpoint assembly. `pub(crate)` so external code can call

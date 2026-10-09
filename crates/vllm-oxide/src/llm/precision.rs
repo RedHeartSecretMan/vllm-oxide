@@ -156,4 +156,72 @@ mod tests {
         assert_eq!(actual.dims(), [2, N]);
         assert_eq!(bits(&actual), bits(&expected));
     }
+    #[test]
+    #[ignore = "requires a guarded CUDA owner"]
+    fn cuda_batched_workspace_preserves_reference_and_restores_after_error() {
+        use crate::layers::linear::{Linear, ProjectionLayout};
+        use crate::layers::parallel::Row;
+        const K: usize = 3072;
+        const N: usize = 1024;
+        let decode = |bytes: &[u8]| {
+            assert_eq!(bytes.len(), 2 * K);
+            bytes
+                .chunks_exact(2)
+                .map(|v| bf16::from_bits(u16::from_le_bytes([v[0], v[1]])))
+                .collect::<Vec<_>>()
+        };
+        let input = decode(include_bytes!("test_data/workspace-input.bf16"));
+        let column = decode(include_bytes!("test_data/workspace-weight.bf16"));
+        let device = Device::new_cuda(0).unwrap();
+        configure_fp32_reduction(&device).unwrap();
+        let mut weights = vec![bf16::ZERO; N * K];
+        weights[50 * K..51 * K].copy_from_slice(&column);
+        let weight = Tensor::from_vec(weights, (N, K), &device).unwrap();
+        let make_input = |rows| {
+            let mut values = vec![bf16::ZERO; rows * K];
+            values[..K].copy_from_slice(&input);
+            Tensor::from_vec(values, (rows, K), &device).unwrap()
+        };
+        let value = |output: Tensor| {
+            output
+                .narrow(0, 0, 1)
+                .unwrap()
+                .narrow(1, 50, 1)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<bf16>()
+                .unwrap()[0]
+                .to_bits()
+        };
+        let x = make_input(258);
+        let transposed = weight.t().unwrap();
+        assert_eq!(value(x.matmul(&transposed).unwrap()), 0xb954);
+        assert_eq!(value(make_input(514).matmul(&transposed).unwrap()), 0xb955);
+        let linear = Linear::<Row>::from_parts(weight, None);
+        assert_eq!(
+            value(linear.forward(&x, ProjectionLayout::default()).unwrap()),
+            0xb954
+        );
+        assert_eq!(
+            value(
+                linear
+                    .forward(&make_input(2), ProjectionLayout::for_batch(2))
+                    .unwrap()
+            ),
+            0xb954
+        );
+        assert_eq!(
+            value(linear.forward(&x, ProjectionLayout::for_batch(2)).unwrap()),
+            0xb955
+        );
+        // A following unconfigured GEMM must regain its original reduction path.
+        assert_eq!(value(x.matmul(&transposed).unwrap()), 0xb954);
+        let invalid = Linear::<Row>::from_parts(
+            Tensor::zeros((N, K - 1), candle_core::DType::BF16, &device).unwrap(),
+            None,
+        );
+        assert!(invalid.forward(&x, ProjectionLayout::for_batch(2)).is_err());
+        assert_eq!(value(x.matmul(&transposed).unwrap()), 0xb954);
+    }
 }
