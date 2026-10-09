@@ -19,10 +19,10 @@
   },
   "registry_sha256": "88f89084fe7b0c14a877c4c72f275314ad2a8e593d6fbc3ac63a194b91fb98f4",
   "calibration_source": {
-    "commit": "6b7ae7d9ec5e4736a504aa1a58aa36005986bfd3",
-    "tree": "f0f931e75eefa722bad41fb9491b6cb32ce38c4d"
+    "commit": "880e22c8823d30c0a52775b26a193f175824e80c",
+    "tree": "fb39df4d40239700bbf76ccfa76d341f924382b5"
   },
-  "calibration_evidence_sha256": "d423774300f50f4602dbbfeb23a65a4ef8d8bbd645ca27764e87072af0101faa",
-  "fault_evidence_sha256": "1bccf67c82ff8da33df3ccc3110942366ea2278c46d651d49c8eadb81e83cec8",
-  "rationale": "User-approved layered-budget-v1; see docs/adr/0018-freeze-layered-accuracy-budgets.md for scope, engineering trade-offs, calibration selection bias, independent review and content-addressed evidence. Per-case reference log-score budgets are 2/5 millinats mean/peak, paired baseline excess is 1 millinat, and G_limit=ln(1.25) requires at least 80% of the best reference-token probability. Operator limits are fixed-profile maximum absolute errors, not universal BF16 tolerances. Exact structure, raw selection and required replay remain mandatory; no legacy verdict is changed and budget approval is not release acceptance."
+  "calibration_evidence_sha256": "40863458ef4cb693ce7a39fe476bdab3b68af8708ca967079ad00f4abb509ab8",
+  "fault_evidence_sha256": "f514943614e30b63406ca211a9bafdd680bd309f533d85cdf23e4d2a6481f9a2",
+  "rationale": "User-approved explicit FP32 intermediate GEMM reduction scope; see docs/adr/0024-approve-explicit-gemm-reduction.md for approval, exact calibration/fault identities and limitations. ADR-0018 model and operator budget values are unchanged: per-case mean/peak reference KL 0.002/0.005, paired mean excess 0.001, and reference-choice loss ln(1.25). BF16 model storage, full vocabulary, corpus splits, exact identity/selection/replay and fail-closed gates remain mandatory. Original observations remain non-accepting and historical failures remain failures. Scope approval is not independent acceptance or release publication."
 }

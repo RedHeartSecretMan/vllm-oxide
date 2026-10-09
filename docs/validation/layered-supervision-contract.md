@@ -1,21 +1,21 @@
 # Bounded resource supervision and truthful measurement provenance
 
-This contract is adopted by [ADR-0019](../adr/0019-bounded-resource-supervision.md). The [supervision policy](layered-supervision-policy.json) supplies the exact configuration and compatibility-ledger identity. It does not modify the [accuracy budgets](layered-accuracy-budgets.json), case registry, model, sampling rules or numerical algorithms. All numerical cases retain the same four approved conditions.
+This contract is adopted by [ADR-0019](../adr/0019-bounded-resource-supervision.md), extended by [ADR-0021](../adr/0021-fresh-supervised-release-evidence.md), and selects fresh evidence under [ADR-0024](../adr/0024-approve-explicit-gemm-reduction.md). The [supervision policy](layered-supervision-policy.json) supplies the exact configuration. The current `bounded-telemetry-fresh-v1` profile retains zero owners; the historical recovery profile alone requires a compatibility ledger. It does not modify the [accuracy budgets](layered-accuracy-budgets.json), case registry, model, sampling rules or numerical algorithms. All numerical cases retain the same four approved conditions.
 
 ## 1. Separate real sources, not relabeled evidence
 
 | Role | Identity and execution requirement |
 | --- | --- |
-| Measurement | The policy's fixed `8f21331` commit/tree; actual workers run from a clean immutable checkout of it, including their working directory, `--repo-root` and `PYTHONPATH`. The Rust binary must match the policy's original hash/build-source identity. |
+| Measurement | The policy's fixed measurement commit/tree (currently `880e22c`); actual workers run from a clean immutable checkout of it, including their working directory, `--repo-root` and `PYTHONPATH`. The Rust binary must match the policy's original hash/build-source identity. |
 | Supervision | A separately frozen, clean, reviewed commit/tree containing the new resource supervisor and evidence-producing adapters. This is the actual running implementation, not a caller's arbitrary source declaration. |
 | Evaluation | A separately recorded clean, reviewed commit/tree running the trusted schema/identity adapter and numerical evaluator; for this policy it must equal the supervision source. |
-| Calibration approval predecessor | The original `6b7ae7d` observation/manifest/marker/fault closure already bound by the numerical policy. Its source, bytes and verdict remain unchanged. |
+| Calibration approval predecessor | The original observation/manifest/marker/fault closure bound by the numerical policy (currently the fresh `880e22c` calibration). Its source, bytes and verdict remain unchanged. |
 
 The supervision/evaluation source must descend from the measurement source and preserve every path in `unchanged_measurement_paths` by Git object identity (directories include their complete tracked subtrees; deletion or a changed file mode also fails). Model/config/tokenizer/weight, binary, wheel/kernel/runtime and numerical-policy checks remain mandatory. Only the described supervision and evidence-identity routing may change, with associated tests/documentation and a complete candidate review. The path check is not permission for arbitrary changes elsewhere or for altering the evaluator's mathematical calls. The existing numerical and operator comparison implementations remain unchanged.
 
 Before and after each worker execution, verify the immutable measurement checkout's exact commit/tree and clean tracked bytes. Launch a fresh worker process using the recorded measurement invocation, not a new worker with an old `source` field. Record and verify its actual working directory, `--repo-root`, `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE=1`, executable/binary and original worker metadata. Do not inject new supervisor modules into the measurement worker or overwrite its source. The collector may construct a receipt from verified original worker metadata; it must reject, not relabel, a mismatch.
 
-The original calibration provenance continues to validate `6b7ae7d -> 8f21331`, including original hashes, marker, complete observation reproduction and fault detection. Do not broaden its executable-path allowance to treat new supervisor code as old measured code. Changing measurement implementation, inputs or runtime requires the existing new-measurement/approval process; this exception cannot validate a different model implementation with the old binary.
+Calibration provenance validates the selected original measurement source, hashes, marker, complete observation reproduction and fault detection. The historical recovery profile used `6b7ae7d -> 8f21331`; fresh evidence uses the new approved closure without reinterpreting that old provenance. Do not broaden its executable-path allowance to treat new supervisor code as old measured code. Changing measurement implementation, inputs or runtime requires the existing new-measurement/approval process; this exception cannot validate a different model implementation with the old binary.
 
 ## 2. Resource policy
 
@@ -56,7 +56,9 @@ Times use one monotonic origin established before the initial probe. `phase` is 
 
 Consumers must reconstruct sample/event/query order, single-flight, recovery count/window, timeout configuration, lifecycle order, extrema, fast-sample count and required initial/final evidence. They also verify actual source/invocation/policy identity, worker exit zero, valid resource data, no observed foreign compute and empty owned/telemetry cleanup. Do not trust `failure=null` or a supplied PASS flag alone. Scheduling/cleanup latency must be recorded truthfully; a late result is not a pre-deadline fresh result. A deadline or cleanup failure remains invalid rather than being hidden by rounding timestamps.
 
-## 4. Exact old-guard compatibility
+## 4. Exact old-guard compatibility (historical recovery profile only)
+
+This section applies only to `bounded-telemetry-recovery-v1`. The current fresh profile forbids a ledger or retained index authority, and requires new schema-2 guards and original worker metadata for every owner.
 
 The policy binds the original bytes of one `layered-retained-owner-ledger-v1`, schema 1 ledger by SHA-256. It declares the exact measurement source, registry hash, numerical-policy hash and 445 unique owner keys at indices 0 through 444 of the unchanged frozen 487-owner inventory. Each entry binds its capture, receipt, guard and full dependency file hashes, original execution identity and retention provenance. The ledger is evidence in the final artifact closure, not a mutable run receipt or an arbitrary caller allowlist.
 
@@ -66,27 +68,28 @@ The remaining indices 445 through 486 require new normal executions with schema 
 
 ## 5. Execution manifest, result and marker identities
 
-New supervised authoritative execution manifests use `schema_version=2`, preserve all existing fields, and add these required fields:
+Fresh supervised authoritative execution manifests use `schema_version=3`, preserve the existing fields, and add these required source roles:
 
 ```text
 evaluator_source: {commit, tree}
 supervision_source: {commit, tree}
 supervision_policy: {path, sha256}
-retained_owner_ledger: {path, sha256}
 ```
 
-`source` remains the real measurement source, as do capture/receipt source and worker runtime `generator_commit`. Both new source fields must equal the actual clean, frozen evaluator/supervisor implementation, checked against Git and the trusted invocation. The policy must be a selected Definition input in that source, with exact bytes/hash. Ledger identity, owner set, coverage and hashes must match the policy, not merely the manifest's claim. References retain existing confined regular-file path/hash rules.
+Only the historical recovery profile uses execution manifest schema 2 and additionally requires `retained_owner_ledger: {path, sha256}`. Schema 3 forbids that field.
+
+`source` remains the real measurement source, as do capture/receipt source and worker runtime `generator_commit`. Both new source fields must equal the actual clean, frozen evaluator/supervisor implementation, checked against Git and the trusted invocation. The policy must be a selected Definition input in that source, with exact bytes/hash. Owner set, coverage and hashes must match the policy, not merely the manifest's claim; the recovery profile also requires exact ledger identity. References retain existing confined regular-file path/hash rules.
 
 Receipt schema 1 and its original shape remain valid: the receipt's guard reference binds the new schema 2 guard for new owners, or the exact authorized old guard for retained owners. Reject missing supervision identities, mismatched sources/policy, unknown schemas, arbitrary schema 1 guards and incomplete/duplicated owners. The full inventory remains 487; all input, numerical, behavioral, replay and approval-predecessor checks still apply.
 
-The new authoritative result records `source` as measurement plus the evaluator/supervision identities and policy/ledger references. Its new completion marker uses schema 2, binds `source` to the actual evaluator source, explicitly names `measurement_source` and `supervision_source`, and hashes its complete manifest/result/policy/ledger and predecessor dependencies under the existing atomic marker rules. This marker does not pretend that the new evaluator executed as `8f21331`. Only genuine full PASS creates a success marker; FAIL/INVALID do not. Original observation and CPU markers keep their original versions and identities.
+The new authoritative result records `source` as measurement plus the evaluator/supervision identities and policy and any required legacy ledger references. Its new completion marker uses schema 2, binds `source` to the actual evaluator source, explicitly names `measurement_source` and `supervision_source`, and hashes its complete manifest/result/policy/ledger and predecessor dependencies under the existing atomic marker rules. This marker does not relabel the evaluator as the measurement source. Only genuine full PASS creates a success marker; FAIL/INVALID do not. Original observation and CPU markers keep their original versions and identities.
 
 ## 6. Transport, release source and gates
 
-The outer Golden release manifest stays at schema 5 with the same two-asset contract. Its measurement identity remains measurement identity; supervised execution manifests, guards, policy, retained ledger and role-specific Definition/CPU evidence become mandatory transitive dependencies. Do not silently deduplicate owners, rewrite raw references or import executable payloads from the archive. The trusted installed evaluator verifies the new supervision/measurement closure; archive-provided code is never executed.
+The outer Golden release manifest stays at schema 5 with the same two-asset contract. Its measurement identity remains measurement identity; supervised execution manifests, guards, policy and role-specific Definition/CPU evidence become mandatory transitive dependencies, together with the retained ledger only for the recovery profile. Do not silently deduplicate owners, rewrite raw references or import executable payloads from the archive. The trusted installed evaluator verifies the new supervision/measurement closure; archive-provided code is never executed.
 
-Clean consumption uses the frozen reviewed evaluator source and verifies the separate immutable measurement source and original predecessor identities. Old `8f21331` CPU gates attest measurement; the new complete CPU gates/review attest supervisor/evaluator. Both are required and neither may be relabeled. The final evidence-only report/release candidate must descend from the frozen evaluator source, with only the already permitted report/non-executable evidence changes afterward. The narrow pre-evaluation supervision/identity-adapter exception described here replaces the old single-source assumption, not the post-evaluation immutability rule.
+Clean consumption uses the frozen reviewed evaluator source and verifies the separate immutable measurement source and original predecessor identities. Complete CPU gates from the policy's actual measurement source attest measurement; the new complete CPU gates/review attest supervisor/evaluator. Both are required and neither may be relabeled. The final evidence-only report/release candidate must descend from the frozen evaluator source, with only the already permitted report/non-executable evidence changes afterward. The narrow pre-evaluation supervision/identity-adapter exception described here replaces the old single-source assumption, not the post-evaluation immutability rule.
 
 Before remaining GPU work, require deterministic CPU RED-to-GREEN coverage through the real supervision interface: one timeout then recovery with a zero-exit child; blocked telemetry with prompt RAM-floor termination; persistent/second timeout; non-timeout or malformed telemetry; worker failure despite recovered telemetry; foreign compute; missing final fresh sample; deadline and owner/telemetry cleanup failures. Identity/transport tests reject altered ledgers, unlisted old guards, failed/diagnostic substitution, false measurement invocation, changed protected measurement code, wrong evaluator/policy/marker identity and incomplete closure. Full project CPU gates and fresh complete candidate review precede GPU resumption. These tests establish supervisor behavior, not a causal fix for NVML or the driver.
 
-After guarded preflight, continue only the remaining 42 normal owners, preserving the 445 exact retained owners and all failures. Revalidate full closure and run authoritative comparison after collection, with RAM/process protection during offline work too. Actual numerical failures remain failures; no new thresholds, case selection or backend changes are authorized. Performance and publication remain separate later stages.
+After guarded preflight, the current fresh profile collects all 487 registered owners anew with zero retained owners. Only the historical recovery profile continues its remaining 42 normal owners while preserving the 445 exact retained owners. Both preserve all prior failures. Revalidate full closure and run authoritative comparison after collection, with RAM/process protection during offline work too. Actual numerical failures remain failures; no new thresholds, case selection or backend changes are authorized. Performance and publication remain separate later stages.

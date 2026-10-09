@@ -144,7 +144,7 @@ The source-bound record of one validation stage and its original evidence depend
 _Avoid_: release manifest, asset inventory.
 
 **Reference oracle**:
-The authoritative correctness target: Transformers BF16 with `output_logits=True` and `attn_implementation=sdpa`. A reference-oracle failure cannot be overridden by baseline evidence.
+The authoritative correctness target: Transformers BF16 with `output_logits=True` and `attn_implementation=sdpa`. Its approved arithmetic profile fixes intermediate precision; a different profile requires new calibration and scope approval. A reference-oracle failure cannot be overridden by baseline evidence.
 _Avoid_: ground truth, canonical engine, expected engine.
 
 **Baseline oracle**:
@@ -156,7 +156,7 @@ The approved, versioned operator and model error budgets for a fixed dtype, kern
 _Avoid_: hidden tolerance, pass-until-green threshold.
 
 **Calibration observation**:
-A non-accepting measurement of same-prefix numerical distributions and diagnostic evidence before the corresponding budgets are approved. Observation completion is not release acceptance.
+A non-accepting measurement of same-prefix numerical distributions and diagnostic evidence before the corresponding scope and budget bindings are approved. Observation completion is not release acceptance.
 _Avoid_: calibration pass, auto-tuned tolerance, baseline acceptance.
 
 **Performance baseline**:
