@@ -3,12 +3,12 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
-use candle_core::{Device, IndexOp, Result as CandleResult, Tensor};
+use candle_core::{Device, Result as CandleResult, Tensor};
 use candle_nn::{Module, VarBuilder};
 use serde::Deserialize;
 
 use crate::attention::{AttentionContext, PagedKVCache, PagedKVCacheGeometry, PreparedAttention};
-use crate::layers::activation::silu_and_mul;
+use crate::layers::activation::silu_mul;
 use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
 use crate::layers::rmsnorm::RMSNorm;
@@ -80,8 +80,10 @@ impl Qwen3Mlp {
         })
     }
     fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
-        let gu = self.gate_up_proj.forward(x)?;
-        let act = silu_and_mul(&gu)?;
+        let width = self.gate_up_proj.weight().dim(0)? / 2;
+        let gate = self.gate_up_proj.forward_range(x, 0, width)?;
+        let up = self.gate_up_proj.forward_range(x, width, width)?;
+        let act = silu_mul(&gate, &up)?;
         self.down_proj.forward(&act)
     }
 }
@@ -166,12 +168,11 @@ impl Qwen3Attention {
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
     ) -> CandleResult<Tensor> {
-        let qkv = self.qkv_proj.forward(hidden)?;
         let qs = self.num_heads * self.head_dim;
         let ks = self.num_kv_heads * self.head_dim;
-        let q = qkv.i((.., 0..qs))?;
-        let k = qkv.i((.., qs..qs + ks))?;
-        let v = qkv.i((.., qs + ks..qs + 2 * ks))?;
+        let q = self.qkv_proj.forward_range(hidden, 0, qs)?;
+        let k = self.qkv_proj.forward_range(hidden, qs, ks)?;
+        let v = self.qkv_proj.forward_range(hidden, qs + ks, ks)?;
         #[cfg(feature = "internal-golden")]
         if let Some(trace) = trace.as_deref_mut() {
             for (name, value) in [("layer0_q", &q), ("layer0_k", &k), ("layer0_v", &v)] {
