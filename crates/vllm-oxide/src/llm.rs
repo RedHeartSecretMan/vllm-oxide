@@ -6,6 +6,8 @@
 //! `llm_engine.py`.
 
 mod initialization;
+#[cfg(feature = "cuda")]
+mod precision;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -114,7 +116,10 @@ impl LLM {
         }
 
         #[cfg(feature = "cuda")]
-        validate_sm_version(&device)?;
+        {
+            validate_sm_version(&device)?;
+            precision::configure_fp32_reduction(&device)?;
+        }
 
         let resolved_model = ResolvedModel::resolve(source, options.dtype)?;
         let config_bytes = resolved_model.config_json();

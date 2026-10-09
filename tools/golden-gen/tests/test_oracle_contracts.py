@@ -73,3 +73,23 @@ def test_oracle_construction_pins_tokenizer_dtype_eager_and_non_fallback_kernels
         "backend": "FLASH_ATTN",
         "flash_attn_version": 2,
     }
+
+
+def test_reference_precision_is_explicit_before_loading_any_model():
+    from golden_gen.oracles.transformers_oracle import _configure_determinism
+
+    calls = []
+    matmul = SimpleNamespace(allow_bf16_reduced_precision_reduction=True, allow_tf32=True)
+    torch = SimpleNamespace(
+        manual_seed=lambda seed: calls.append(("cpu", seed)),
+        cuda=SimpleNamespace(manual_seed_all=lambda seed: calls.append(("cuda", seed))),
+        use_deterministic_algorithms=lambda enabled, warn_only: calls.append((enabled, warn_only)),
+        backends=SimpleNamespace(cuda=SimpleNamespace(matmul=matmul)),
+    )
+    _configure_determinism(torch)
+    assert calls == [("cpu", 0), ("cuda", 0), (True, False)]
+    assert matmul.allow_bf16_reduced_precision_reduction is False
+    assert matmul.allow_tf32 is False
+    contract = reference_model_kwargs()
+    assert contract["allow_bf16_reduced_precision_reduction"] is False
+    assert contract["allow_tf32"] is False

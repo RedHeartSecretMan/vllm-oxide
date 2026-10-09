@@ -162,8 +162,10 @@ def _receipt(
             evidence.get("deterministic_algorithms") is not True
             or evidence.get("warn_only") is not False
             or evidence.get("attention_backend") != "SDPBackend.MATH"
+            or evidence.get("allow_bf16_reduced_precision_reduction") is not False
+            or evidence.get("allow_tf32") is not False
         ):
-            raise ValueError("reference lacks actual deterministic MATH backend evidence")
+            raise ValueError("reference lacks deterministic MATH and FP32-reduction evidence")
     elif engine == "baseline":
         from golden_gen.worker_determinism import BaselineWorkerEvidence
 
