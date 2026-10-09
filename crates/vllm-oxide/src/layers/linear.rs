@@ -155,10 +155,41 @@ fn project(x: &Tensor, weight: &Tensor, layout: ProjectionLayout) -> Result<Tens
                 x.device(),
             )?;
             let padded = Tensor::cat(&[x, &zeros], 0)?;
-            return padded.matmul(&weight.t()?)?.narrow(0, 0, rows);
+            return stable_batched_matmul(&padded, &weight.t()?, layout)?.narrow(0, 0, rows);
         }
     }
-    x.matmul(&weight.t()?)
+    stable_batched_matmul(x, &weight.t()?, layout)
+}
+
+// Experimental: prevent workspace-dependent split reductions in multi-request GEMMs.
+fn stable_batched_matmul(x: &Tensor, weight: &Tensor, layout: ProjectionLayout) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Device::Cuda(device) = x.device() {
+        if x.dtype() == candle_core::DType::BF16 && layout.minimum_rows > 1 && x.dim(0)? > 2 {
+            use candle_core::cuda::cudarc::cublas::sys;
+            let blas = device.cublas_handle();
+            // This private inference path owns the device/handle and runs on one stream.
+            // A zero workspace has no asynchronous buffer lifetime to retain.
+            let set =
+                unsafe { sys::cublasSetWorkspace_v2(*blas.handle(), std::ptr::null_mut(), 0) };
+            if set != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                candle_core::bail!("cannot select bounded GEMM workspace: {set:?}");
+            }
+            let result = x.matmul(weight);
+            // Setting the same stream restores cuBLAS's default workspace pool,
+            // including after a failed GEMM, before any subsequent attention op.
+            let restore = unsafe {
+                sys::cublasSetStream_v2(*blas.handle(), device.cuda_stream().cu_stream().cast())
+            };
+            if restore != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                candle_core::bail!("cannot restore GEMM workspace: {restore:?}");
+            }
+            return result;
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = layout;
+    x.matmul(weight)
 }
 
 /// Per-style checkpoint assembly. `pub(crate)` so external code can call
