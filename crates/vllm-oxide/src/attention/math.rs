@@ -266,7 +266,7 @@ mod tests {
             &device,
             Some(MathLimits {
                 max_query_tokens: 3,
-                workspace_bytes: 2700,
+                workspace_bytes: 16 * 1024,
                 ..limits
             }),
         )
