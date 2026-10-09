@@ -294,7 +294,7 @@ impl LLM {
             if tokens
                 .len()
                 .checked_add(params.max_tokens)
-                .map_or(true, |length| length > self.max_model_len)
+                .is_none_or(|length| length > self.max_model_len)
             {
                 bail!(
                     "generate: prompt[{position}] context budget exceeds max_model_len {}",
