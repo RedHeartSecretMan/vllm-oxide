@@ -102,11 +102,18 @@ jobs:
   deps:
     name: Dependency audit (cargo-deny)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+      # Match the former Docker action's cargo-deny version and check scope.
+      # Native installation avoids Docker Hub's unauthenticated pull limit.
+      - name: Install cargo-deny
+        run: cargo install --locked --version 0.20.2 cargo-deny
       # Supply-chain gate: vulnerabilities, licenses, duplicate crates, allowed
       # sources — policy lives in deny.toml. A newly-published RUSTSEC advisory
       # fails this job; that is the intended early-warning behaviour.
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      - name: Check dependency policy
+        run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check

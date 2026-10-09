@@ -199,6 +199,10 @@ _Avoid_: batch-average acceptance unit, token row as independent case.
 A registered set of request members executed together in one generation call. It captures shared execution behavior without replacing the individual numerical cases.
 _Avoid_: sequential calls labeled as batch, pooled numerical verdict.
 
+**Confirmation cohort**:
+A frozen group of confirmation cases assigned a role for one Definition Checkpoint. Retained cohorts remain mandatory regressions; one independently frozen cohort supplies the new unobserved holdout. Every case keeps its original split, input and owner identity, and every cohort must pass. The independent cohort must share no reachable prediction history with any prior case or cohort.
+_Avoid_: acceptance reset, replacement prompts, renamed historical split.
+
 **Fixed-prefix replay**:
 A run whose continuation token stream is fixed independently of each implementation's predicted choices. It preserves shared histories while exercising the actual incremental engine path.
 _Avoid_: forced prediction, repeated prefill as decode.

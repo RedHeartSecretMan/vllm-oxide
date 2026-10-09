@@ -19,7 +19,7 @@ def test_authoritative_pending_budgets_stop_before_opening_manifest_or_holdout(
     (tmp_path / ".dag").mkdir()
     registry = dict(
         protocol="layered-accuracy-v1",
-        schema_version=2,
+        schema_version=3,
         numerical_cases=[
             dict(
                 split="acceptance",
@@ -148,7 +148,7 @@ def test_complete_synthetic_three_engine_io_produces_only_nonaccepting_observati
     )
     registry = dict(
         protocol="layered-accuracy-v1",
-        schema_version=2,
+        schema_version=3,
         numerical_cases=[
             dict(
                 split="calibration",
