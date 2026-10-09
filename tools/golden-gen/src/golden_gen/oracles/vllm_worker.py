@@ -1,4 +1,4 @@
-"""vLLM 0.18.1 supported worker_cls hook, loaded in the real spawn GPU worker."""
+"""vLLM 0.18.1 supported worker_cls hook, loaded in the real isolated GPU owner."""
 
 from __future__ import annotations
 

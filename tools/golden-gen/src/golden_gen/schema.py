@@ -80,7 +80,7 @@ class KernelPaths(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     reference: Literal["transformers-4.57.6/torch-2.10.0/fp32-gemm-reduction/sdpa-math"]
-    baseline: Literal["vllm-0.18.1/flash-attn-v2/eager"]
+    baseline: Literal["vllm-0.18.1/flash-attn-v2/eager/inproc-scheduler"]
     candidate: Literal[
         "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/"
         "fp32-gemm-reduction+causal-math-v2+call-layout-v1"

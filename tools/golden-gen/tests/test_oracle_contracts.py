@@ -93,3 +93,52 @@ def test_reference_precision_is_explicit_before_loading_any_model():
     contract = reference_model_kwargs()
     assert contract["allow_bf16_reduced_precision_reduction"] is False
     assert contract["allow_tf32"] is False
+
+
+@pytest.mark.parametrize("cached_enabled", [False, True])
+def test_baseline_disables_background_admission_before_constructing_vllm(
+    monkeypatch, tmp_path, cached_enabled
+):
+    import os
+    import sys
+    from types import ModuleType
+
+    from golden_gen.oracles import vllm_oracle
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    calls = []
+    client_type = type("InprocClient", (), {"__module__": "vllm.v1.engine.core_client"})
+
+    def construct(**kwargs):
+        assert os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0"
+        calls.append(kwargs)
+        return SimpleNamespace(llm_engine=SimpleNamespace(engine_core=client_type()))
+
+    class FakeVllm(ModuleType):
+        def __getattr__(self, name):
+            if name in ("LLM", "envs"):
+                assert os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0"
+                return (
+                    construct
+                    if name == "LLM"
+                    else SimpleNamespace(VLLM_ENABLE_V1_MULTIPROCESSING=cached_enabled)
+                )
+            raise AttributeError(name)
+
+    monkeypatch.setitem(sys.modules, "vllm", FakeVllm("vllm"))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    monkeypatch.setattr(vllm_oracle, "validate_release_model", lambda path: path)
+    monkeypatch.setattr(vllm_oracle, "_configure_determinism", lambda _: None)
+    monkeypatch.setattr(
+        vllm_oracle.VllmOracle, "_worker_evidence", lambda *_: SimpleNamespace(pid=os.getpid())
+    )
+    if cached_enabled:
+        with pytest.raises(ValueError, match="cached before"):
+            vllm_oracle.VllmOracle(tmp_path)
+        assert calls == []
+    else:
+        oracle = vllm_oracle.VllmOracle(tmp_path)
+        proof = oracle.scheduling_evidence()
+        assert proof.driver_pid == proof.worker_pid == os.getpid()
+        assert proof.multiprocessing_enabled is False
+        assert len(calls) == 1
