@@ -268,3 +268,19 @@ baseline 按 [ADR-0017](../adr/0017-pressure-baseline-usable-capacity.md) 使用
 pressure 组不再声称覆盖 chunked prefill；分块覆盖仍由 chunk-remainder、mixed、waiting 等明确要求该机制的组承担。fixed-prefix、无 forcing 的 control 及独立 control-replay 都必须以自身事件证明机制，CPU 指纹替身的成功只证明调度几何与历史路径，不代替 Qwen 的 GPU 数值验收。
 
 [混合阶段压力修复范围](t45-mixed-phase-pressure-repair.md)中的 128-token 步预算、三个 KV block 的公开接口回归仍是必须通过的 CPU 结构门槛，须与四 block 及同容量串行对照输出一致。它不计为 GPU owner，也不因 768-token 场景成功而被删除、忽略或放宽。
+
+## 17. 修复后的独立确认清单（提案）
+
+[ADR-0025](../adr/0025-proposed-independent-confirmation.md) 提议注册表 schema 2 增加
+`confirmation` 分割。此前 `acceptance-waiting-long` 的失败已经用于定位修复，原
+acceptance 不能再称为未观察 holdout。原 development/calibration/acceptance 的全部
+487 个 owner、输入、故障与行为义务保留为必过回归；confirmation 另加 13 组、19 个
+数值用例、75 个基础预测行、11 项行为检查和 130 个 owner，共 617 个。
+
+独立性检查包括已观察分割的 setup 与成功公开调用；不只检查 case ID 或已冻结
+continuation，还排除相容 prompt 前缀下可能重叠的预测历史长度区间。所有新旧 owner
+均由同一完整 inventory、比较器、marker 闭包与消费者强制验证，不能靠附加报告绕过。
+
+这份清单尚待审核批准，未获取 confirmation 模型输出。现有预算政策仍绑定旧注册表，
+新数值和行为采集保持 sealed。原参考精度与所有预算值不变；新测量源码和注册表须
+取得自己的完整 CPU、校准及故障证据，再绑定审核后的清单和来源后才能打开新验收。

@@ -33,7 +33,7 @@ def _group(repo: Path, group_id: str) -> tuple[NumericalCase, str]:
     )
     if group is None:
         raise ValueError("execution group is absent from the approved registry")
-    if group.split == "acceptance":
+    if group.split in ("acceptance", "confirmation"):
         values, _ = definition_document(repo, POLICY_PATH)
         policy = BudgetPolicy.model_validate(values)
         if (
@@ -118,7 +118,7 @@ def _auxiliary_definition(
         raise ValueError("unknown auxiliary verification")
     if case.mode != "free_generation":
         raise ValueError("execution behavior is derived from its guarded numerical groups")
-    if case.split == "acceptance":
+    if case.split in ("acceptance", "confirmation"):
         values, _ = definition_document(repo, POLICY_PATH)
         policy = BudgetPolicy.model_validate(values)
         if (

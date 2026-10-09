@@ -68,6 +68,8 @@ def test_fresh_calibration_uses_current_source_and_guard(
         ("dev-canonical_01", False),
         ("acceptance-length-1", False),
         ("acceptance-behavior-repeated", True),
+        ("confirmation-length-1", False),
+        ("confirmation-behavior-repeated", True),
     ],
 )
 def test_fresh_observation_rejects_owners_outside_calibration(
@@ -75,6 +77,10 @@ def test_fresh_observation_rejects_owners_outside_calibration(
 ):
     from golden_gen import layered_cli
 
+    # Exercise inventory exclusion even when numerical budgets are approved.
+    # The actual proposal deliberately keeps confirmation sealed separately.
+    monkeypatch.setattr(layered_cli, "_group", lambda *_: None)
+    monkeypatch.setattr(layered_cli, "_auxiliary_definition", lambda *_: None)
     monkeypatch.setattr(layered_cli, "source_identity", lambda repo: {})
     with pytest.raises(ValueError, match="frozen inventory"):
         layered_cli.collect_group(

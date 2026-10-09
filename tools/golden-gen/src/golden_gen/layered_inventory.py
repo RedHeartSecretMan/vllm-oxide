@@ -91,7 +91,11 @@ def frozen_owner_inventory(registry: Registry, *, authoritative: bool) -> list[d
                     )
         public_groups.add(ids[0])
     inventory = []
-    splits = ("development", "calibration", "acceptance") if authoritative else ("calibration",)
+    splits = (
+        ("development", "calibration", "acceptance", "confirmation")
+        if authoritative
+        else ("calibration",)
+    )
     for split in splits:
         groups = [g for g in registry.numerical_cases if g.split == split]
         public = [
@@ -136,7 +140,12 @@ def frozen_owner_inventory(registry: Registry, *, authoritative: bool) -> list[d
                     )
                 )
         counts = registry.expected_counts.get(split, {})
-        declared = _check_owners(counts.get("owner_inventory"), expected)
+        # Tiny synthetic registries may have no confirmation scope at all.
+        # Any real confirmation owner still requires an explicit complete list.
+        declared = _check_owners(
+            counts.get("owner_inventory", [] if split == "confirmation" and not expected else None),
+            expected,
+        )
         calculated = dict(
             groups=len(groups),
             members=sum(len(g.plan.members) for g in groups),

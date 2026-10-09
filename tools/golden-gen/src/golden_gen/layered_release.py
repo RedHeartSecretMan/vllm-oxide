@@ -20,7 +20,7 @@ POLICY_PATH = "docs/validation/layered-accuracy-budgets.json"
 
 class NumericalCase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    split: Literal["development", "calibration", "acceptance"]
+    split: Literal["development", "calibration", "acceptance", "confirmation"]
     plan: ReplayPlan
     required_mechanisms: dict[
         Literal["reference", "baseline", "candidate"],
@@ -61,7 +61,7 @@ class BehaviorCase(BaseModel):
     mode: Literal["free_generation", "fixed_prefix_execution", "unforced_control"] = (
         "free_generation"
     )
-    split: Literal["development", "calibration", "acceptance"] = "calibration"
+    split: Literal["development", "calibration", "acceptance", "confirmation"] = "calibration"
     required_checks: list[str] = Field(min_length=1)
     scenario: dict[str, Any]
     engine_options: dict[str, Any] = Field(default_factory=dict)
@@ -70,7 +70,7 @@ class BehaviorCase(BaseModel):
 class Registry(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol: Literal["layered-accuracy-v1"]
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     numerical_cases: list[NumericalCase] = Field(min_length=1)
     operator_profiles: list[OperatorProfile] = Field(min_length=1)
     behavior_cases: list[BehaviorCase] = Field(min_length=1)
@@ -108,7 +108,58 @@ class Registry(BaseModel):
                 m.case_id.startswith(("canonical_", "regression_")) for m in case.plan.members
             ):
                 raise ValueError("old 28 cases belong to development only")
+        _check_confirmation_independence(self)
         return self
+
+
+def _check_confirmation_independence(registry: Registry) -> None:
+    """Reject possible reuse even when a prior unforced continuation is unknown.
+
+    For compatible prompt prefixes, reachable prediction-length intervals must
+    be disjoint. This includes every setup and successful public call, rather
+    than only checking the fixed continuation rows or changing case identifiers.
+    """
+    if not any(group.split == "confirmation" for group in registry.numerical_cases):
+        return
+    from golden_gen.behavior_verification import BehaviorScenario
+
+    ranges: dict[tuple[bool, tuple[int, ...], int], str] = {}
+    for group in registry.numerical_cases:
+        for plan in [*group.setup_calls, group.plan]:
+            for member in plan.members:
+                ranges[
+                    (group.split == "confirmation", tuple(member.prompt), len(member.continuation))
+                ] = member.case_id
+    for case in registry.behavior_cases:
+        if case.mode not in ("free_generation", "unforced_control"):
+            continue
+        scenario = BehaviorScenario.model_validate(dict(calls=case.scenario.get("calls")))
+        for call in scenario.calls:
+            if call.expected != "success":
+                continue
+            if len(call.prompts) != len(call.params):
+                raise ValueError("successful public call has mismatched parameters")
+            for public_prompt, params in zip(call.prompts, call.params, strict=True):
+                if not public_prompt or params.max_tokens <= 0:
+                    raise ValueError("successful public call has no prediction history")
+                ranges[(case.split == "confirmation", tuple(public_prompt), params.max_tokens)] = (
+                    case.case_id
+                )
+    observed = [
+        (prompt, steps, name) for (fresh, prompt, steps), name in ranges.items() if not fresh
+    ]
+    for (fresh, prompt, steps), name in ranges.items():
+        if not fresh:
+            continue
+        for prior, prior_steps, prior_name in observed:
+            overlap = max(len(prompt), len(prior)) <= min(
+                len(prompt) + steps - 1, len(prior) + prior_steps - 1
+            )
+            width = min(len(prompt), len(prior))
+            if overlap and prompt[:width] == prior[:width]:
+                raise ValueError(
+                    f"confirmation may reuse observed prediction history: {name} / {prior_name}"
+                )
 
 
 class BudgetPolicy(BaseModel):

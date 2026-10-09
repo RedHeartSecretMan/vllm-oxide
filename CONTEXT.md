@@ -159,6 +159,10 @@ _Avoid_: hidden tolerance, pass-until-green threshold.
 A non-accepting measurement of same-prefix numerical distributions and diagnostic evidence before the corresponding scope and budget bindings are approved. Observation completion is not release acceptance.
 _Avoid_: calibration pass, auto-tuned tolerance, baseline acceptance.
 
+**Independent confirmation**:
+A predeclared set of previously unobserved cases used after a failure has informed a repair. It supplements every observed regression obligation; repeating the failed cases does not restore their independence.
+_Avoid_: renamed holdout, optional confirmation report, repeated blind test.
+
 **Performance baseline**:
 The reproducible, evidence-only measurements for fixed single-request and batch workloads: prefill throughput, decode throughput, time to first token, inter-token latency, and peak device memory. It is not a cross-hardware latency promise.
 _Avoid_: benchmark gate, performance SLA, vLLM parity claim.
