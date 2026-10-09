@@ -1,69 +1,107 @@
-//! Thin wrappers around `candle-flash-attn`'s two entry points.
-//!
-//! Prefill calls `flash_attn_varlen` (unpaged — reads projection K/V).
-//! Continued prefill and decode call `flash_attn_varlen_paged_windowed`
-//! (paged — reads the KV cache).
-//! Model code calls these directly — no trait (T4 YAGNI decision).
-
+//! EXPERIMENT ONLY: dense FP32 attention to isolate the accuracy failure.
+//! This branch is not a production or acceptance candidate.
 #![cfg(feature = "cuda")]
 #![allow(dead_code)]
-
-use candle_core::{Result, Tensor};
-use candle_flash_attn::{flash_attn_varlen, flash_attn_varlen_paged_windowed};
-
 use super::PreparedAttention;
-
-// These exact arguments are also retained by the private diagnostic caller.
+use candle_core::{DType, Result, Tensor};
 pub(crate) const PREFILL_CAUSAL: bool = true;
 pub(crate) const PAGED_WINDOW_LEFT: Option<usize> = None;
 pub(crate) const PAGED_WINDOW_RIGHT: Option<usize> = Some(0);
+
+fn dense(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+    let (queries, heads, dim) = q.dims3()?;
+    let (keys, kv_heads, _) = k.dims3()?;
+    if queries > 1024 || keys > 1024 || keys < queries || heads % kv_heads != 0 {
+        candle_core::bail!("experimental dense attention exceeds bounded diagnostic scope");
+    }
+    let expand = |input: &Tensor| -> Result<Tensor> {
+        input
+            .unsqueeze(2)?
+            .broadcast_as((keys, kv_heads, heads / kv_heads, dim))?
+            .contiguous()?
+            .reshape((keys, heads, dim))?
+            .transpose(0, 1)?
+            .contiguous()?
+            .to_dtype(DType::F32)
+    };
+    let q32 = q.to_dtype(DType::F32)?.transpose(0, 1)?.contiguous()?;
+    let k32 = expand(k)?;
+    let v32 = expand(v)?;
+    let root_scale = f64::from(scale).sqrt();
+    let scores = (q32 * root_scale)?.matmul(&(k32 * root_scale)?.transpose(1, 2)?)?;
+    let mask = (0..queries)
+        .flat_map(|row| {
+            (0..keys).map(move |col| {
+                if col <= keys - queries + row {
+                    0.0_f32
+                } else {
+                    f32::NEG_INFINITY
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mask = Tensor::from_vec(mask, (queries, keys), q.device())?;
+    let probabilities = candle_nn::ops::softmax_last_dim(&scores.broadcast_add(&mask)?)?;
+    probabilities
+        .matmul(&v32)?
+        .transpose(0, 1)?
+        .contiguous()?
+        .to_dtype(q.dtype())
+}
 
 pub fn prefill_attn(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
     prepared: &PreparedAttention,
-    softmax_scale: f32,
+    scale: f32,
 ) -> Result<Tensor> {
     let logical = prepared.logical();
-
-    flash_attn_varlen(
-        q,
-        k,
-        v,
-        prepared.cu_seqlens_q(),
-        prepared.cu_seqlens_k(),
-        logical.max_seqlen_q,
-        logical.max_seqlen_k,
-        softmax_scale,
-        PREFILL_CAUSAL,
-    )
+    let mut outputs = Vec::new();
+    for index in 0..logical.cu_seqlens_q.len() - 1 {
+        let qstart = logical.cu_seqlens_q[index] as usize;
+        let qlen = (logical.cu_seqlens_q[index + 1] - logical.cu_seqlens_q[index]) as usize;
+        let kstart = logical.cu_seqlens_k[index] as usize;
+        let klen = (logical.cu_seqlens_k[index + 1] - logical.cu_seqlens_k[index]) as usize;
+        outputs.push(dense(
+            &q.narrow(0, qstart, qlen)?,
+            &k.narrow(0, kstart, klen)?,
+            &v.narrow(0, kstart, klen)?,
+            scale,
+        )?);
+    }
+    Tensor::cat(&outputs, 0)
 }
 
 pub fn paged_attn(
     q: &Tensor,
-    k_cache: &Tensor,
-    v_cache: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
     prepared: &PreparedAttention,
-    softmax_scale: f32,
-    page_block_size: usize,
+    scale: f32,
+    _block_size: usize,
 ) -> Result<Tensor> {
     let logical = prepared.logical();
-
-    flash_attn_varlen_paged_windowed(
-        q,
-        k_cache,
-        v_cache,
-        prepared.cu_seqlens_q(),
-        prepared.cu_seqlens_k(),
-        prepared.block_table()?,
-        None,
-        logical.max_seqlen_q,
-        logical.max_seqlen_k,
-        softmax_scale,
-        PAGED_WINDOW_LEFT,
-        PAGED_WINDOW_RIGHT,
-        page_block_size,
-        None,
-    )
+    let mut outputs = Vec::new();
+    for index in 0..logical.cu_seqlens_q.len() - 1 {
+        let qstart = logical.cu_seqlens_q[index] as usize;
+        let qlen = (logical.cu_seqlens_q[index + 1] - logical.cu_seqlens_q[index]) as usize;
+        let klen = (logical.cu_seqlens_k[index + 1] - logical.cu_seqlens_k[index]) as usize;
+        let blocks = logical.block_table[index]
+            .iter()
+            .map(|&id| u32::try_from(id).map_err(candle_core::Error::wrap))
+            .collect::<Result<Vec<_>>>()?;
+        let count = blocks.len();
+        let blocks = Tensor::from_vec(blocks, count, q.device())?;
+        let keys = k
+            .index_select(&blocks, 0)?
+            .flatten(0, 1)?
+            .narrow(0, 0, klen)?;
+        let values = v
+            .index_select(&blocks, 0)?
+            .flatten(0, 1)?
+            .narrow(0, 0, klen)?;
+        outputs.push(dense(&q.narrow(0, qstart, qlen)?, &keys, &values, scale)?);
+    }
+    Tensor::cat(&outputs, 0)
 }
