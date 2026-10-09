@@ -41,7 +41,7 @@
 
 ## 这是什么？
 
-vllm-oxide 将 LLM 推理带入 Rust 生态。它构建在 [candle](https://github.com/huggingface/candle)（CUDA 内核、安全张量操作）和 flash-attention（分页注意力内核）之上，提供一个同步、进程内的推理引擎，支持：
+vllm-oxide 将 LLM 推理带入 Rust 生态。它构建在 [candle](https://github.com/huggingface/candle)及项目自身的 CUDA 内核之上，提供一个同步、进程内的推理引擎，支持：
 
 - 持续批处理与前缀缓存
 - 分页 KV 缓存（`block_size = 256`）
@@ -76,7 +76,7 @@ flowchart TD
 
 关键设计决策（完整词汇表见 `CONTEXT.md`）：
 
-- **分页注意力（Paged attention）**：K/V 缓存存储在固定大小的块（`block_size = 256`）中。预填充阶段使用非分页的 `flash_attn_varlen`；解码阶段使用分页的 `flash_attn_varlen_paged_windowed`。
+- **分页注意力（Paged attention）**：K/V 缓存存储在固定大小的块（`block_size = 256`）中。预填充阶段使用非分页的 FP32 causal math（unpaged）；解码阶段使用分页的 FP32 causal math（paged）。
 - **前缀缓存（Prefix caching）**：`BlockPool` 中的链式 XXH64 哈希表对跨请求的公共提示前缀进行去重（写时复制语义）。
 - **TP 接缝（TP seam）**：内部 `ParallelStyle` trait 和 `TpConfig` 枚举保留未来可行性接缝。v0.2.0 仅支持 `TpConfig::Single`，TP/NCCL 不是运行时能力。
 - **CausalLM trait**：内部的引擎面向模型合同。inventory 注册表、loader、scheduler、cache、attention metadata 和 sampler 都隐藏在 `LLM` 后面。
@@ -238,7 +238,7 @@ vllm-oxide 使用 `cuda` 特性门控来区分仅 CPU 开发环境和 GPU 推理
 ```toml
 [features]
 default = []        # 仅 CPU — 测试和开发迭代无需 CUDA。
-cuda = ["dep:candle-flash-attn", "candle-core/cuda"]  # 生产后端。
+cuda = ["candle-core/cuda"]  # 生产后端。
 ```
 
 来自 `Cargo.toml`：默认仅 CPU 以便 `cargo test` 在 CI 上无需 GPU 即可运行。生产调用方传入 `--features cuda`。

@@ -3,12 +3,12 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
-use candle_core::{Device, IndexOp, Result as CandleResult, Tensor};
+use candle_core::{Device, Result as CandleResult, Tensor};
 use candle_nn::{Module, VarBuilder};
 use serde::Deserialize;
 
 use crate::attention::{AttentionContext, PagedKVCache, PagedKVCacheGeometry, PreparedAttention};
-use crate::layers::activation::silu_and_mul;
+use crate::layers::activation::silu_mul;
 use crate::layers::linear::{Linear, LinearSpec};
 use crate::layers::parallel::{GateUpMerged, QkvMerged, Row};
 use crate::layers::rmsnorm::RMSNorm;
@@ -80,8 +80,10 @@ impl Qwen3Mlp {
         })
     }
     fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
-        let gu = self.gate_up_proj.forward(x)?;
-        let act = silu_and_mul(&gu)?;
+        let width = self.gate_up_proj.weight().dim(0)? / 2;
+        let gate = self.gate_up_proj.forward_range(x, 0, width)?;
+        let up = self.gate_up_proj.forward_range(x, width, width)?;
+        let act = silu_mul(&gate, &up)?;
         self.down_proj.forward(&act)
     }
 }
@@ -166,12 +168,11 @@ impl Qwen3Attention {
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
     ) -> CandleResult<Tensor> {
-        let qkv = self.qkv_proj.forward(hidden)?;
         let qs = self.num_heads * self.head_dim;
         let ks = self.num_kv_heads * self.head_dim;
-        let q = qkv.i((.., 0..qs))?;
-        let k = qkv.i((.., qs..qs + ks))?;
-        let v = qkv.i((.., qs + ks..qs + 2 * ks))?;
+        let q = self.qkv_proj.forward_range(hidden, 0, qs)?;
+        let k = self.qkv_proj.forward_range(hidden, qs, ks)?;
+        let v = self.qkv_proj.forward_range(hidden, qs + ks, ks)?;
         #[cfg(feature = "internal-golden")]
         if let Some(trace) = trace.as_deref_mut() {
             for (name, value) in [("layer0_q", &q), ("layer0_k", &k), ("layer0_v", &v)] {
@@ -233,17 +234,18 @@ impl Qwen3Attention {
             .paged_kv
             .lock()
             .map_err(|e| candle_core::Error::Msg(format!("pkv: {e}")))?;
-        pkv.reshape_and_cache(self.layer_id, k, v, prepared.slot_mapping())?;
+        let real_k = prepared.unpad_queries(k)?;
+        let real_v = prepared.unpad_queries(v)?;
+        pkv.reshape_and_cache(self.layer_id, &real_k, &real_v, prepared.slot_mapping())?;
         let kc = pkv.k_cache(self.layer_id)?;
         let vc = pkv.v_cache(self.layer_id)?;
         let bs = pkv.block_size();
         drop(pkv);
-        let scale = 1.0_f32 / (self.head_dim as f32).sqrt();
+        let head_dim = u16::try_from(self.head_dim).map_err(candle_core::Error::wrap)?;
+        let scale = 1.0_f32 / f32::from(head_dim).sqrt();
         #[cfg(feature = "internal-golden")]
         if let Some(trace) = trace.as_deref_mut() {
-            use crate::attention::flash_attn::{
-                PAGED_WINDOW_LEFT, PAGED_WINDOW_RIGHT, PREFILL_CAUSAL,
-            };
+            use crate::attention::math::{PAGED_WINDOW_LEFT, PAGED_WINDOW_RIGHT, PREFILL_CAUSAL};
             let unpaged = logical.is_prefill && !logical.uses_paged_kv();
             trace
                 .record_attention(crate::golden_capture::layer_trace::AttentionCall {
@@ -263,9 +265,9 @@ impl Qwen3Attention {
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
         }
         let out = if logical.is_prefill && !logical.uses_paged_kv() {
-            crate::attention::flash_attn::prefill_attn(q, k, v, prepared, scale)?
+            crate::attention::math::prefill_attn(q, k, v, prepared, scale)?
         } else {
-            crate::attention::flash_attn::paged_attn(q, &kc, &vc, prepared, scale, bs)?
+            crate::attention::math::paged_attn(q, &kc, &vc, prepared, scale, bs)?
         };
         let n = out.dim(0)?;
         #[cfg(feature = "internal-golden")]
@@ -397,7 +399,8 @@ impl Qwen3Model {
         positions: &Tensor,
         prepared: &PreparedAttention,
     ) -> CandleResult<Tensor> {
-        let mut hidden = self.embed_tokens.forward(input_ids)?;
+        let mut hidden = prepared.pad_queries(&self.embed_tokens.forward(input_ids)?)?;
+        let padded_positions = prepared.pad_queries(positions)?;
         #[cfg(feature = "internal-golden")]
         let mut trace = self
             .layer_trace
@@ -415,7 +418,7 @@ impl Qwen3Model {
         let mut residual: Option<Tensor> = None;
         for (_layer_index, layer) in self.layers.iter().enumerate() {
             let (out, res) = layer.forward(
-                positions,
+                &padded_positions,
                 &hidden,
                 residual.as_ref(),
                 prepared,
@@ -447,7 +450,7 @@ impl Qwen3Model {
                 .and_then(|()| trace.finish())
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
         }
-        Ok(hidden)
+        prepared.unpad_queries(&hidden)
     }
 }
 
@@ -507,7 +510,7 @@ impl Qwen3ForCausalLM {
             head_dim: config.head_dim(),
             dtype,
         })));
-        let attn_ctx = AttentionContext::new(paged_kv);
+        let attn_ctx = AttentionContext::new_with_query_heads(paged_kv, config.num_attention_heads);
         let model = Box::new(Qwen3ForCausalLM::from_vb(
             vb,
             &config,

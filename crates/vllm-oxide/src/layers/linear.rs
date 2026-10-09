@@ -93,6 +93,22 @@ impl<P: ParallelStyle> Linear<P> {
         &self.weight
     }
 
+    /// Evaluate a logical projection independently while retaining packed
+    /// checkpoint storage. Slicing a fused GEMM's output can round differently
+    /// from this GEMM geometry; optional bias uses the same output range.
+    pub(crate) fn forward_range(&self, x: &Tensor, start: usize, width: usize) -> Result<Tensor> {
+        let total = self.weight.dim(0)?;
+        if width == 0 || start.checked_add(width).is_none_or(|end| end > total) {
+            candle_core::bail!("linear output range is empty or out of bounds")
+        }
+        let weight = self.weight.narrow(0, start, width)?;
+        let output = x.matmul(&weight.t()?)?;
+        match &self.bias {
+            Some(bias) => output.broadcast_add(&bias.narrow(0, start, width)?),
+            None => Ok(output),
+        }
+    }
+
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
     }
@@ -363,6 +379,28 @@ mod tests {
 
     mod forward {
         use super::*;
+
+        #[test]
+        fn independent_output_range_preserves_its_bias_and_rejects_invalid_ranges() {
+            let weight =
+                Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0, 2.0, 3.0], (3, 2), &Device::Cpu)
+                    .unwrap();
+            let bias = Tensor::from_vec(vec![11.0f32, 13.0, 17.0], 3, &Device::Cpu).unwrap();
+            let projection = Linear::<QkvMerged>::from_parts(weight, Some(bias));
+            let input =
+                Tensor::from_vec(vec![2.0f32, 3.0, 5.0, 7.0], (2, 2), &Device::Cpu).unwrap();
+            assert_eq!(
+                projection
+                    .forward_range(&input, 1, 2)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap(),
+                vec![vec![16.0, 30.0], vec![20.0, 48.0]]
+            );
+            for (start, width) in [(0, 0), (3, 1), (2, 2), (usize::MAX, 1)] {
+                assert!(projection.forward_range(&input, start, width).is_err());
+            }
+        }
 
         #[test]
         fn row_forward_applies_matmul_without_bias() {
