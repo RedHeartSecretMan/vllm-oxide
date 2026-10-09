@@ -789,6 +789,7 @@ def _evaluate(
     result.update(
         source=source,
         registry_sha256=registry_sha,
+        confirmation_cohorts=[cohort.model_dump() for cohort in registry.confirmation_cohorts],
         policy_sha256=policy_sha,
         manifest_sha256=sha(manifest_path),
         coverage=coverage,

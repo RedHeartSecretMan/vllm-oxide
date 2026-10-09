@@ -67,10 +67,21 @@ class BehaviorCase(BaseModel):
     engine_options: dict[str, Any] = Field(default_factory=dict)
 
 
+class ConfirmationCohort(BaseModel):
+    """A frozen role for complete confirmation groups, without relabeling cases."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    cohort_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    role: Literal["regression", "independent"]
+    execution_groups: list[str] = Field(default_factory=list)
+    behavior_cases: list[str] = Field(default_factory=list)
+
+
 class Registry(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol: Literal["layered-accuracy-v1"]
-    schema_version: Literal[2]
+    schema_version: Literal[3]
+    confirmation_cohorts: list[ConfirmationCohort] = Field(default_factory=list)
     numerical_cases: list[NumericalCase] = Field(min_length=1)
     operator_profiles: list[OperatorProfile] = Field(min_length=1)
     behavior_cases: list[BehaviorCase] = Field(min_length=1)
@@ -112,6 +123,52 @@ class Registry(BaseModel):
         return self
 
 
+def _independent_confirmation(registry: Registry) -> tuple[set[str], set[str]]:
+    groups = {
+        group.plan.execution_group_id
+        for group in registry.numerical_cases
+        if group.split == "confirmation"
+    }
+    behaviors = {case.case_id for case in registry.behavior_cases if case.split == "confirmation"}
+    if not groups and not behaviors:
+        if registry.confirmation_cohorts:
+            raise ValueError("confirmation cohorts have no registered cases")
+        return set(), set()
+    cohorts = registry.confirmation_cohorts
+    if (
+        not cohorts
+        or len({cohort.cohort_id for cohort in cohorts}) != len(cohorts)
+        or sum(cohort.role == "independent" for cohort in cohorts) != 1
+    ):
+        raise ValueError("confirmation requires unique cohorts and exactly one independent cohort")
+    group_owners: dict[str, str] = {}
+    behavior_owners: dict[str, str] = {}
+    for cohort in cohorts:
+        if not cohort.execution_groups and not cohort.behavior_cases:
+            raise ValueError("empty confirmation cohort")
+        for names, owners in (
+            (cohort.execution_groups, group_owners),
+            (cohort.behavior_cases, behavior_owners),
+        ):
+            for name in names:
+                if name in owners:
+                    raise ValueError("duplicate confirmation cohort member")
+                owners[name] = cohort.cohort_id
+    if set(group_owners) != groups or set(behavior_owners) != behaviors:
+        raise ValueError("confirmation cohort coverage differs from registered cases")
+    for case in registry.behavior_cases:
+        if case.split != "confirmation":
+            continue
+        linked = case.scenario.get("execution_groups", [])
+        if not isinstance(linked, list) or any(
+            not isinstance(group, str) or group_owners.get(group) != behavior_owners[case.case_id]
+            for group in linked
+        ):
+            raise ValueError("confirmation behavior borrows another cohort's execution group")
+    active = next(cohort for cohort in cohorts if cohort.role == "independent")
+    return set(active.execution_groups), set(active.behavior_cases)
+
+
 def _check_confirmation_independence(registry: Registry) -> None:
     """Reject possible reuse even when a prior unforced continuation is unknown.
 
@@ -119,9 +176,8 @@ def _check_confirmation_independence(registry: Registry) -> None:
     be disjoint. This includes every setup and successful public call, rather
     than only checking the fixed continuation rows or changing case identifiers.
     """
-    if not any(group.split == "confirmation" for group in registry.numerical_cases) and not any(
-        case.split == "confirmation" for case in registry.behavior_cases
-    ):
+    fresh_groups, fresh_behaviors = _independent_confirmation(registry)
+    if not fresh_groups and not fresh_behaviors:
         return
     from golden_gen.behavior_verification import BehaviorScenario
 
@@ -130,7 +186,11 @@ def _check_confirmation_independence(registry: Registry) -> None:
         for plan in [*group.setup_calls, group.plan]:
             for member in plan.members:
                 ranges[
-                    (group.split == "confirmation", tuple(member.prompt), len(member.continuation))
+                    (
+                        group.plan.execution_group_id in fresh_groups,
+                        tuple(member.prompt),
+                        len(member.continuation),
+                    )
                 ] = member.case_id
     for case in registry.behavior_cases:
         if case.mode not in ("free_generation", "unforced_control"):
@@ -144,9 +204,9 @@ def _check_confirmation_independence(registry: Registry) -> None:
             for public_prompt, params in zip(call.prompts, call.params, strict=True):
                 if not public_prompt or params.max_tokens <= 0:
                     raise ValueError("successful public call has no prediction history")
-                ranges[(case.split == "confirmation", tuple(public_prompt), params.max_tokens)] = (
-                    case.case_id
-                )
+                ranges[
+                    (case.case_id in fresh_behaviors, tuple(public_prompt), params.max_tokens)
+                ] = case.case_id
     observed = [
         (prompt, steps, name) for (fresh, prompt, steps), name in ranges.items() if not fresh
     ]

@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "a0f8cbcc9bbc49a2cfea7adec1a432d7ff2a566d"
+      "blob_oid": "cb761fc9f4efddcb6329b761ec5b15c9f07b9ba4"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -95,11 +95,11 @@
     },
     {
       "path": "docs/validation/layered-accuracy-cases.json",
-      "blob_oid": "cbf4b90e0a2ad2beb35e0a60823765cd26bb0401"
+      "blob_oid": "eb5fd882b487f6a24d50bb76fda5828b1de47941"
     },
     {
       "path": "docs/validation/layered-accuracy-contract.md",
-      "blob_oid": "dcf41e579c5d21e73066a08bb1df5b3175a735d9"
+      "blob_oid": "5888afb610a1ec2881359227f5563bbab9ca2224"
     },
     {
       "path": "docs/validation/layered-release-assets.md",
@@ -111,7 +111,7 @@
     },
     {
       "path": "docs/validation/layered-supervision-policy.json",
-      "blob_oid": "65d39045c996e3fde92db6e4065b093513535b1e"
+      "blob_oid": "db425d685f416038814e189642f2fdb83d40ed57"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
@@ -144,6 +144,10 @@
     {
       "path": "docs/adr/0026-approve-independent-confirmation.md",
       "blob_oid": "f597ab69bd2abe61b017befcd4d825cdfaca5856"
+    },
+    {
+      "path": "docs/adr/0027-proposed-confirmation-renewal.md",
+      "blob_oid": "879b5d7d9261777b39a05ab68cf4c043f5b746b7"
     }
   ]
 }

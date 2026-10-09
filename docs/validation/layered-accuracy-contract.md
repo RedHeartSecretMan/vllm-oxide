@@ -284,3 +284,26 @@ continuation，还排除相容 prompt 前缀下可能重叠的预测历史长度
 这份清单尚待审核批准，未获取 confirmation 模型输出。现有预算政策仍绑定旧注册表，
 新数值和行为采集保持 sealed。原参考精度与所有预算值不变；新测量源码和注册表须
 取得自己的完整 CPU、校准及故障证据，再绑定审核后的清单和来源后才能打开新验收。
+
+
+## Confirmation cohorts after a diagnosed failure
+
+A confirmation failure used for diagnosis remains in the original evidence and
+in every subsequent mandatory regression inventory. Its case objects, splits,
+inputs, options and owner identities are preserved. A new independent sample
+requires a separately reviewed Definition Checkpoint before any model output is
+observed; rerunning a repaired observed case cannot be called unseen acceptance.
+
+Registry schema3 declares complete, disjoint confirmation cohorts with one
+independent cohort and any retained regression cohorts. These are roles at the
+frozen checkpoint, not verdicts and not an option to omit older evidence. Only
+the independent cohort supplies new holdout evidence. Its numerical, setup and
+successful public-call prediction histories must be disjoint from all prior
+cases, including earlier confirmation cohorts. Cohort membership, linked behavior
+owners and all required owner counts are validated before GPU execution.
+
+The active numerical policy must bind the whole proposed registry and its actual
+new calibration/fault evidence. An old registry approval leaves both numerical
+and behavior confirmation collection sealed. The authoritative gate requires
+all cohorts to pass and reports their frozen roles; policy, source, replay,
+resource and publication gates remain unchanged.

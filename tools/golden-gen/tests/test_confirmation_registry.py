@@ -16,19 +16,21 @@ def registry_data() -> dict:
     return json.loads((ROOT / "docs/validation/layered-accuracy-cases.json").read_text())
 
 
-def test_confirmation_preserves_all_original_registry_content_and_adds_130_owners() -> None:
+def test_confirmation_preserves_all_original_registry_content_and_both_cohorts() -> None:
     data = registry_data()
     registry = Registry.model_validate(data)
-    assert len(frozen_owner_inventory(registry, authoritative=True)) == 617
+    assert len(frozen_owner_inventory(registry, authoritative=True)) == 747
     assert len(frozen_owner_inventory(registry, authoritative=False)) == 132
     for key in ("numerical_cases", "behavior_cases"):
         data[key] = [case for case in data[key] if case["split"] != "confirmation"]
     for key in ("literal_sources", "member_prompt_literals", "expected_counts"):
-        del data[key]["confirmation"]
+        data[key].pop("confirmation")
+        data[key].pop("confirmation2", None)
+    del data["confirmation_cohorts"]
     data["case_sources"] = {
         key: value
         for key, value in data["case_sources"].items()
-        if not key.startswith("confirmation-")
+        if not key.startswith(("confirmation-", "confirmation2-"))
     }
     del data["protocol_rules"]["independence_rule"]
     data["schema_version"] = 1
@@ -48,7 +50,11 @@ def test_confirmation_rejects_renamed_reuse_of_an_unforced_history() -> None:
     )
     prior = old_eos["scenario"]["calls"][0]
     assert prior["params"][0]["max_tokens"] > 1
-    fresh = next(case for case in data["numerical_cases"] if case["split"] == "confirmation")
+    fresh = next(
+        case
+        for case in data["numerical_cases"]
+        if case["plan"]["execution_group_id"].startswith("confirmation2-")
+    )
     # Not a frozen fixed-prefix row: this could be a prior unforced continuation.
     fresh["plan"]["members"][0]["prompt"] = prior["prompts"][0] + [1234]
     with pytest.raises(ValueError, match="confirmation may reuse observed prediction history"):
@@ -61,16 +67,17 @@ def test_confirmation_public_call_cannot_reuse_an_observed_numerical_prompt() ->
     fresh = next(
         case
         for case in data["behavior_cases"]
-        if case["case_id"] == "confirmation-behavior-repeated"
+        if case["case_id"] == "confirmation2-behavior-repeated"
     )
     fresh["scenario"]["calls"][0]["prompts"][0] = prior["plan"]["members"][0]["prompt"]
     with pytest.raises(ValueError, match="confirmation may reuse observed prediction history"):
         Registry.model_validate(data)
 
 
-def test_confirmation_owner_omission_is_not_an_optional_report() -> None:
+@pytest.mark.parametrize("index", [0, -1])
+def test_confirmation_owner_omission_is_not_an_optional_report(index: int) -> None:
     data = registry_data()
-    data["expected_counts"]["confirmation"]["owner_inventory"].pop()
+    data["expected_counts"]["confirmation"]["owner_inventory"].pop(index)
     with pytest.raises(ValueError, match="owner inventory"):
         frozen_owner_inventory(Registry.model_validate(data), authoritative=True)
 
@@ -83,7 +90,12 @@ def test_old_passing_cases_cannot_satisfy_confirmation_release_evidence() -> Non
     old_cases = [
         dict(protocol="layered-accuracy-v1", case_id=member.case_id, verdict="PASS")
         for group in registry.numerical_cases
-        if group.split != "confirmation"
+        if group.plan.execution_group_id
+        not in next(
+            cohort.execution_groups
+            for cohort in registry.confirmation_cohorts
+            if cohort.role == "independent"
+        )
         for member in group.plan.members
     ]
     result = release_verdict(registry, policy, old_cases, [], [])
@@ -102,7 +114,7 @@ def test_confirmation_stays_sealed_when_policy_targets_the_observed_registry(
     digest = hashlib.sha256((ROOT / REGISTRY_PATH).read_bytes()).hexdigest()
     policy = json.loads((ROOT / POLICY_PATH).read_text())
     # Explicitly simulate the previously approved binding, not a new approval.
-    policy["registry_sha256"] = "88f89084fe7b0c14a877c4c72f275314ad2a8e593d6fbc3ac63a194b91fb98f4"
+    policy["registry_sha256"] = "c5348a64b1f5f10d067836f1855836fb94e52722e7181aa53be7eb6fd08f474d"
     monkeypatch.setattr(
         layered_cli,
         "definition_document",
@@ -110,9 +122,9 @@ def test_confirmation_stays_sealed_when_policy_targets_the_observed_registry(
     )
     with pytest.raises(ValueError, match="remain.*sealed"):
         if auxiliary:
-            layered_cli._auxiliary_definition(ROOT, "confirmation-behavior-repeated")
+            layered_cli._auxiliary_definition(ROOT, "confirmation2-behavior-repeated")
         else:
-            layered_cli._group(ROOT, "confirmation-length-1")
+            layered_cli._group(ROOT, "confirmation2-length-1")
 
 
 def test_confirmation_behavior_only_still_rejects_reused_history() -> None:
@@ -121,7 +133,7 @@ def test_confirmation_behavior_only_still_rejects_reused_history() -> None:
     data["behavior_cases"] = [
         b
         for b in data["behavior_cases"]
-        if b["split"] != "confirmation" or b["case_id"] == "confirmation-behavior-repeated"
+        if b["split"] != "confirmation" or b["case_id"] == "confirmation2-behavior-repeated"
     ]
     prior = next(g for g in data["numerical_cases"] if g["split"] == "calibration")
     fresh = next(b for b in data["behavior_cases"] if b["split"] == "confirmation")
@@ -138,6 +150,14 @@ def test_confirmation_behavior_only_still_rejects_reused_history() -> None:
         ],
         unique_gpu_owners=2,
     )
+    data["confirmation_cohorts"] = [
+        dict(
+            cohort_id="behavior-only",
+            role="independent",
+            execution_groups=[],
+            behavior_cases=[fresh["case_id"]],
+        )
+    ]
     data["auxiliary_operators"]["total_unique_gpu_owners_including_groups_and_public"] = 489
     assert len(frozen_owner_inventory(Registry.model_validate(data), authoritative=True)) == 489
     fresh["scenario"]["calls"][0]["prompts"][0] = prior["plan"]["members"][0]["prompt"]

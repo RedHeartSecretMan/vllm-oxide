@@ -26,7 +26,7 @@ def test_frozen_owner_inventory_rejects_missing_owner_without_double_counting_sh
     ]
     data = dict(
         protocol="layered-accuracy-v1",
-        schema_version=2,
+        schema_version=3,
         numerical_cases=[
             dict(
                 split="calibration",
