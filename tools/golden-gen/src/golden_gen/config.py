@@ -23,7 +23,7 @@ CANDLE_REVISION = "27f20fea993c81ea6d32ce44018f42b68466525e"
 REFERENCE_KERNEL_PATH = "transformers-4.57.6/torch-2.10.0/fp32-gemm-reduction/sdpa-math"
 BASELINE_KERNEL_PATH = "vllm-0.18.1/flash-attn-v2/eager/inproc-scheduler"
 CANDIDATE_KERNEL_PATH = (
-    "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2+call-layout-v1"
+    "vllm-oxide/candle-27f20fea993c81ea6d32ce44018f42b68466525e/fp32-gemm-reduction+causal-math-v2+call-layout-v2"
 )
 COMPARISON_KERNEL_SCOPE = f"{REFERENCE_KERNEL_PATH}::vs::{CANDIDATE_KERNEL_PATH}"
 CANONICAL_MAX_TOKENS = 64

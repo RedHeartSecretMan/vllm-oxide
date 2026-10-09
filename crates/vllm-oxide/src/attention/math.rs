@@ -72,7 +72,17 @@ fn dense(
     let mut outputs = Vec::new();
     for start in (0..queries).step_by(chunk) {
         let count = (queries - start).min(chunk);
-        let scores = query.narrow(1, start, count)?.matmul(&key)?;
+        let input = query.narrow(1, start, count)?;
+        let rows = super::math_layout::score_rows(queries, keys, count);
+        let scores = if rows > count {
+            let zeros = Tensor::zeros((batch * heads, rows - count, dim), DType::F32, q.device())?;
+            Tensor::cat(&[&input, &zeros], 1)?
+                .matmul(&key)?
+                .narrow(1, 0, count)?
+                .contiguous()?
+        } else {
+            input.matmul(&key)?
+        };
         let probabilities = math_ops::softmax(
             &scores,
             prepared,
@@ -256,7 +266,7 @@ mod tests {
             &device,
             Some(MathLimits {
                 max_query_tokens: 3,
-                workspace_bytes: 2700,
+                workspace_bytes: 16 * 1024,
                 ..limits
             }),
         )
@@ -374,5 +384,84 @@ mod long_tests {
                 .unwrap(),
             values
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod causal_layout_regressions {
+    use super::*;
+    use crate::attention::math_layout::MathLimits;
+    use crate::attention::metadata::build_continued_prefill_metadata;
+    use crate::attention::AttentionEpoch;
+    use candle_core::Device;
+    use half::bf16;
+
+    #[test]
+    #[ignore = "requires a guarded CUDA owner"]
+    fn cuda_causal_suffix_query_matches_full_prefill_rounding() {
+        const QUERIES: usize = 3;
+        const KEYS: usize = 257;
+        const HEADS: usize = 16;
+        const KV_HEADS: usize = 8;
+        const DIM: usize = 128;
+        let decode = |bytes: &[u8], count| {
+            assert_eq!(bytes.len(), 2 * count);
+            bytes
+                .chunks_exact(2)
+                .map(|v| bf16::from_bits(u16::from_le_bytes([v[0], v[1]])))
+                .collect::<Vec<_>>()
+        };
+        let q = decode(
+            include_bytes!("../llm/test_data/query-suffix-q.bf16"),
+            QUERIES * DIM,
+        );
+        let k = decode(
+            include_bytes!("../llm/test_data/query-suffix-k.bf16"),
+            KEYS * DIM,
+        );
+        let v = decode(
+            include_bytes!("../llm/test_data/query-suffix-v.bf16"),
+            KEYS * DIM,
+        );
+        let mut queries = vec![bf16::ZERO; QUERIES * HEADS * DIM];
+        let mut keys = vec![bf16::ZERO; 2 * 256 * KV_HEADS * DIM];
+        let mut values = keys.clone();
+        for row in 0..QUERIES {
+            queries[(row * HEADS + 4) * DIM..(row * HEADS + 5) * DIM]
+                .copy_from_slice(&q[row * DIM..(row + 1) * DIM]);
+        }
+        for row in 0..KEYS {
+            keys[(row * KV_HEADS + 2) * DIM..(row * KV_HEADS + 3) * DIM]
+                .copy_from_slice(&k[row * DIM..(row + 1) * DIM]);
+            values[(row * KV_HEADS + 2) * DIM..(row * KV_HEADS + 3) * DIM]
+                .copy_from_slice(&v[row * DIM..(row + 1) * DIM]);
+        }
+        let device = Device::new_cuda(0).unwrap();
+        let query = Tensor::from_vec(queries, (QUERIES, HEADS, DIM), &device).unwrap();
+        let key = Tensor::from_vec(keys, (2, 256, KV_HEADS, DIM), &device).unwrap();
+        let value = Tensor::from_vec(values, (2, 256, KV_HEADS, DIM), &device).unwrap();
+        let metadata =
+            build_continued_prefill_metadata(&[3], &[257], &[vec![0, 1]], &[254, 255, 256]);
+        let prepared = PreparedAttention::prepare_with_limits(
+            AttentionEpoch::StepPlan(1),
+            metadata,
+            &device,
+            Some(MathLimits {
+                query_heads: HEADS,
+                kv_heads: KV_HEADS,
+                head_dim: DIM,
+                block_size: 256,
+                num_blocks: 2,
+                max_query_tokens: 128,
+                workspace_bytes: 64 * 1024 * 1024,
+            }),
+        )
+        .unwrap();
+        let output = paged_attn(&query, &key, &value, &prepared, 0.088_388_346, 256).unwrap();
+        assert_eq!(output.dims(), [QUERIES, HEADS, DIM]);
+        let bits = output.flatten_all().unwrap().to_vec1::<bf16>().unwrap();
+        // Captured full-prefill result. The unpadded three-query path is 0xbcd5.
+        assert_eq!(bits[4 * DIM + 52].to_bits(), 0xbcd4);
     }
 }
