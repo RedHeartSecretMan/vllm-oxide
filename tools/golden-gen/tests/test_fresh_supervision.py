@@ -126,7 +126,7 @@ def test_fresh_policy_cannot_smuggle_retained_authority(tmp_path, monkeypatch, f
         retained_owner_count=0,
     )
     for key in ("retained_ledger_sha256", "retained_index_start", "retained_index_end_inclusive"):
-        policy.pop(key)
+        policy.pop(key, None)
 
     def definition(_repo, path):
         if path == supervision.POLICY_PATH:
