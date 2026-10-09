@@ -31,6 +31,9 @@ struct Cli {
     operator_plan: Option<PathBuf>,
     #[arg(long, conflicts_with_all = ["plan", "operator_plan", "control", "setup_plan"])]
     behavior_plan: Option<PathBuf>,
+    /// Non-accepting, bounded single-request layer diagnostics.
+    #[arg(long, requires = "plan", conflicts_with_all = ["operator_plan", "behavior_plan", "control", "setup_plan"])]
+    layer_trace_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -183,6 +186,34 @@ fn main() -> Result<()> {
         );
     }
     vllm_oxide_test::measurement::validate_release_model(&cli.model_path)?;
+    if let Some(directory) = &cli.layer_trace_dir {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let plan = target
+            .as_ref()
+            .context("layer trace requires a replay plan")?;
+        if plan.members.len() != 1
+            || plan.members[0].continuation.len() > 64
+            || plan.members[0].prompt.len() + plan.members[0].continuation.len() - 1 > 1024
+        {
+            bail!(
+                "layer trace requires one request, at most 64 predictions and 1024 executed tokens"
+            );
+        }
+        std::fs::DirBuilder::new().mode(0o700).create(directory)?;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(directory.join("rust"))?;
+        let member = &plan.members[0];
+        std::fs::write(
+            directory.join("request.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "prompt_id":"fixed_prefix", "token_ids":member.prompt,
+                "decode_tokens":&member.continuation[..member.continuation.len()-1]
+            }))?,
+        )?;
+        std::env::set_var("VLLM_OXIDE_INTERNAL_LAYER_TRACE_DIR", directory);
+    }
     let mut llm = LLM::new(Source::Local(cli.model_path), options)?;
     if let Some(plan) = cli.operator_plan {
         std::env::remove_var("VLLM_OXIDE_INTERNAL_FIXED_PREFIX_PLAN");
@@ -249,11 +280,12 @@ fn main() -> Result<()> {
             .collect::<Vec<_>>();
         llm.generate(&prompts, &params)?;
     }
-    println!(
-        "{}",
-        serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
+    let mut evidence = serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
         "source":{"commit":cli.measurement_commit,"tree":cli.measurement_tree},
-        "producer_pid":std::process::id(),"build_source_id":env!("VLLM_OXIDE_BUILD_SOURCE_ID"),"cuda_feature_enabled":cfg!(feature="cuda")})
-    );
+        "producer_pid":std::process::id(),"build_source_id":env!("VLLM_OXIDE_BUILD_SOURCE_ID"),"cuda_feature_enabled":cfg!(feature="cuda")});
+    if cli.layer_trace_dir.is_some() {
+        evidence["diagnostic_only"] = serde_json::Value::Bool(true);
+    }
+    println!("{evidence}");
     Ok(())
 }

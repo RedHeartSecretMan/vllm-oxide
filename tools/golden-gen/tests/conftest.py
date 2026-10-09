@@ -35,5 +35,6 @@ def ticket_artifact_root(tmp_path: Path):
     root = (
         Path("/tmp/vllm-oxide-dag-v0.2.0/t45-artifacts") / f"{tmp_path.parent.name}-{tmp_path.name}"
     )
+    root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     yield root
     shutil.rmtree(root, ignore_errors=True)

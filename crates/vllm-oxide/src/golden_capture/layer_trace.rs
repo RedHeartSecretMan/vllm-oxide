@@ -23,6 +23,11 @@ const REGRESSION11_PROMPT: [u32; 54] = [
 #[derive(Deserialize)]
 #[serde(tag = "prompt_id", deny_unknown_fields)]
 enum Request {
+    #[serde(rename = "fixed_prefix")]
+    FixedPrefix {
+        token_ids: Vec<u32>,
+        decode_tokens: Vec<u32>,
+    },
     #[serde(rename = "canonical_03")]
     Canonical03 {
         token_ids: Vec<u32>,
@@ -39,6 +44,18 @@ impl Request {
     fn parse(bytes: &str) -> Result<Self> {
         let request: Self = serde_json::from_str(bytes)?;
         let valid = match &request {
+            Self::FixedPrefix {
+                token_ids,
+                decode_tokens,
+            } => {
+                !token_ids.is_empty()
+                    && token_ids.len() + decode_tokens.len() <= 1024
+                    && decode_tokens.len() < 64
+                    && token_ids
+                        .iter()
+                        .chain(decode_tokens)
+                        .all(|&id| id < 151_936)
+            }
             Self::Canonical03 {
                 token_ids,
                 decode_token,
@@ -59,6 +76,7 @@ impl Request {
 
     fn prompt_id(&self) -> &'static str {
         match self {
+            Self::FixedPrefix { .. } => "fixed_prefix",
             Self::Canonical03 { .. } => "canonical_03",
             Self::Regression11 { .. } => "regression_11",
         }
@@ -66,14 +84,18 @@ impl Request {
 
     fn token_ids(&self) -> &[u32] {
         match self {
-            Self::Canonical03 { token_ids, .. } | Self::Regression11 { token_ids, .. } => token_ids,
+            Self::Canonical03 { token_ids, .. }
+            | Self::Regression11 { token_ids, .. }
+            | Self::FixedPrefix { token_ids, .. } => token_ids,
         }
     }
 
     fn decode_tokens(&self) -> &[u32] {
         match self {
             Self::Canonical03 { decode_token, .. } => std::slice::from_ref(decode_token),
-            Self::Regression11 { decode_tokens, .. } => decode_tokens,
+            Self::Regression11 { decode_tokens, .. } | Self::FixedPrefix { decode_tokens, .. } => {
+                decode_tokens
+            }
         }
     }
 }
@@ -104,7 +126,14 @@ impl LayerTrace {
     }
 
     pub(crate) fn begin(&self, tokens: &Tensor, positions: &Tensor) -> Result<Option<StepTrace>> {
-        self.begin_capture(std::env::var_os(super::CALL_ID_ENV), tokens, positions)
+        let active_call = std::env::var_os(super::CALL_ID_ENV).or_else(|| {
+            if matches!(&self.request, Request::FixedPrefix { .. }) {
+                std::env::var_os(super::fixed_prefix::OUTPUT_ENV)
+            } else {
+                None
+            }
+        });
+        self.begin_capture(active_call, tokens, positions)
     }
 
     fn begin_capture(
@@ -364,6 +393,35 @@ impl AttentionCall {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_prefix_trace_preserves_exact_history_and_stops_at_its_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = Request::parse(
+            r#"{"prompt_id":"fixed_prefix","token_ids":[17,18],"decode_tokens":[19,20]}"#,
+        )
+        .unwrap();
+        let trace = LayerTrace::new(directory.path().to_path_buf(), request);
+        trace.begin_values(&[17, 18], &[0, 1]).unwrap();
+        assert!(trace.begin_values(&[20], &[2]).is_err());
+        assert!(trace.begin_values(&[19], &[3]).is_err());
+        trace.begin_values(&[19], &[2]).unwrap();
+        trace.begin_values(&[20], &[3]).unwrap();
+        assert!(trace.begin_values(&[21], &[4]).is_err());
+
+        for (tokens, continuation) in [
+            (vec![], vec![1]),
+            (vec![151_936], vec![]),
+            (vec![1], vec![151_936]),
+            (vec![1], vec![2; 64]),
+            (vec![1; 1024], vec![2]),
+        ] {
+            let request = serde_json::json!({
+                "prompt_id":"fixed_prefix", "token_ids":tokens, "decode_tokens":continuation
+            });
+            assert!(Request::parse(&request.to_string()).is_err());
+        }
+    }
     use candle_core::{DType, Device};
 
     #[test]
