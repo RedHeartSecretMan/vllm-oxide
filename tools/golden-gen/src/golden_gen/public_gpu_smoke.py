@@ -89,7 +89,7 @@ def collect(repo: Path, model: Path, output: Path) -> Path:
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "CARGO_NET_OFFLINE": "true",
-        "CARGO_BUILD_JOBS": "2",
+        "CARGO_BUILD_JOBS": "1",
         "RUSTFLAGS": "",
         "CARGO_ENCODED_RUSTFLAGS": "",
         "QWEN3_MODEL_DIR": str(model),
