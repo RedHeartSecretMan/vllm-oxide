@@ -343,13 +343,14 @@ impl LLM {
                 "cold_prefix_state":self.engine.kv_cache_manager.diagnostic_is_cold()
             }))?;
         }
-        let mut request_ids = Vec::with_capacity(prompts.len());
         #[cfg(feature = "internal-golden")]
         let admission = Instant::now();
-        for (token_ids, params) in tokenized_prompts.into_iter().zip(sampling_params.iter()) {
-            let request_id = self.engine.add_request(token_ids, params.clone());
-            request_ids.push(request_id);
-        }
+        let request_ids = self.engine.add_requests(
+            tokenized_prompts
+                .into_iter()
+                .zip(sampling_params.iter().cloned())
+                .collect(),
+        )?;
         #[cfg(feature = "internal-golden")]
         if let Err(error) = crate::golden_capture::behavior::record_binding(
             &request_ids,
@@ -744,6 +745,8 @@ mod tests {
     struct CausalFingerprintControls {
         fail_next: Arc<AtomicBool>,
         seen_metadata: Arc<Mutex<Vec<AttnMetadata>>>,
+        call_events: Arc<Mutex<Vec<Option<usize>>>>,
+        forward_call_sizes: Arc<Mutex<Vec<usize>>>,
     }
 
     impl CausalFingerprintControls {
@@ -757,6 +760,7 @@ mod tests {
         attn_ctx: AttentionContext,
         physical_tokens: HashMap<usize, u32>,
         controls: CausalFingerprintControls,
+        call_size: Option<usize>,
     }
 
     fn cached_token_at(
@@ -791,11 +795,26 @@ mod tests {
     }
 
     impl CausalLM for CausalFingerprintModel {
+        fn begin_generation(&mut self, count: usize) {
+            assert!(self.call_size.replace(count).is_none());
+            self.controls.call_events.lock().unwrap().push(Some(count));
+        }
+
+        fn end_generation(&mut self) {
+            self.call_size = None;
+            self.controls.call_events.lock().unwrap().push(None);
+        }
+
         fn forward(
             &mut self,
             input_ids: &Tensor,
             positions: &Tensor,
         ) -> candle_core::Result<Tensor> {
+            self.controls
+                .forward_call_sizes
+                .lock()
+                .unwrap()
+                .push(self.call_size.unwrap());
             let metadata = self
                 .attn_ctx
                 .prepared_for_bound_consumer()?
@@ -1205,6 +1224,8 @@ mod tests {
         let controls = CausalFingerprintControls {
             fail_next: Arc::new(AtomicBool::new(false)),
             seen_metadata: Arc::new(Mutex::new(Vec::new())),
+            call_events: Arc::new(Mutex::new(Vec::new())),
+            forward_call_sizes: Arc::new(Mutex::new(Vec::new())),
         };
         let scheduler = Scheduler::new(max_num_batched_tokens, max_num_seqs, 0.9);
         let kv_cache_manager = KvCacheManager::new_with_prefix_cache(
@@ -1218,6 +1239,7 @@ mod tests {
             attn_ctx: attn_ctx.clone(),
             physical_tokens: HashMap::new(),
             controls: controls.clone(),
+            call_size: None,
         });
         let engine = EngineCore::new(
             scheduler,
@@ -1614,6 +1636,75 @@ mod tests {
 
     mod continuous_batching {
         use super::*;
+
+        #[test]
+        fn generation_context_survives_waiting_and_resets_between_calls() {
+            let (mut llm, controls) = causal_fingerprint_test_harness(4, 2, true);
+            let prompts = [
+                Prompt::TokenIds(vec![2]),
+                Prompt::TokenIds(vec![7]),
+                Prompt::TokenIds(vec![11, 13, 17, 19, 23]),
+            ];
+            let params = [
+                deterministic_causal_params(1),
+                deterministic_causal_params(6),
+                deterministic_causal_params(2),
+            ];
+            llm.generate(&prompts, &params).unwrap();
+            let sizes = std::mem::take(&mut *controls.forward_call_sizes.lock().unwrap());
+            assert!(sizes.len() >= 6);
+            assert!(sizes.iter().all(|&count| count == 3));
+            let metadata = controls.take_metadata();
+            assert!(metadata.iter().any(|m| m.cu_seqlens_q.len() == 3));
+            assert_eq!(metadata.last().unwrap().cu_seqlens_q.len(), 2);
+            assert_eq!(*controls.call_events.lock().unwrap(), vec![Some(3), None]);
+
+            // Rejected and empty calls do not begin a model execution scope.
+            assert!(llm.generate(&prompts, &params[..1]).is_err());
+            assert!(llm
+                .generate(&[Prompt::TokenIds(vec![])], &params[..1])
+                .is_err());
+            assert!(llm
+                .generate(
+                    &prompts[..1],
+                    &[SamplingParams {
+                        max_tokens: 0,
+                        ..SamplingParams::default()
+                    }]
+                )
+                .is_err());
+            assert!(llm.generate(&[], &[]).unwrap().is_empty());
+            assert_eq!(*controls.call_events.lock().unwrap(), vec![Some(3), None]);
+
+            llm.generate(&[Prompt::TokenIds(vec![3, 5])], &params[..1])
+                .unwrap();
+            assert_eq!(*controls.forward_call_sizes.lock().unwrap(), vec![1]);
+            assert_eq!(
+                *controls.call_events.lock().unwrap(),
+                vec![Some(3), None, Some(1), None]
+            );
+        }
+
+        #[test]
+        fn failed_generation_ends_context_before_retry_with_a_different_batch() {
+            let (mut llm, controls) = causal_fingerprint_test_harness(4, 2, true);
+            let prompts = vec![Prompt::TokenIds(vec![2]); 9];
+            let params = vec![deterministic_causal_params(1); 9];
+            controls.fail_next.store(true, Ordering::SeqCst);
+            assert!(llm.generate(&prompts, &params).is_err());
+            assert!(!llm.engine.is_running());
+            assert_eq!(*controls.call_events.lock().unwrap(), vec![Some(9), None]);
+            assert_eq!(*controls.forward_call_sizes.lock().unwrap(), vec![9]);
+
+            let outputs = llm.generate(&prompts[..1], &params[..1]).unwrap();
+            assert_eq!(outputs.len(), 1);
+            assert!(outputs[0].finished);
+            assert_eq!(
+                *controls.call_events.lock().unwrap(),
+                vec![Some(9), None, Some(1), None]
+            );
+            assert_eq!(*controls.forward_call_sizes.lock().unwrap(), vec![9, 1]);
+        }
 
         #[test]
         fn generate_preserves_order_and_outputs_when_admission_interleaves_with_decode() {

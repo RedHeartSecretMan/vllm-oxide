@@ -88,4 +88,72 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore = "requires a guarded CUDA owner"]
+    fn cuda_generation_projection_layout_preserves_small_batch_rounding() {
+        use crate::layers::linear::{Linear, ProjectionLayout};
+        use crate::layers::parallel::Row;
+
+        const K: usize = 3072;
+        const N: usize = 1024;
+        let decode = |bytes: &[u8]| {
+            assert_eq!(bytes.len(), 2 * K);
+            bytes
+                .chunks_exact(2)
+                .map(|v| bf16::from_bits(u16::from_le_bytes([v[0], v[1]])))
+                .collect::<Vec<_>>()
+        };
+        let input = decode(include_bytes!("test_data/projection-input.bf16"));
+        let column = decode(include_bytes!("test_data/projection-weight.bf16"));
+        let device = Device::new_cuda(0).unwrap();
+        configure_fp32_reduction(&device).unwrap();
+        let weight = Tensor::from_vec(column.repeat(N), (N, K), &device).unwrap();
+        let make_input = |rows| {
+            let mut values = vec![bf16::ZERO; rows * K];
+            values[..K].copy_from_slice(&input);
+            Tensor::from_vec(values, (rows, K), &device).unwrap()
+        };
+        let bits = |x: &Tensor| x.flatten_all().unwrap().to_vec1::<bf16>().unwrap();
+        let reference = make_input(771).matmul(&weight.t().unwrap()).unwrap();
+        let small = make_input(2).matmul(&weight.t().unwrap()).unwrap();
+        assert_ne!(
+            bits(&small),
+            bits(&reference.narrow(0, 0, 2).unwrap()),
+            "fixture must expose shape-dependent rounding on the validated GPU"
+        );
+        let linear = Linear::<Row>::from_weight(weight.clone());
+        for rows in [1, 2] {
+            let x = make_input(rows);
+            let original = x.matmul(&weight.t().unwrap()).unwrap();
+            assert_eq!(
+                bits(&linear.forward(&x, ProjectionLayout::default()).unwrap()),
+                bits(&original)
+            );
+            for count in [3, 8, usize::MAX] {
+                let actual = linear
+                    .forward(&x, ProjectionLayout::for_batch(count))
+                    .unwrap();
+                assert_eq!(actual.dims(), [rows, N]);
+                assert_eq!(bits(&actual), bits(&reference.narrow(0, 0, rows).unwrap()));
+            }
+        }
+        // Packed checkpoint storage must use the same geometry for an output
+        // range and add the corresponding bias only after real rows are kept.
+        let bias = Tensor::full(bf16::from_f32(0.125), (2 * N,), &device).unwrap();
+        let packed = Linear::<Row>::from_parts(
+            Tensor::cat(&[&weight, &weight], 0).unwrap(),
+            Some(bias.clone()),
+        );
+        let actual = packed
+            .forward_range(&make_input(2), N, N, ProjectionLayout::for_batch(3))
+            .unwrap();
+        let expected = reference
+            .narrow(0, 0, 2)
+            .unwrap()
+            .broadcast_add(&bias.narrow(0, N, N).unwrap())
+            .unwrap();
+        assert_eq!(actual.dims(), [2, N]);
+        assert_eq!(bits(&actual), bits(&expected));
+    }
 }

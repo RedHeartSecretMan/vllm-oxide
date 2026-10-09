@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::layers::linear::ProjectionLayout;
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -79,12 +81,12 @@ impl Qwen3Mlp {
             down_proj: Linear::<Row>::from_vb(vb.pp("down_proj"), &dn_spec, dev)?,
         })
     }
-    fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
+    fn forward(&self, x: &Tensor, layout: ProjectionLayout) -> CandleResult<Tensor> {
         let width = self.gate_up_proj.weight().dim(0)? / 2;
-        let gate = self.gate_up_proj.forward_range(x, 0, width)?;
-        let up = self.gate_up_proj.forward_range(x, width, width)?;
+        let gate = self.gate_up_proj.forward_range(x, 0, width, layout)?;
+        let up = self.gate_up_proj.forward_range(x, width, width, layout)?;
         let act = silu_mul(&gate, &up)?;
-        self.down_proj.forward(&act)
+        self.down_proj.forward(&act, layout)
     }
 }
 
@@ -164,15 +166,16 @@ impl Qwen3Attention {
         hidden: &Tensor,
         positions: &Tensor,
         prepared: &PreparedAttention,
+        layout: ProjectionLayout,
         #[cfg(feature = "internal-golden")] mut trace: Option<
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
     ) -> CandleResult<Tensor> {
         let qs = self.num_heads * self.head_dim;
         let ks = self.num_kv_heads * self.head_dim;
-        let q = self.qkv_proj.forward_range(hidden, 0, qs)?;
-        let k = self.qkv_proj.forward_range(hidden, qs, ks)?;
-        let v = self.qkv_proj.forward_range(hidden, qs + ks, ks)?;
+        let q = self.qkv_proj.forward_range(hidden, 0, qs, layout)?;
+        let k = self.qkv_proj.forward_range(hidden, qs, ks, layout)?;
+        let v = self.qkv_proj.forward_range(hidden, qs + ks, ks, layout)?;
         #[cfg(feature = "internal-golden")]
         if let Some(trace) = trace.as_deref_mut() {
             for (name, value) in [("layer0_q", &q), ("layer0_k", &k), ("layer0_v", &v)] {
@@ -213,6 +216,7 @@ impl Qwen3Attention {
             &k,
             &v,
             prepared,
+            layout,
             #[cfg(feature = "internal-golden")]
             trace,
         )
@@ -224,6 +228,7 @@ impl Qwen3Attention {
         k: &Tensor,
         v: &Tensor,
         prepared: &PreparedAttention,
+        layout: ProjectionLayout,
         #[cfg(feature = "internal-golden")] mut trace: Option<
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
@@ -280,7 +285,7 @@ impl Qwen3Attention {
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
         }
         self.o_proj
-            .forward(&out.reshape((n, self.num_heads * self.head_dim))?)
+            .forward(&out.reshape((n, self.num_heads * self.head_dim))?, layout)
     }
     #[cfg(not(feature = "cuda"))]
     fn attn_compute(
@@ -289,6 +294,7 @@ impl Qwen3Attention {
         _: &Tensor,
         _: &Tensor,
         _: &PreparedAttention,
+        _: ProjectionLayout,
         #[cfg(feature = "internal-golden")] _: Option<
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
@@ -330,6 +336,7 @@ impl Qwen3DecoderLayer {
         hidden: &Tensor,
         residual: Option<&Tensor>,
         prepared: &PreparedAttention,
+        layout: ProjectionLayout,
         #[cfg(feature = "internal-golden")] mut trace: Option<
             &mut crate::golden_capture::layer_trace::StepTrace,
         >,
@@ -345,11 +352,12 @@ impl Qwen3DecoderLayer {
             &normed,
             positions,
             prepared,
+            layout,
             #[cfg(feature = "internal-golden")]
             trace,
         )?;
         let (normed, res) = self.post_attention_layernorm.forward(&attn, Some(&res))?;
-        let mlp = self.mlp.forward(&normed)?;
+        let mlp = self.mlp.forward(&normed, layout)?;
         Ok((mlp, res))
     }
 }
@@ -398,6 +406,7 @@ impl Qwen3Model {
         input_ids: &Tensor,
         positions: &Tensor,
         prepared: &PreparedAttention,
+        layout: ProjectionLayout,
     ) -> CandleResult<Tensor> {
         let mut hidden = prepared.pad_queries(&self.embed_tokens.forward(input_ids)?)?;
         let padded_positions = prepared.pad_queries(positions)?;
@@ -422,6 +431,7 @@ impl Qwen3Model {
                 &hidden,
                 residual.as_ref(),
                 prepared,
+                layout,
                 #[cfg(feature = "internal-golden")]
                 trace.as_mut().filter(|_| _layer_index == 0),
             )?;
@@ -455,6 +465,7 @@ impl Qwen3Model {
 }
 
 pub struct Qwen3ForCausalLM {
+    projection_layout: ProjectionLayout,
     model: Qwen3Model,
     lm_head: Linear<Row>,
     vocab_size: usize,
@@ -480,6 +491,7 @@ impl Qwen3ForCausalLM {
             Linear::<Row>::from_vb(vb.pp("lm_head"), &spec, dev)?
         };
         Ok(Self {
+            projection_layout: ProjectionLayout::default(),
             model,
             lm_head,
             vocab_size: config.vocab_size,
@@ -522,12 +534,20 @@ impl Qwen3ForCausalLM {
 }
 
 impl CausalLM for Qwen3ForCausalLM {
+    fn begin_generation(&mut self, request_count: usize) {
+        self.projection_layout = ProjectionLayout::for_batch(request_count);
+    }
+
+    fn end_generation(&mut self) {
+        self.projection_layout = ProjectionLayout::default();
+    }
     fn forward(&mut self, input_ids: &Tensor, positions: &Tensor) -> CandleResult<Tensor> {
         let prepared = self.attn_ctx.prepared_for_bound_consumer()?;
-        self.model.forward(input_ids, positions, &prepared)
+        self.model
+            .forward(input_ids, positions, &prepared, self.projection_layout)
     }
     fn compute_logits(&self, hidden_states: &Tensor) -> CandleResult<Tensor> {
-        self.lm_head.forward(hidden_states)
+        self.lm_head.forward(hidden_states, self.projection_layout)
     }
     fn vocab_size(&self) -> usize {
         self.vocab_size
