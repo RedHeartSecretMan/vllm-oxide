@@ -2,9 +2,9 @@
 
 [English](README.md) | **简体中文**
 
-> **v0.2.0 发布准备中：单 GPU Qwen3 离线推理。**
-> 当前验证状态、支持范围和剩余发布门禁见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
-> 下文的 v0.2.0 标签将在正式发布时提供。
+> **v0.2.0：单 GPU Qwen3 离线推理。**
+> 支持范围与正式发布所需证据见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
+> 已发布的标签与资产见 [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases)。
 
 [CI][ci-url]
 [License: Apache-2.0][license-url]
