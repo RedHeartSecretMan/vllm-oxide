@@ -6,6 +6,8 @@
 //! `llm_engine.py`.
 
 mod initialization;
+#[cfg(feature = "cuda")]
+mod precision;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -116,7 +118,7 @@ impl LLM {
         #[cfg(feature = "cuda")]
         {
             validate_sm_version(&device)?;
-            configure_fp32_reduction(&device)?;
+            precision::configure_fp32_reduction(&device)?;
         }
 
         let resolved_model = ResolvedModel::resolve(source, options.dtype)?;
@@ -3097,27 +3099,4 @@ mod tests {
             assert_eq!(llm.engine.scheduler.num_running(), 0);
         }
     }
-}
-
-// Diagnostic-only branch: prohibit BF16/F16 intermediate reduction truncation.
-// The handle is owned by this fresh device and no model work has begun.
-#[cfg(feature = "cuda")]
-#[allow(unsafe_code)]
-fn configure_fp32_reduction(device: &Device) -> Result<()> {
-    use candle_core::cuda::cudarc::cublas::sys;
-    let Device::Cuda(device) = device else {
-        bail!("FP32 reduction requires CUDA");
-    };
-    let handle = device.cublas_handle();
-    // SAFETY: this live cuBLAS handle has not been shared with model execution.
-    let status = unsafe {
-        sys::cublasSetMathMode(
-            *handle.handle(),
-            sys::cublasMath_t::CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION,
-        )
-    };
-    if status != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-        bail!("configuring FP32 GEMM reduction failed: {status:?}");
-    }
-    Ok(())
 }
