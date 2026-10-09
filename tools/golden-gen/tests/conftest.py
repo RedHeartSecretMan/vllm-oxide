@@ -10,6 +10,19 @@ from golden_gen.config import VOCAB_SIZE
 
 
 @pytest.fixture
+def controlled_host_ram(monkeypatch):
+    """Explicit input for synthetic guard tests, independent of runner capacity."""
+    original_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == Path("/proc/meminfo"):
+            return "MemAvailable: 33554432 kB\n"
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+@pytest.fixture
 def tmp_output_dir(tmp_path: Path) -> Path:
     """Create a temporary output directory for fixture files."""
     d = tmp_path / "output"
