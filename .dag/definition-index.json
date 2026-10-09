@@ -111,7 +111,7 @@
     },
     {
       "path": "docs/validation/layered-supervision-policy.json",
-      "blob_oid": "65d39045c996e3fde92db6e4065b093513535b1e"
+      "blob_oid": "6159566720283c30e77c56b2475bf782b8fa3221"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
@@ -143,7 +143,7 @@
     },
     {
       "path": "docs/adr/0026-approve-independent-confirmation.md",
-      "blob_oid": "f597ab69bd2abe61b017befcd4d825cdfaca5856"
+      "blob_oid": "84ec8f69dac3ec3204c53f7de3dff2f3af678a21"
     }
   ]
 }
