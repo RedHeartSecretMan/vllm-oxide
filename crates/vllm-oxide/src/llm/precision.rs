@@ -34,13 +34,18 @@ mod tests {
 
     #[test]
     #[ignore = "requires a guarded CUDA owner"]
+    #[allow(clippy::cast_precision_loss)] // Integer bounds below prove these casts exact.
     fn cuda_bf16_gemm_matches_exact_dot_products_across_batch_shapes() {
         const K: usize = 1024;
         const N: usize = 3072;
         let device = Device::new_cuda(0).unwrap();
         configure_fp32_reduction(&device).unwrap();
-        let input: Vec<i32> = (0..2 * K).map(|i| (i % 113) as i32 - 56).collect();
-        let weights: Vec<i32> = (0..N * K).map(|i| ((i * 37) % 257) as i32 - 128).collect();
+        let input: Vec<i32> = (0..2 * K)
+            .map(|i| i32::try_from(i % 113).unwrap() - 56)
+            .collect();
+        let weights: Vec<i32> = (0..N * K)
+            .map(|i| i32::try_from((i * 37) % 257).unwrap() - 128)
+            .collect();
         // Inputs use units of 1/64 and 1/128. Every product and any partial
         // sum have integer numerators below 2^24, so FP32 can accumulate them
         // exactly in any order. Round only the final integer dot product to
