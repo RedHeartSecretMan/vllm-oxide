@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -234,6 +235,88 @@ def evaluate_manifest(repo: Path, manifest_path: Path, *, authoritative: bool) -
         )
 
 
+def _supervision_digest_binding_only(repo: Path, before: str, after: str) -> bool:
+    """Allow only a verified NUM-policy pointer update, never execution settings.
+
+    Read both measured revisions from Git, not the evaluator's working policy.
+    This lets an approved measured descendant keep its policy hashes coherent
+    without reclassifying arbitrary supervision changes as calibration reuse.
+    """
+    from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
+
+    def read(revision: str, path: str) -> bytes:
+        return subprocess.check_output(["git", "-C", str(repo), "show", f"{revision}:{path}"])
+
+    remaining = []
+    modes = []
+    for revision in (before, after):
+        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            return False
+        entry = subprocess.check_output(
+            ["git", "-C", str(repo), "ls-tree", revision, "--", SUPERVISION_POLICY_PATH]
+        ).split()
+        if len(entry) != 4 or entry[0] not in (b"100644", b"100755") or entry[1] != b"blob":
+            return False
+        modes.append(entry[0])
+
+        try:
+            policy = json.loads(read(revision, SUPERVISION_POLICY_PATH))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(policy, dict):
+            return False
+        expected = hashlib.sha256(read(revision, POLICY_PATH)).hexdigest()
+        if policy.pop("numerical_policy_sha256", None) != expected:
+            return False
+        # Canonical JSON retains distinctions such as false versus 0 that
+        # Python dictionary equality would otherwise hide.
+        try:
+            remaining.append(json.dumps(policy, sort_keys=True, allow_nan=False))
+        except ValueError:
+            return False
+    return modes[0] == modes[1] and remaining[0] == remaining[1]
+
+
+def _require_calibration_definition_changes(repo: Path, before: str, after: str) -> None:
+    """Keep measured execution identical while permitting bound policy metadata."""
+    changed = (
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                before,
+                after,
+                "--",
+            ]
+        )
+        .decode()
+        .split("\0")
+    )
+    allowed = {
+        REGISTRY_PATH,
+        POLICY_PATH,
+        "CONTEXT.md",
+        ".dag/definition-index.json",
+        ".dag/definitions/v0.2.0-github.json",
+    }
+    from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
+
+    if SUPERVISION_POLICY_PATH in changed and _supervision_digest_binding_only(repo, before, after):
+        allowed.add(SUPERVISION_POLICY_PATH)
+    if any(
+        path and path not in allowed and not (path.startswith("docs/adr/") and path.endswith(".md"))
+        for path in changed
+    ):
+        raise ValueError(
+            "execution source changed since approved calibration; fresh calibration required"
+        )
+
+
 def _calibration_provenance(
     repo: Path, root: Path, manifest: LayeredManifest, registry: Registry, policy: BudgetPolicy
 ) -> tuple[dict[str, dict[str, bool | None]], dict[str, Any], dict[str, Any]]:
@@ -286,37 +369,7 @@ def _calibration_provenance(
         check=True,
         capture_output=True,
     )
-    changed = (
-        subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "diff",
-                "--name-only",
-                "-z",
-                old["commit"],
-                manifest.source["commit"],
-                "--",
-            ]
-        )
-        .decode()
-        .split("\0")
-    )
-    allowed = {
-        REGISTRY_PATH,
-        POLICY_PATH,
-        "CONTEXT.md",
-        ".dag/definition-index.json",
-        ".dag/definitions/v0.2.0-github.json",
-    }
-    if any(
-        path and path not in allowed and not (path.startswith("docs/adr/") and path.endswith(".md"))
-        for path in changed
-    ):
-        raise ValueError(
-            "execution source changed since approved calibration; fresh calibration required"
-        )
+    _require_calibration_definition_changes(repo, old["commit"], manifest.source["commit"])
     recorded = _read(root, manifest.calibration_evidence)
     if (
         recorded.get("source") != old
