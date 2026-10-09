@@ -58,7 +58,7 @@ def test_one_member_failure_or_missing_operator_blocks_the_execution_group() -> 
     registry = Registry.model_validate(
         dict(
             protocol="layered-accuracy-v1",
-            schema_version=1,
+            schema_version=2,
             numerical_cases=[
                 dict(
                     split="calibration",
@@ -128,7 +128,7 @@ def test_registry_rejects_actual_cross_split_prediction_prefix_overlap() -> None
 
     data = dict(
         protocol="layered-accuracy-v1",
-        schema_version=1,
+        schema_version=2,
         numerical_cases=[
             dict(
                 split=split,
