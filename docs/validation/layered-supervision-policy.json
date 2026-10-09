@@ -11,7 +11,7 @@
     "build_source_id": "c8a3314b971f76c571d67458a4bdd00092ce1071"
   },
   "registry_sha256": "c5348a64b1f5f10d067836f1855836fb94e52722e7181aa53be7eb6fd08f474d",
-  "numerical_policy_sha256": "69222a5e4e5fe5ae1bd0474de3d5c330cc9d72c302ce34e3a382311aa5ad894e",
+  "numerical_policy_sha256": "c7343b405f1f27ce9cdff3c754b408c48a26a215feb7b9ec4ada0d52a455cce0",
   "ram_floor_bytes": 17179869184,
   "fast_poll_interval_ms": 100,
   "telemetry_interval_ms": 1000,

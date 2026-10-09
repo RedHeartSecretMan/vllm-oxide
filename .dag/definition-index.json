@@ -91,7 +91,7 @@
     },
     {
       "path": "docs/validation/layered-accuracy-budgets.json",
-      "blob_oid": "2a92fd4a6beb5869edcfe69e946dc60a79942380"
+      "blob_oid": "f211fdac08973131b8c9eeb5eb0ddc8c7eae5a54"
     },
     {
       "path": "docs/validation/layered-accuracy-cases.json",
@@ -111,7 +111,7 @@
     },
     {
       "path": "docs/validation/layered-supervision-policy.json",
-      "blob_oid": "d7ace0e7fd7d78e37b75dadc3630f6911d546eb2"
+      "blob_oid": "65d39045c996e3fde92db6e4065b093513535b1e"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
@@ -140,6 +140,10 @@
     {
       "path": "docs/adr/0025-proposed-independent-confirmation.md",
       "blob_oid": "8858147219803f0be58ad47209ee6d8e64a05466"
+    },
+    {
+      "path": "docs/adr/0026-approve-independent-confirmation.md",
+      "blob_oid": "f597ab69bd2abe61b017befcd4d825cdfaca5856"
     }
   ]
 }

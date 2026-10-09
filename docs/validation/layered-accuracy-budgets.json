@@ -17,12 +17,12 @@
     "kv-slots": 0.0,
     "sampler-ids": 0.0
   },
-  "registry_sha256": "88f89084fe7b0c14a877c4c72f275314ad2a8e593d6fbc3ac63a194b91fb98f4",
+  "registry_sha256": "c5348a64b1f5f10d067836f1855836fb94e52722e7181aa53be7eb6fd08f474d",
   "calibration_source": {
-    "commit": "880e22c8823d30c0a52775b26a193f175824e80c",
-    "tree": "fb39df4d40239700bbf76ccfa76d341f924382b5"
+    "commit": "3b2a6ddc7d9b6cb5d03a7660b1c6ddcdd1ff6d61",
+    "tree": "94b967da56f28e38935b390e9d8d870abae77caf"
   },
-  "calibration_evidence_sha256": "40863458ef4cb693ce7a39fe476bdab3b68af8708ca967079ad00f4abb509ab8",
-  "fault_evidence_sha256": "f514943614e30b63406ca211a9bafdd680bd309f533d85cdf23e4d2a6481f9a2",
-  "rationale": "User-approved explicit FP32 intermediate GEMM reduction scope; see docs/adr/0024-approve-explicit-gemm-reduction.md for approval, exact calibration/fault identities and limitations. ADR-0018 model and operator budget values are unchanged: per-case mean/peak reference KL 0.002/0.005, paired mean excess 0.001, and reference-choice loss ln(1.25). BF16 model storage, full vocabulary, corpus splits, exact identity/selection/replay and fail-closed gates remain mandatory. Original observations remain non-accepting and historical failures remain failures. Scope approval is not independent acceptance or release publication."
+  "calibration_evidence_sha256": "9a00ec77815a49db82cc1562521be63ddbfaa42221aaf552797df536b802e7d5",
+  "fault_evidence_sha256": "3e89864efb2945c5e870024a27ac6f73f4ef61ffe2aa6097ec3289a0a5175ad7",
+  "rationale": "Bind the repaired call-layout and deterministic in-process baseline to the complete Registry 2 calibration. Preserve every ADR-0018 model/operator budget value and the ADR-0024 reference precision. Retain all 487 observed regression owners and require 130 additional unobserved confirmation owners. Source-bound observation and fault artifacts retain their original non-accepting verdicts; scope approval is not release acceptance."
 }
