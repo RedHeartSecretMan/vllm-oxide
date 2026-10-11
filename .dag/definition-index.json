@@ -111,7 +111,7 @@
     },
     {
       "path": "docs/validation/layered-supervision-policy.json",
-      "blob_oid": "817b24a556aec4ca5fe3cfd273fa66f341e34f33"
+      "blob_oid": "816faa1f57fd31e852bc3e6ef97c6af4f9908b34"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
@@ -151,7 +151,7 @@
     },
     {
       "path": "docs/adr/0028-local-release-evidence.md",
-      "blob_oid": "23122a33cfb67f71244c1ab366c7310890b087aa"
+      "blob_oid": "0652be2126d7b3ae8dc5c9248891c62f710aff87"
     }
   ]
 }

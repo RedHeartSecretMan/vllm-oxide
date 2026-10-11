@@ -3,12 +3,12 @@
   "schema_version": 2,
   "policy_id": "bounded-telemetry-fresh-v1",
   "measurement_source": {
-    "commit": "880e22c8823d30c0a52775b26a193f175824e80c",
-    "tree": "fb39df4d40239700bbf76ccfa76d341f924382b5"
+    "commit": "33e0e27268285368c8c28b47df5cb1df9b2df174",
+    "tree": "2c7a4a1720d8695e809d150c9c53785658779195"
   },
   "measurement_binary": {
-    "sha256": "996a1b6b6709bd7bde2f11c7c458558b6833f70a267a8f5651f0dc4e881a9656",
-    "build_source_id": "c8a3314b971f76c571d67458a4bdd00092ce1071"
+    "sha256": "37aa1d5359982d7a76ab41ebd0263e2dbe8fe0660dc4ece25b0ea77cbc484b38",
+    "build_source_id": "45584f91845615156eb57ef48a778394c428a9c2"
   },
   "registry_sha256": "5900b5f567e578deeb26c676c62ead51337db319755f26d1a8a50512b8f13b35",
   "numerical_policy_sha256": "cf3cd6acc238d05343cf474d2ac19d4640b736d594d5d713593d83d2f07cd909",
@@ -60,7 +60,7 @@
     "tools/golden-gen/prompts"
   ],
   "measurement_benchmark_binary": {
-    "sha256": "3eb06a8ab3a3d3b5d43e33102c08331309a26a0b76f9bdfe9213e544238262f3",
-    "build_source_id": "c8a3314b971f76c571d67458a4bdd00092ce1071"
+    "sha256": "b193662828b71a586dfd2f871284144ce6d92830e66aba2ca016cdb1f8e17d8d",
+    "build_source_id": "45584f91845615156eb57ef48a778394c428a9c2"
   }
 }
