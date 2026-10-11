@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Retain observed confirmation and freeze a new independent cohort
@@ -28,10 +28,12 @@ The evaluator still requires every old and new owner and includes the frozen
 cohort roles in its evidence report. A passing new cohort never waives an old
 failure, missing owner or invalid replay/control.
 
-This is a proposed Definition Checkpoint. The numerical policy deliberately
-continues to bind the previous registry, sealing numerical and public-behavior
-confirmation entrypoints. Complete the new source's CPU gates, calibration,
-fault evidence and independent reviews before seeking approval of this concrete
-list and its bindings. Existing FP32 reference arithmetic and every model/operator
-budget stay unchanged. Approval of an earlier cohort is not approval of this one;
-this proposal itself grants neither new holdout output access nor publication.
+The reviewed Definition Checkpoint now binds Registry3 and the complete frozen calibration/fault evidence named below. Existing FP32 reference arithmetic and every model/operator budget remain unchanged. The new cohort was prepared with CPU-only input checks and without consulting model outputs. Earlier-cohort approval alone was insufficient; the continuation decision after this concrete proposal supplies the execution direction for this inventory. Independent full acceptance remains to be measured and cannot be inferred from calibration or the adopted bindings.
+
+## Execution decision after completed evidence review
+
+The user received the concrete747-owner proposal and the unchanged-budget calibration bindings, then directed continuation after selecting local-only evidence retention. This execution treats that continuation as authorization to run the reviewed747 inventory and its concrete numerical policy. It does not infer permission to modify thresholds, replace inputs after output inspection, or publish a product. The original request wording is continued execution, not a separately fabricated approval quote.
+
+The adopted numerical policy SHA-256 is cf3cd6acc238d05343cf474d2ac19d4640b736d594d5d713593d83d2f07cd909. Calibration commit2dc94452df5f7ed259a8607962fe98619cfd6526/tree40fd91747f33146a2be46cebcf51f64c3c177254 binds observe5f2465c8c9dacdfd2fd5e845dacec1a24cc81a5cdfbcce7af54bbd9732dd3522 and fault8e38237591f4bdfca812c0426664b6cfd879bb3a0865cdbad6c30bd402915c54. All132 calibration owners and complete faults were independently reproduced with zero Standards/Spec findings; original observation stays INVALID/budgets_pending/accepting=false.
+
+Only numerical binding, its supervision digest pointer, this ADR and the Definition index change in the measured descendant. Rebuild its actual binaries and CPU evidence before collecting all747 fresh owners with zero retained owners. The separate frozen supervisor/evaluator has its own CPU and review evidence. User-selected local transport changes remain outside the measured source and must preserve protected measurement/model/mathematical Git objects and all raw semantic checks. Complete independent acceptance, performance, byte-preserving local bundle, fresh consumer and final evidence report remain mandatory.

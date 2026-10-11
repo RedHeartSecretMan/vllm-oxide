@@ -17,12 +17,12 @@
     "kv-slots": 0.0,
     "sampler-ids": 0.0
   },
-  "registry_sha256": "c5348a64b1f5f10d067836f1855836fb94e52722e7181aa53be7eb6fd08f474d",
+  "registry_sha256": "5900b5f567e578deeb26c676c62ead51337db319755f26d1a8a50512b8f13b35",
   "calibration_source": {
-    "commit": "3b2a6ddc7d9b6cb5d03a7660b1c6ddcdd1ff6d61",
-    "tree": "94b967da56f28e38935b390e9d8d870abae77caf"
+    "commit": "2dc94452df5f7ed259a8607962fe98619cfd6526",
+    "tree": "40fd91747f33146a2be46cebcf51f64c3c177254"
   },
-  "calibration_evidence_sha256": "9a00ec77815a49db82cc1562521be63ddbfaa42221aaf552797df536b802e7d5",
-  "fault_evidence_sha256": "3e89864efb2945c5e870024a27ac6f73f4ef61ffe2aa6097ec3289a0a5175ad7",
-  "rationale": "Bind the repaired call-layout and deterministic in-process baseline to the complete Registry 2 calibration. Preserve every ADR-0018 model/operator budget value and the ADR-0024 reference precision. Retain all 487 observed regression owners and require 130 additional unobserved confirmation owners. Source-bound observation and fault artifacts retain their original non-accepting verdicts; scope approval is not release acceptance."
+  "calibration_evidence_sha256": "5f2465c8c9dacdfd2fd5e845dacec1a24cc81a5cdfbcce7af54bbd9732dd3522",
+  "fault_evidence_sha256": "8e38237591f4bdfca812c0426664b6cfd879bb3a0865cdbad6c30bd402915c54",
+  "rationale": "Bind the call-layout-v2 repair and native dependency CI integration to complete Registry 3 calibration. Preserve every ADR-0018 model/operator budget and the ADR-0024 reference precision. Retain all 617 observed/regression owner obligations and require 130 new independent confirmation2 owners, for 747 total. The original failed confirmation remains failed. Original calibration/fault artifacts retain their non-accepting verdicts; checkpoint approval is not release acceptance."
 }
