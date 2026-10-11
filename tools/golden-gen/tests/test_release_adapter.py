@@ -167,6 +167,25 @@ def test_complete_raw_evidence_survives_python_bundle_rust_clean_consumer(tmp_pa
         )
     )
     monkeypatch.setenv("VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH", "goldens-v0.2")
+    from golden_gen import release_transport
+
+    original_upload_limit = release_transport.UPLOAD_LIMIT
+    monkeypatch.setattr(release_transport, "UPLOAD_LIMIT", 1)
+    local = verify_bundle(repo, bundle, tmp_path / "local-over-upload-limit", Path(binary))
+    assert local["accepting"] is True
+    refused_upload = FakeTransport()
+    with pytest.raises(ValueError, match="GitHub asset must be under"):
+        publish(
+            repo,
+            bundle,
+            tmp_path / "oversized-upload-cache",
+            Path(binary),
+            review,
+            base,
+            refused_upload,
+        )
+    assert refused_upload.calls == []
+    monkeypatch.setattr(release_transport, "UPLOAD_LIMIT", original_upload_limit)
     for corruption in ("report", "source"):
         changed_path = report_path if corruption == "report" else repo / "unapproved_execution.py"
         changed_path.write_text("unapproved synthetic mutation\n")

@@ -270,9 +270,9 @@ cargo test
 
 参考预言机为固定 PyTorch SDPA MATH 后端的 Transformers BF16。基线预言机为 FlashAttention 后端的 vLLM BF16；其配对平均 KL 构成额外门槛，不能豁免参考失败。固定前缀回放保留所有规定的预测行，包括预测 token 分叉后的行；自由生成的分叉和一致率单独诊断，不计算不同历史之间的验收 KL。
 
-旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议，旧 authoritative/publication 入口保持禁用。[schema5 发布适配器](tools/golden-gen/README.md#schema5-release-stages) 将完整原始分层证据接入性能、固定 CPU 门槛、报告、双资产 bundle 和 Python/Rust 干净消费者验证。发布仍要求干净的 evidence-only 候选、完整新审查和独立用户授权。既有工件保留原身份和原判定。
+旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议，旧 authoritative/publication 入口保持禁用。[schema5 发布适配器](tools/golden-gen/README.md#schema5-release-stages) 将完整原始分层证据接入性能、固定 CPU 门槛、报告、完整 manifest/压缩包组合及 Python/Rust 干净消费者验证。根据 [ADR-0028](docs/adr/0028-local-release-evidence.md)，本轮验收将完整证据保存在本地，无需上传 GitHub，也不采用分卷。干净的 evidence-only 候选和完整新审查仍为必需；既有工件保留原身份和原判定。
 
-CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最终 `goldens-v0.2` 仍按 [ADR-0010](docs/adr/0010-golden-release-asset-contract.md) 仅包含 `manifest.json` 与 `goldens-v0.2.tar.gz` 两个资产。
+CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或可选发布。本地证据包按[分层传输契约](docs/validation/layered-release-assets.md)仅包含 `manifest.json` 与 `goldens-v0.2.tar.gz` 两个文件。可选的手动 GitHub 发布还需独立用户授权，并要求每个资产严格小于 2 GiB；该上传限制不影响本地数值验收。
 
 ### CI 绿色与数值验证
 
