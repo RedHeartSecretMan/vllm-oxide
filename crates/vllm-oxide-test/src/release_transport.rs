@@ -14,7 +14,8 @@ use sha2::{Digest, Sha256};
 const MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
 const FILE_LIMIT: u64 = 8 * 1024 * 1024 * 1024 - 1;
 const TOTAL_LIMIT: u64 = 1024 * 1024 * 1024 * 1024;
-const UPLOAD_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+// Local evidence is bounded independently of a hosting platform's upload limit.
+const ARCHIVE_LIMIT: u64 = 2 * TOTAL_LIMIT;
 const ARCHIVE: &str = "goldens-v0.2.tar.gz";
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -324,8 +325,9 @@ pub fn install_transport(bundle: &Path, cache: &Path) -> Result<PathBuf> {
     let manifest = parse_manifest(&bytes)?;
     let archive = bundle.join(ARCHIVE);
     regular(&archive)?;
-    if archive.metadata()?.len() >= UPLOAD_LIMIT || digest(&archive)? != manifest.archive.sha256 {
-        bail!("archive size/checksum mismatch");
+    check_archive_size(archive.metadata()?.len())?;
+    if digest(&archive)? != manifest.archive.sha256 {
+        bail!("archive checksum mismatch");
     }
     let parent = cache.join("goldens-v0.2");
     std::fs::create_dir_all(&parent)?;
@@ -436,4 +438,25 @@ pub fn install_transport(bundle: &Path, cache: &Path) -> Result<PathBuf> {
         Err(e) => return Err(e.into()),
     }
     Ok(final_path)
+}
+
+fn check_archive_size(size: u64) -> Result<()> {
+    if size > ARCHIVE_LIMIT {
+        bail!("local archive exceeds compressed size limit");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_archive_size, ARCHIVE_LIMIT};
+
+    #[test]
+    fn local_archive_can_cross_github_upload_boundary() {
+        assert!(check_archive_size(2 * 1024 * 1024 * 1024 - 1).is_ok());
+        assert!(check_archive_size(2 * 1024 * 1024 * 1024).is_ok());
+        assert!(check_archive_size(2 * 1024 * 1024 * 1024 + 1).is_ok());
+        assert!(check_archive_size(ARCHIVE_LIMIT).is_ok());
+        assert!(check_archive_size(ARCHIVE_LIMIT + 1).is_err());
+    }
 }

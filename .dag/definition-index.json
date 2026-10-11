@@ -103,11 +103,11 @@
     },
     {
       "path": "docs/validation/layered-release-assets.md",
-      "blob_oid": "6408ca5b334b1ceeb00a4bfea4eab0fdf57dcc82"
+      "blob_oid": "a950d3efc7f33f53c32b293f4f0d5515e1713b11"
     },
     {
       "path": "docs/validation/layered-supervision-contract.md",
-      "blob_oid": "4e8b9208c28d466ecaa76bf0d4e30b9444e4c5fe"
+      "blob_oid": "fd0b1d502e2a648b81b602b3048792b04160c6af"
     },
     {
       "path": "docs/validation/layered-supervision-policy.json",
@@ -148,6 +148,10 @@
     {
       "path": "docs/adr/0027-proposed-confirmation-renewal.md",
       "blob_oid": "edffeb23f91f8b354d0a850ebafb697af604e170"
+    },
+    {
+      "path": "docs/adr/0028-local-release-evidence.md",
+      "blob_oid": "23122a33cfb67f71244c1ab366c7310890b087aa"
     }
   ]
 }

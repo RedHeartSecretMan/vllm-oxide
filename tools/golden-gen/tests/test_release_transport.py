@@ -92,6 +92,71 @@ def test_current_upload_boundary_requires_a_capacity_decision(size):
     check_upload_size(2147483647)
 
 
+def test_local_bundle_ignores_upload_limit_but_preserves_cross_language_verification(
+    tmp_path, monkeypatch
+):
+    from golden_gen import release_transport
+
+    binary = os.environ.get("GOLDEN_TRANSPORT_TEST_BINARY")
+    if not binary:
+        pytest.skip("CPU transport binary required")
+    monkeypatch.setattr(release_transport, "UPLOAD_LIMIT", 1)
+    bundle = make_bundle(tmp_path)
+    archive = bundle / "goldens-v0.2.tar.gz"
+    with pytest.raises(ValueError, match="GitHub asset"):
+        release_transport.check_upload_size(archive.stat().st_size)
+    installed = install_transport(bundle, tmp_path / "python-cache")
+    actual = subprocess.run(
+        [
+            binary,
+            "--layered-transport",
+            "--bundle-dir",
+            str(bundle),
+            "--cache-dir",
+            str(tmp_path / "rust-cache"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert actual.returncode == 0, actual.stderr
+    rust_installed = json.loads(actual.stdout)["installed"]
+    from pathlib import Path
+
+    for name in ("one.json", "two.json"):
+        assert (
+            (installed / "evidence" / name).read_bytes()
+            == (Path(rust_installed) / "evidence" / name).read_bytes()
+            == b"raw bytes\n"
+        )
+
+
+def test_local_compressed_archive_is_bounded_before_install_and_exposure(tmp_path, monkeypatch):
+    from golden_gen import release_transport
+
+    bundle = make_bundle(tmp_path)
+    monkeypatch.setattr(release_transport, "ARCHIVE_LIMIT", 1)
+    with pytest.raises(ValueError, match="compressed size limit"):
+        install_transport(bundle, tmp_path / "cache")
+    assert not (tmp_path / "cache").exists()
+    with pytest.raises(ValueError, match="compressed size limit"):
+        build_bundle(
+            tmp_path / "source",
+            release_transport.read_manifest(bundle / "manifest.json"),
+            tmp_path / "refused",
+        )
+    assert not (tmp_path / "refused").exists()
+    assert not list(tmp_path.glob(".schema5-*"))
+
+
+def test_local_archive_boundary_is_independent_of_remote_asset_boundary():
+    from golden_gen.release_transport import ARCHIVE_LIMIT, check_archive_size
+
+    for size in (2147483647, 2147483648, 2147483649, ARCHIVE_LIMIT):
+        check_archive_size(size)
+    with pytest.raises(ValueError, match="compressed size limit"):
+        check_archive_size(ARCHIVE_LIMIT + 1)
+
+
 @pytest.mark.parametrize("mutation", ["mode", "truncated", "tar-tail", "gzip-tail", "payload"])
 def test_corrupt_archive_refusals_agree_with_real_rust_consumer(tmp_path, mutation):
     binary = os.environ.get("GOLDEN_TRANSPORT_TEST_BINARY")
