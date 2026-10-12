@@ -6,11 +6,14 @@ import json
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from golden_gen.layered_artifacts import bound_file, sha, source_identity, worker_metadata
 from golden_gen.layered_inventory import owner_key
 from golden_gen.layered_release import definition_document
+
+if TYPE_CHECKING:
+    from golden_gen.release_roles import BinaryBinding, FreezeBinding, SourceRoles
 
 POLICY_PATH = "docs/validation/layered-supervision-policy.json"
 
@@ -197,15 +200,23 @@ def validate_benchmark_invocation(
     build_source_id: str,
 ) -> None:
     """Bind the native benchmark command to the separately approved binary."""
+    expected = policy.get("measurement_benchmark_binary")
+    if policy.get("measurement_source") != source or expected != dict(
+        sha256=binary_sha256, build_source_id=build_source_id
+    ):
+        raise ValueError("false benchmark invocation/source/binary")
+    _validate_native_benchmark_invocation(guard, source, binary_sha256, build_source_id)
+
+
+def _validate_native_benchmark_invocation(
+    guard: dict[str, Any], source: dict[str, str], binary_sha256: str, build_source_id: str
+) -> None:
     invocation = guard.get("measurement_invocation", {})
     root = invocation.get("repo_root")
-    expected = policy.get("measurement_benchmark_binary")
     binary = invocation.get("candidate_binary")
     if (
         guard.get("role") != "benchmark_owner"
         or guard.get("measurement_source") != source
-        or policy.get("measurement_source") != source
-        or expected != dict(sha256=binary_sha256, build_source_id=build_source_id)
         or not isinstance(root, str)
         or not Path(root).is_absolute()
         or invocation.get("cwd") != root
@@ -247,6 +258,61 @@ def validate_benchmark_invocation(
         or Path(options["--output"]).name != "benchmark.json"
     ):
         raise ValueError("benchmark command differs from measured source")
+
+
+def validate_role_benchmark_invocation(
+    guard: dict[str, Any], roles: SourceRoles, binary: BinaryBinding, policy_sha256: str
+) -> None:
+    """New performance-only policy never rewrites or projects the old SUP."""
+    if (
+        guard.get("supervision_source") != roles.release_evaluator.model_dump()
+        or guard.get("supervision_policy_sha256") != policy_sha256
+    ):
+        raise ValueError("performance role supervisor/policy differs")
+    _validate_native_benchmark_invocation(
+        guard, roles.performance_producer.model_dump(), binary.sha256, binary.build_source_id
+    )
+
+
+def performance_role_context(
+    repo: Path,
+    performance_repo: Path,
+    python: str,
+    binary: Path,
+    *,
+    freeze: FreezeBinding | None = None,
+) -> dict[str, Any]:
+    from golden_gen.release_roles import _load_binding
+
+    approved, policy, roles = _load_binding(repo, freeze)
+    if (
+        source_identity(performance_repo) != roles.performance_producer.model_dump()
+        or str(performance_repo.resolve()) != approved.performance_repo
+    ):
+        raise ValueError("actual R performance checkout differs")
+    if (
+        binary.is_symlink()
+        or str(binary.resolve()) != approved.benchmark_path
+        or sha(binary) != policy.benchmark_binary.sha256
+    ):
+        raise ValueError("actual R benchmark binary differs")
+    root = str(performance_repo.resolve())
+    return dict(
+        role="benchmark_owner",
+        measurement_source=roles.performance_producer.model_dump(),
+        supervision_source=roles.release_evaluator.model_dump(),
+        supervision_policy_sha256=approved.policy_sha256,
+        measurement_invocation=dict(
+            cwd=root,
+            repo_root=root,
+            pythonpath=str(performance_repo.resolve() / "tools/golden-gen/src"),
+            pythondontwritebytecode="1",
+            python_executable=python,
+            candidate_binary=dict(
+                path=str(binary.resolve()), **policy.benchmark_binary.model_dump()
+            ),
+        ),
+    )
 
 
 def _git(repo: Path, *args: str) -> bytes:

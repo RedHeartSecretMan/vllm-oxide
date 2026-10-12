@@ -7,9 +7,13 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from golden_gen.layered_accuracy import PROTOCOL
 from golden_gen.layered_artifacts import atomic_json, bound_file, sha, source_identity
+
+if TYPE_CHECKING:
+    from golden_gen.release_roles import SourceRoles
 
 PRESSURE = "mixed_chunked_prefill_and_decode_survive_three_block_pressure"
 
@@ -220,3 +224,49 @@ def validate_cpu_roles(
     if original == current or measurement == supervision:
         raise ValueError("supervised CPU roles cannot collapse to one source")
     return [path, *validate_cpu(original, measurement), *validate_cpu(current, supervision)]
+
+
+def validate_release_cpu_roles(path: Path, roles: SourceRoles, policy_sha256: str) -> list[Path]:
+    """Validate the new explicit envelope without changing legacy CPU bytes."""
+    from golden_gen.release_roles import SourceRoles
+
+    data = json.loads(path.read_text())
+    if (
+        set(data)
+        != {
+            "protocol",
+            "schema_version",
+            "kind",
+            "sources",
+            "original_cpu_roles",
+            "performance_cpu",
+            "release_cpu",
+            "source_role_policy",
+        }
+        or data["protocol"] != PROTOCOL
+        or type(data["schema_version"]) is not int
+        or data["schema_version"] != 2
+        or data["kind"] != "release_role_cpu_gates"
+        or SourceRoles.model_validate(data["sources"]) != roles
+    ):
+        raise ValueError("release CPU role envelope differs")
+    root = path.parent
+    policy = bound_file(root, data["source_role_policy"])
+    if sha(policy) != policy_sha256:
+        raise ValueError("release CPU source-role policy differs")
+    original = bound_file(root, data["original_cpu_roles"])
+    producer = bound_file(root, data["performance_cpu"])
+    evaluator = bound_file(root, data["release_cpu"])
+    if len({original.resolve(), producer.resolve(), evaluator.resolve()}) != 3:
+        raise ValueError("release CPU role inputs cannot collapse")
+    return [
+        path,
+        policy,
+        *validate_cpu_roles(
+            original,
+            roles.numerical_measurement.model_dump(),
+            roles.numerical_evaluator.model_dump(),
+        ),
+        *validate_cpu(producer, roles.performance_producer.model_dump()),
+        *validate_cpu(evaluator, roles.release_evaluator.model_dump()),
+    ]

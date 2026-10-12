@@ -8,13 +8,38 @@ import os
 import sys
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+
+from pydantic import Field
 
 from golden_gen import config
 from golden_gen.layered_accuracy import PROTOCOL
 from golden_gen.layered_artifacts import atomic_json, bound_file, sha, source_identity
-from golden_gen.layered_manifest import _common_runtime, evaluate_manifest
+from golden_gen.layered_manifest import Artifact, _common_runtime, evaluate_manifest
 from golden_gen.layered_release import Registry
+from golden_gen.release_roles import RolePolicy, SourceRoles, StrictRecord
+from golden_gen.release_transport import Entrypoints
+
+if TYPE_CHECKING:
+    from golden_gen.release_roles import FreezeBinding
+
+
+class RolePerformanceWrapper(StrictRecord):
+    protocol: Literal["layered-accuracy-v1"]
+    schema_version: Literal[3]
+    kind: Literal["recorded_role_gpu_performance"]
+    sources: SourceRoles
+    runtime: dict[str, Any]
+    binary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_source_id: str = Field(pattern=r"^[0-9a-f]{40}$")
+    authoritative_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_role_policy: Artifact
+    raw: Artifact
+    guard: Artifact
+    telemetry: list[Artifact]
+    memory_methods: list[Artifact]
+    stage_journal: Artifact
+
 
 FIXED_OPTIONS = dict(
     max_num_batched_tokens=16384,
@@ -195,8 +220,15 @@ def validate_performance(
         k in wrapper for k in ("supervision_source", "supervision_policy")
     ):
         raise ValueError("supervised performance cannot downgrade to legacy evidence")
+    closure.extend(_validate_samples(root, raw, wrapper["telemetry"], registry))
+    return raw, closure
+
+
+def _validate_samples(
+    root: Path, raw: dict[str, Any], telemetry_refs: list[dict[str, str]], registry: Registry
+) -> list[Path]:
+    closure: list[Path] = []
     members = {m.case_id: m for group in registry.numerical_cases for m in group.plan.members}
-    telemetry_refs = wrapper["telemetry"]
     expected_names = [
         f"{w}-repetition-{r}.telemetry.json"
         for w in ("canonical_04", "canonical_05")
@@ -302,7 +334,171 @@ def validate_performance(
         )
         if any(value[k] != v for k, v in headlines.items()):
             raise ValueError("performance headline differs from raw medians")
+    return closure
+
+
+def validate_role_performance(
+    path: Path,
+    roles: SourceRoles,
+    policy: RolePolicy,
+    runtime: dict[str, Any],
+    registry: Registry,
+    policy_sha256: str,
+) -> tuple[dict[str, Any], list[Path]]:
+    """New explicit R/W route; no old SUP or X capture fingerprint projection."""
+    from golden_gen.guard_evidence import validate_guard_timeline
+    from golden_gen.release_memory_method import CALL_IDS, validate_memory_method
+    from golden_gen.supervision import validate_role_benchmark_invocation
+
+    wrapper = RolePerformanceWrapper.model_validate_json(path.read_text())
+    root = path.parent
+    if (
+        wrapper.sources != roles
+        or wrapper.binary_sha256 != policy.benchmark_binary.sha256
+        or wrapper.build_source_id != policy.benchmark_binary.build_source_id
+        or wrapper.authoritative_manifest_sha256 != policy.numerical.manifest_sha256
+        or _common_runtime(wrapper.runtime) != runtime
+        or wrapper.runtime.get("generator_commit") != roles.performance_producer.commit
+    ):
+        raise ValueError("role performance actual sources/binary/runtime differ")
+    scope = bound_file(root, wrapper.source_role_policy.model_dump())
+    if sha(scope) != policy_sha256 or RolePolicy.model_validate_json(scope.read_text()) != policy:
+        raise ValueError("role performance source-role Definition differs")
+    raw_path, guard_path = (
+        bound_file(root, artifact.model_dump()) for artifact in (wrapper.raw, wrapper.guard)
+    )
+    raw, guard = (json.loads(p.read_text()) for p in (raw_path, guard_path))
+    if (
+        raw.get("protocol") != PROTOCOL
+        or type(raw.get("schema_version")) is not int
+        or raw["schema_version"] != 1
+        or raw.get("measurement_commit") != roles.performance_producer.commit
+        or raw.get("measurement_tree") != roles.performance_producer.tree
+        or raw.get("build_source_id") != policy.benchmark_binary.build_source_id
+        or raw.get("cuda_feature_enabled") is not True
+        or type(raw.get("producer_pid")) is not int
+        or raw["producer_pid"] <= 0
+        or raw["producer_pid"] != guard.get("child_pid")
+        or set(raw.get("workloads", {})) != {"canonical_04", "canonical_05"}
+    ):
+        raise ValueError("role performance native actual producer differs")
+    validate_guard_timeline(guard)
+    validate_role_benchmark_invocation(guard, roles, policy.benchmark_binary, policy_sha256)
+    closure = [
+        path,
+        scope,
+        raw_path,
+        guard_path,
+        *_validate_samples(root, raw, [a.model_dump() for a in wrapper.telemetry], registry),
+    ]
+    expected = [f"{call}.memory-method/record.json" for call in CALL_IDS]
+    if [artifact.path for artifact in wrapper.memory_methods] != expected:
+        raise ValueError("role performance six fixed memory-method paths differ")
+    records = []
+    for call, artifact in zip(CALL_IDS, wrapper.memory_methods, strict=True):
+        method_path = bound_file(root, artifact.model_dump())
+        if any(
+            (method_path.parent / name).exists()
+            for name in ("worker-timeout.json", "preservation-error.json")
+        ):
+            raise ValueError("role performance contains failed method preservation/worker state")
+        record = json.loads(method_path.read_text())
+        recomputed = validate_memory_method(
+            record,
+            call,
+            roles.performance_producer.model_dump(),
+            policy.benchmark_binary.build_source_id,
+            raw["producer_pid"],
+        )
+        workload, repetition = call.split("-repetition-")
+        if recomputed != raw["workloads"][workload]["repetitions"][int(repetition) - 1]["memory"]:
+            raise ValueError(
+                "role performance legacy memory does not reproduce from R raw method bytes"
+            )
+        if record["trace"]["library"]["driver_version"] != wrapper.runtime["nvidia_driver_version"]:
+            raise ValueError("R actual memory library driver differs from runtime")
+        records.append(record)
+        closure.append(method_path)
+    journal_path = bound_file(root, wrapper.stage_journal.model_dump())
+    if wrapper.stage_journal.path != "benchmark-stages.json":
+        raise ValueError("role performance actual stage journal path differs")
+    _validate_method_stages(
+        json.loads(journal_path.read_text()), records, policy.benchmark_binary.build_source_id
+    )
+    closure.append(journal_path)
     return raw, closure
+
+
+def _validate_method_stages(
+    journal: dict[str, Any], records: list[dict[str, Any]], build_id: str
+) -> None:
+    from golden_gen.release_memory_method import CALL_IDS
+
+    if (
+        journal.get("protocol") != "memory-method-stage-record-v1"
+        or type(journal.get("schema_version")) is not int
+        or journal["schema_version"] != 1
+        or journal.get("method") != "direct-nvml-v1"
+        or journal.get("record_only") is not True
+        or journal.get("accepting") is not False
+        or journal.get("completed") is not True
+        or journal.get("build_source_id") != build_id
+        or journal.get("clock") != "shared Rust Instant origin with every NVML monitor trace"
+    ):
+        raise ValueError("R stage journal method/source/completion differs")
+    expected: list[tuple[str, str]] = []
+    for workload in ("canonical_04", "canonical_05"):
+        expected.extend(
+            (workload, phase)
+            for phase in (
+                "discarded_warm_llm_new_entered",
+                "discarded_warm_llm_new_returned",
+                "discarded_warm_generate_completed",
+                "discarded_warm_dropped",
+            )
+        )
+        for call in (call for call in CALL_IDS if call.startswith(workload)):
+            expected.extend(
+                (call, phase)
+                for phase in (
+                    "measured_llm_new_entered",
+                    "measured_llm_new_returned",
+                    "measured_generate_entered",
+                    "measured_generate_returned",
+                    "measured_generate_succeeded_after_internal_final_step_sync",
+                    "final_memory_sample_and_worker_cleanup_completed",
+                )
+            )
+    events = journal["events"]
+    if [(e["call_id"], e["phase"]) for e in events] != expected:
+        raise ValueError("R stage journal does not cover fixed discarded/measured order")
+    timestamps = [_integer(e["elapsed_ns"]) for e in events]
+    if any(b < a for a, b in zip(timestamps, timestamps[1:], strict=False)):
+        raise ValueError("R stage journal clock is nonmonotonic")
+    for record in records:
+        phases = {
+            event["phase"]: event["elapsed_ns"]
+            for event in events
+            if event["call_id"] == record["call_id"]
+        }
+        times = record["times"]
+        if not (
+            phases["measured_llm_new_returned"]
+            <= times["post_initialization_monitor_started_ns"]
+            <= times["baseline_ready_ns"]
+            <= phases["measured_generate_entered"]
+            <= times["generate_invoked_ns"]
+            <= times["generate_returned_ns"]
+            <= phases["measured_generate_returned"]
+            <= times["generate_succeeded_after_internal_final_step_sync_ns"]
+            <= phases["measured_generate_succeeded_after_internal_final_step_sync"]
+            <= times["finish_requested_ns"]
+            <= times["worker_join_completed_ns"]
+            <= phases["final_memory_sample_and_worker_cleanup_completed"]
+        ):
+            raise ValueError(
+                "R actual measured window does not cover init/baseline/inference/final sync"
+            )
 
 
 def collect_performance(
@@ -313,6 +509,9 @@ def collect_performance(
     authoritative_manifest: Path,
     *,
     measurement_repo: Path | None = None,
+    freeze: FreezeBinding | None = None,
+    evidence_root: Path | None = None,
+    entrypoints: Entrypoints | None = None,
 ) -> Path:
     """GPU-owning stage, called only with separate stage authority; never during CPU tests."""
     from golden_gen.environment import collect_release_runtime
@@ -321,16 +520,36 @@ def collect_performance(
     repo, directory, model, binary, authoritative_manifest = (
         path.absolute() for path in (repo, directory, model, binary, authoritative_manifest)
     )
-    result = evaluate_manifest(repo, authoritative_manifest, authoritative=True)
+    prepared = None
+    if freeze is not None:
+        from golden_gen.release_roles import prepare_performance_binding
+
+        if evidence_root is None or entrypoints is None:
+            raise ValueError("role performance requires the complete numerical/CPU entrypoints")
+        if (
+            evidence_root / entrypoints.authoritative_manifest
+        ).resolve() != authoritative_manifest.resolve():
+            raise ValueError("role performance predecessor path differs")
+        prepared = prepare_performance_binding(repo, evidence_root, entrypoints, freeze=freeze)
+        result = prepared["numerical"]
+    else:
+        result = evaluate_manifest(repo, authoritative_manifest, authoritative=True)
     if result.get("verdict") != "PASS" or result.get("accepting") is not True:
         raise ValueError("performance requires complete approved authoritative evidence")
     supervisor = source_identity(repo)
     execution_repo = (measurement_repo or repo).resolve()
     source = source_identity(execution_repo)
-    if source != result["source"]:
+    if prepared is None and source != result["source"]:
         raise ValueError("performance requires the immutable authoritative measurement checkout")
     context = None
-    if result.get("supervision_source") is not None:
+    if prepared is not None:
+        from golden_gen.supervision import performance_role_context
+
+        context = performance_role_context(
+            repo, execution_repo, sys.executable, binary, freeze=freeze
+        )
+        binary = Path(context["measurement_invocation"]["candidate_binary"]["path"])
+    elif result.get("supervision_source") is not None:
         from golden_gen.supervision import measurement_context
 
         context = measurement_context(
@@ -389,10 +608,26 @@ def collect_performance(
         raise ValueError("performance source/binary/runtime changed during measurement")
 
     def ref(p: Path) -> dict[str, str]:
-        return dict(path=p.name, sha256=sha(p))
+        return dict(path=p.relative_to(directory).as_posix(), sha256=sha(p))
 
     roles: dict[str, Any] = {}
-    if context is not None:
+    if prepared is not None:
+        from golden_gen.release_memory_method import CALL_IDS
+        from golden_gen.release_roles import POLICY_PATH, _load_binding
+
+        _load_binding(repo, freeze)
+        policy_path = directory / "source-role-policy.json"
+        policy_path.write_bytes((repo / POLICY_PATH).read_bytes())
+        roles = dict(
+            sources=prepared["roles"].model_dump(),
+            source_role_policy=ref(policy_path),
+            build_source_id=prepared["policy"].benchmark_binary.build_source_id,
+            memory_methods=[
+                ref(directory / f"{call}.memory-method/record.json") for call in CALL_IDS
+            ],
+            stage_journal=ref(directory / "benchmark-stages.json"),
+        )
+    elif context is not None:
         from golden_gen.supervision import POLICY_PATH
 
         policy_path = directory / "supervision-policy.json"
@@ -403,9 +638,11 @@ def collect_performance(
         output,
         dict(
             protocol=PROTOCOL,
-            schema_version=2 if context is not None else 1,
-            kind="recorded_gpu_performance",
-            source=source,
+            schema_version=3 if prepared is not None else 2 if context is not None else 1,
+            kind="recorded_role_gpu_performance"
+            if prepared is not None
+            else "recorded_gpu_performance",
+            **({"source": source} if prepared is None else {}),
             runtime=runtime,
             binary_sha256=binary_hash,
             raw=ref(raw),
@@ -419,4 +656,13 @@ def collect_performance(
             ],
         ),
     )
+    if prepared is not None:
+        validate_role_performance(
+            output,
+            prepared["roles"],
+            prepared["policy"],
+            result["runtime_profile"],
+            prepared["registry"],
+            prepared["freeze"].policy_sha256,
+        )
     return output

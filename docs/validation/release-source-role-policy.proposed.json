@@ -1,0 +1,68 @@
+{
+  "benchmark_binary": {
+    "build_source_id": "dca13676f7aacedbf2cfe8ef84f0a916ddd48708",
+    "sha256": "943e6d97c237e4ec3c9ab092c5aa4cbbaeb4d75816a910b514ea57263f703c0a"
+  },
+  "monitor_method": "direct-nvml-v1",
+  "monitor_schema_version": 1,
+  "numerical": {
+    "calibration": {
+      "commit": "2dc94452df5f7ed259a8607962fe98619cfd6526",
+      "tree": "40fd91747f33146a2be46cebcf51f64c3c177254"
+    },
+    "evaluator": {
+      "commit": "ba5eb799acbf156fcab588d71aad09b6f1b15615",
+      "tree": "01e36172d803173bd8f6f3d39c9f860081ad8a5e"
+    },
+    "manifest_sha256": "0b0986c2e265a5f830e983fef779467d8f99478639522d69daaabced89ec3cef",
+    "marker_sha256": "eb0211074409f6eadd3e7f7bca4b703fa514d54db60dc8162088d1d94013849a",
+    "measurement": {
+      "commit": "33e0e27268285368c8c28b47df5cb1df9b2df174",
+      "tree": "2c7a4a1720d8695e809d150c9c53785658779195"
+    },
+    "original_cpu_roles_sha256": "e64e532a6527e154d9cfd40a7e4aab010bcd1a1d7fdf9106aee8be2378ee42ea",
+    "policy_sha256": "cf3cd6acc238d05343cf474d2ac19d4640b736d594d5d713593d83d2f07cd909",
+    "registry_sha256": "5900b5f567e578deeb26c676c62ead51337db319755f26d1a8a50512b8f13b35",
+    "result_sha256": "451d2e200f41356761a3b1bda5b08f7daed6037f1c82ff68b7dee98339da8d17"
+  },
+  "performance_producer": {
+    "commit": "07a9fb1bd170ca64bb63d1e183fd2b9f14503353",
+    "tree": "efc544fea7e7b0774cb1d0ee7f128379814af408"
+  },
+  "producer_changes": [
+    {
+      "after": {
+        "kind": "blob",
+        "mode": "100644",
+        "oid": "0577f37ed3abe2482471383804cd72bf59e3aa59"
+      },
+      "before": null,
+      "path": "crates/vllm-oxide-test/src/benchmark/nvml_ffi.rs"
+    },
+    {
+      "after": {
+        "kind": "blob",
+        "mode": "100644",
+        "oid": "c4731399eb0f255f05f94b389ff4feaa63ff6e44"
+      },
+      "before": null,
+      "path": "crates/vllm-oxide-test/src/benchmark/nvml_monitor.rs"
+    },
+    {
+      "after": {
+        "kind": "blob",
+        "mode": "100644",
+        "oid": "20a93685823c6513316b4876a1248f8a6d818fd5"
+      },
+      "before": {
+        "kind": "blob",
+        "mode": "100644",
+        "oid": "b3fa6d8dd9d873ca84cc43fd46cf097cb20125b2"
+      },
+      "path": "crates/vllm-oxide-test/src/benchmark/runner.rs"
+    }
+  ],
+  "protocol": "layered-release-source-roles-v1",
+  "schema_version": 1,
+  "status": "proposed"
+}
