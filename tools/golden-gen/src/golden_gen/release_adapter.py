@@ -93,6 +93,27 @@ def _authoritative(repo: Path, path: Path) -> dict[str, Any]:
     return result
 
 
+def _evidence_counts(registry: Registry, artifacts: int) -> dict[str, int]:
+    return dict(
+        execution_groups=len(registry.numerical_cases),
+        numerical_cases=sum(len(c.plan.members) for c in registry.numerical_cases),
+        prediction_rows_per_engine_variant=sum(
+            len(m.continuation) for c in registry.numerical_cases for m in c.plan.members
+        ),
+        setup_calls_per_engine_variant=sum(len(c.setup_calls) for c in registry.numerical_cases),
+        setup_rows_per_engine_variant=sum(
+            len(m.continuation)
+            for c in registry.numerical_cases
+            for p in c.setup_calls
+            for m in p.members
+        ),
+        unique_owners=len(frozen_owner_inventory(registry, authoritative=True)),
+        operator_profiles=len(registry.operator_profiles),
+        behavior_cases=len(registry.behavior_cases),
+        artifacts=artifacts,
+    )
+
+
 def validate_evidence(
     repo: Path, root: Path, entrypoints: Entrypoints, *, freeze: FreezeBinding | None = None
 ) -> tuple[dict[str, Any], list[Path]]:
@@ -162,24 +183,7 @@ def validate_evidence(
             raise ValueError("archived Definition snapshot differs from its own measured source")
         closure.append(path)
     inventory = Artifact.inventory(root, list(dict.fromkeys(closure)))
-    counts = dict(
-        execution_groups=len(registry.numerical_cases),
-        numerical_cases=sum(len(c.plan.members) for c in registry.numerical_cases),
-        prediction_rows_per_engine_variant=sum(
-            len(m.continuation) for c in registry.numerical_cases for m in c.plan.members
-        ),
-        setup_calls_per_engine_variant=sum(len(c.setup_calls) for c in registry.numerical_cases),
-        setup_rows_per_engine_variant=sum(
-            len(m.continuation)
-            for c in registry.numerical_cases
-            for p in c.setup_calls
-            for m in p.members
-        ),
-        unique_owners=len(frozen_owner_inventory(registry, authoritative=True)),
-        operator_profiles=len(registry.operator_profiles),
-        behavior_cases=len(registry.behavior_cases),
-        artifacts=len(inventory),
-    )
+    counts = _evidence_counts(registry, len(inventory))
     metadata = dict(
         source=manifest.source,
         registry_sha256=registry_sha,
@@ -234,24 +238,7 @@ def _role_evidence(
             raise ValueError("role Definition snapshot differs from actual source Git objects")
         closure.append(path)
     inventory = Artifact.inventory(root, list(dict.fromkeys(closure)))
-    counts = dict(
-        execution_groups=len(registry.numerical_cases),
-        numerical_cases=sum(len(c.plan.members) for c in registry.numerical_cases),
-        prediction_rows_per_engine_variant=sum(
-            len(m.continuation) for c in registry.numerical_cases for m in c.plan.members
-        ),
-        setup_calls_per_engine_variant=sum(len(c.setup_calls) for c in registry.numerical_cases),
-        setup_rows_per_engine_variant=sum(
-            len(m.continuation)
-            for c in registry.numerical_cases
-            for p in c.setup_calls
-            for m in p.members
-        ),
-        unique_owners=len(frozen_owner_inventory(registry, authoritative=True)),
-        operator_profiles=len(registry.operator_profiles),
-        behavior_cases=len(registry.behavior_cases),
-        artifacts=len(inventory),
-    )
+    counts = _evidence_counts(registry, len(inventory))
     metadata = dict(
         source=manifest.source,
         registry_sha256=manifest.registry_sha256,
