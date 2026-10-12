@@ -417,6 +417,15 @@ def validate_role_performance(
             )
         if record["trace"]["library"]["driver_version"] != wrapper.runtime["nvidia_driver_version"]:
             raise ValueError("R actual memory library driver differs from runtime")
+        telemetry_ref = next(a for a in wrapper.telemetry if a.path == f"{call}.telemetry.json")
+        telemetry = json.loads(bound_file(root, telemetry_ref.model_dump()).read_text())
+        final_step_end = telemetry["telemetry"]["steps"][-1]["ended_ns"]
+        times = record["times"]
+        # llm.rs creates admission inside LLM::generate and records ended_ns
+        # after step-end synchronization. Its relative final time must fit in
+        # this call's measured duration; the two clocks have different origins.
+        if times["generate_returned_ns"] - times["generate_invoked_ns"] < final_step_end:
+            raise ValueError("R generate duration does not cover same-call synchronized telemetry")
         records.append(record)
         closure.append(method_path)
     journal_path = bound_file(root, wrapper.stage_journal.model_dump())

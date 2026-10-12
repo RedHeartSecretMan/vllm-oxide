@@ -193,3 +193,40 @@ def test_role_performance_full_six_record_graph_and_legacy_refusal(tmp_path):
     path.write_text(json.dumps(broken))
     with pytest.raises(ValueError, match="six fixed"):
         validate_role_performance(path, roles, policy, runtime, registry, digest)
+
+
+def test_rehashed_generate_phases_cannot_be_shorter_than_same_call_final_synchronized_step(
+    tmp_path,
+):
+    path, roles, policy, runtime, registry, digest, wrapper = role_performance(tmp_path)
+    validate_role_performance(path, roles, policy, runtime, registry, digest)
+    root = path.parent
+    raw_hash = sha(root / wrapper["raw"]["path"])
+    telemetry_hashes = {ref["path"]: sha(root / ref["path"]) for ref in wrapper["telemetry"]}
+    first = wrapper["memory_methods"][0]
+    record_path = root / first["path"]
+    record = json.loads(record_path.read_text())
+    # Keep original synchronized steps, memory samples, sources, binary and PID.
+    # The raw final step ends 640ns after admission inside LLM::generate.
+    returned = record["times"]["generate_invoked_ns"] + 1
+    record["times"].update(
+        generate_returned_ns=returned,
+        generate_succeeded_after_internal_final_step_sync_ns=returned + 1,
+    )
+    record_path.write_text(json.dumps(record))
+    first["sha256"] = sha(record_path)
+    journal_path = root / wrapper["stage_journal"]["path"]
+    journal = json.loads(journal_path.read_text())
+    for event in journal["events"]:
+        if event["call_id"] == CALL_IDS[0]:
+            if event["phase"] == "measured_generate_returned":
+                event["elapsed_ns"] = returned
+            elif event["phase"] == "measured_generate_succeeded_after_internal_final_step_sync":
+                event["elapsed_ns"] = returned + 1
+    journal_path.write_text(json.dumps(journal))
+    wrapper["stage_journal"]["sha256"] = sha(journal_path)
+    path.write_text(json.dumps(wrapper))
+    assert sha(root / wrapper["raw"]["path"]) == raw_hash
+    assert {name: sha(root / name) for name in telemetry_hashes} == telemetry_hashes
+    with pytest.raises(ValueError, match="generate duration.*synchronized telemetry"):
+        validate_role_performance(path, roles, policy, runtime, registry, digest)

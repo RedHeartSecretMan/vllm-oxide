@@ -30,6 +30,7 @@ MONITOR_PATHS = {
 HASH = r"^[0-9a-f]{64}$"
 OID = r"^[0-9a-f]{40}$"
 ADAPTER_PATHS = {
+    ".github/workflows/ci.yml",
     "tools/golden-gen/src/golden_gen/release_roles.py",
     "tools/golden-gen/src/golden_gen/release_memory_method.py",
     "tools/golden-gen/src/golden_gen/release_performance.py",

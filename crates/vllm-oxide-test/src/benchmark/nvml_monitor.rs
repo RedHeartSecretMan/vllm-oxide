@@ -338,6 +338,30 @@ impl ActiveMemoryMonitor {
     where
         F: FnOnce() -> Result<Box<dyn SamplingApi>> + Send + 'static,
     {
+        Self::start_with_schedule(
+            output,
+            call_id,
+            origin,
+            source,
+            factory,
+            sample_limit,
+            || {},
+        )
+    }
+
+    fn start_with_schedule<F, H>(
+        output: &Path,
+        call_id: &str,
+        origin: Instant,
+        source: &MeasurementIdentity,
+        factory: F,
+        sample_limit: usize,
+        after_spawn: H,
+    ) -> Result<Self>
+    where
+        F: FnOnce() -> Result<Box<dyn SamplingApi>> + Send + 'static,
+        H: FnOnce(),
+    {
         let directory = output.join(format!("{call_id}.memory-method"));
         std::fs::create_dir(&directory)
             .context("creating fresh direct NVML memory record directory")?;
@@ -350,6 +374,8 @@ impl ActiveMemoryMonitor {
             ..Trace::default()
         }));
         let worker_shared = Arc::clone(&shared);
+        // Capture the real shared-clock anchor before the worker can initialize/query.
+        let monitor_started_ns = origin.elapsed().as_nanos();
         let worker = thread::Builder::new()
             .name("direct-nvml-monitor".into())
             .spawn(move || {
@@ -357,12 +383,13 @@ impl ActiveMemoryMonitor {
                 let _ = acknowledge.send(());
                 trace
             })?;
+        after_spawn();
         let mut monitor = Self {
             directory,
             call_id: call_id.to_owned(),
             source: source.clone(),
             origin,
-            times: BTreeMap::new(),
+            times: BTreeMap::from([("post_initialization_monitor_started_ns", monitor_started_ns)]),
             stop: Some(stop_sender),
             worker: Some(worker),
             done,
@@ -373,7 +400,6 @@ impl ActiveMemoryMonitor {
             joined: false,
             saved: false,
         };
-        monitor.mark("post_initialization_monitor_started_ns");
         let result = baseline
             .recv_timeout(Duration::from_secs(5))
             .context("NVML monitor did not produce a post-initialization baseline")
@@ -551,6 +577,7 @@ mod tests {
         Slow,
         Panic,
         Blocked,
+        SignalEntered(SyncSender<()>),
         Held(SyncSender<()>, Receiver<()>),
     }
 
@@ -585,6 +612,9 @@ mod tests {
                 Action::Blocked => loop {
                     thread::park();
                 },
+                Action::SignalEntered(entered) => {
+                    entered.send(()).unwrap();
+                }
                 Action::Held(entered, release) => {
                     entered.send(()).unwrap();
                     release.recv().unwrap();
@@ -738,6 +768,47 @@ mod tests {
             raw[1]["api_enter_ns"].as_u64().unwrap()
                 >= raw[0]["observed_ns"].as_u64().unwrap() + 5_000_000
         );
+    }
+
+    #[test]
+    fn nvml_start_anchor_precedes_first_query_when_parent_runs_after_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let (entered, observed) = mpsc::sync_channel(1);
+        let closed = Arc::new(AtomicUsize::new(0));
+        let api_closed = Arc::clone(&closed);
+        let monitor = ActiveMemoryMonitor::start_with_schedule(
+            directory.path(),
+            "test",
+            Instant::now(),
+            &MeasurementIdentity {
+                commit: "0".repeat(40),
+                tree: "1".repeat(40),
+            },
+            move || {
+                Ok(Box::new(FakeApi {
+                    actions: vec![Action::SignalEntered(entered)].into(),
+                    closed: api_closed,
+                    init_error: false,
+                    close_error: false,
+                }))
+            },
+            20,
+            // Deterministically realize the legal worker-first schedule, with no timestamp edits.
+            move || {
+                observed.recv_timeout(Duration::from_secs(1)).unwrap();
+            },
+        )
+        .unwrap();
+        monitor.finish().unwrap();
+        let data = saved(directory.path());
+        let start = data["times"]["post_initialization_monitor_started_ns"]
+            .as_u64()
+            .unwrap();
+        let first_enter = data["trace"]["raw_samples"][0]["api_enter_ns"]
+            .as_u64()
+            .unwrap();
+        assert!(start <= first_enter, "baseline sampling starts before post-initialization monitor: start={start}, enter={first_enter}");
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
     }
 
     #[test]

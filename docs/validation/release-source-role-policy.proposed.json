@@ -1,7 +1,7 @@
 {
   "benchmark_binary": {
-    "build_source_id": "dca13676f7aacedbf2cfe8ef84f0a916ddd48708",
-    "sha256": "943e6d97c237e4ec3c9ab092c5aa4cbbaeb4d75816a910b514ea57263f703c0a"
+    "build_source_id": "7c9a6957f18919e2aa0ca3b74cd1e8a331eb505f",
+    "sha256": "44107b3a5ad5ff8c656525aed66e942174ea104078d9bb75243649f05ff93c75"
   },
   "monitor_method": "direct-nvml-v1",
   "monitor_schema_version": 1,
@@ -26,8 +26,8 @@
     "result_sha256": "451d2e200f41356761a3b1bda5b08f7daed6037f1c82ff68b7dee98339da8d17"
   },
   "performance_producer": {
-    "commit": "07a9fb1bd170ca64bb63d1e183fd2b9f14503353",
-    "tree": "efc544fea7e7b0774cb1d0ee7f128379814af408"
+    "commit": "e785a217af6031a1890c0e52de6f61d86f731713",
+    "tree": "6bbfad6772dc993d3def6b352d4f9da77f42b2f0"
   },
   "producer_changes": [
     {
@@ -43,7 +43,7 @@
       "after": {
         "kind": "blob",
         "mode": "100644",
-        "oid": "c4731399eb0f255f05f94b389ff4feaa63ff6e44"
+        "oid": "7137dc01a9b928b107a6057bc3aa431aae543947"
       },
       "before": null,
       "path": "crates/vllm-oxide-test/src/benchmark/nvml_monitor.rs"
