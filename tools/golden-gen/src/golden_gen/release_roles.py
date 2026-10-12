@@ -31,6 +31,7 @@ HASH = r"^[0-9a-f]{64}$"
 OID = r"^[0-9a-f]{40}$"
 ADAPTER_PATHS = {
     ".github/workflows/ci.yml",
+    "tools/golden-gen/src/golden_gen/guard.py",
     "tools/golden-gen/src/golden_gen/release_roles.py",
     "tools/golden-gen/src/golden_gen/release_memory_method.py",
     "tools/golden-gen/src/golden_gen/release_performance.py",
@@ -42,6 +43,9 @@ ADAPTER_PATHS = {
     POLICY_PATH,
     "docs/validation/release-source-role-policy.proposed.json",
     "docs/adr/0029-proposed-release-source-roles.md",
+    "tools/golden-gen/tests/conftest.py",
+    "tools/golden-gen/tests/test_guard_capability.py",
+    "tools/golden-gen/tests/test_guard_recovery.py",
     "tools/golden-gen/tests/test_release_roles.py",
     "tools/golden-gen/tests/test_release_role_cpu.py",
     "tools/golden-gen/tests/test_release_memory_method.py",
@@ -389,8 +393,9 @@ def _numerical_result(
                 compute_processes="",
             )
 
-        # guard.py and telemetry.py are preserved old-Y Git objects. This CPU
-        # probe never starts NVML/nvidia-smi or imports code from the archive.
+        # telemetry.py retains its old-Y Git object. The reviewed guard change
+        # only adds a default GPU precheck; this explicit CPU probe avoids GPU
+        # queries and leaves the independent old-Y numerical invocation intact.
         run_guarded(
             command,
             guard_path,
