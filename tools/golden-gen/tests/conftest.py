@@ -10,6 +10,19 @@ from golden_gen.config import VOCAB_SIZE
 
 
 @pytest.fixture
+def native_linux_kernel(monkeypatch):
+    """Explicit platform input only for CPU fixtures mocking default GPU queries."""
+    original_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == Path("/proc/sys/kernel/osrelease"):
+            return "6.8.0-generic\n"
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+@pytest.fixture
 def controlled_host_ram(monkeypatch):
     """Explicit input for synthetic guard tests, independent of runner capacity."""
     original_read = Path.read_text

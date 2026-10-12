@@ -114,6 +114,27 @@ def resource_snapshot(directory: Path) -> dict[str, Any]:
     }
 
 
+def _require_compute_process_visibility() -> None:
+    """Reject the known WSL enumeration limitation before default GPU queries."""
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text().strip()
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError(
+            "Cannot establish GPU compute-process enumeration support from the Linux kernel; "
+            "use an environment that supports GPU process enumeration"
+        ) from error
+    if not release:
+        raise RuntimeError(
+            "Cannot establish GPU compute-process enumeration support: empty Linux kernel release; "
+            "use an environment that supports GPU process enumeration"
+        )
+    if "microsoft" in release.casefold() or "wsl" in release.casefold():
+        raise RuntimeError(
+            "WSL does not support active GPU compute-process enumeration; "
+            "use an environment that supports GPU process enumeration"
+        )
+
+
 def run_guarded(
     command: list[str],
     evidence: Path,
@@ -126,6 +147,8 @@ def run_guarded(
     timeout_seconds: float | None = None,
 ) -> None:
     """Supervise one owner with independent RAM checks and bounded telemetry."""
+    if probe is None:
+        _require_compute_process_visibility()
     with _adopt_owned_descendants():
         _run_guarded(
             command,

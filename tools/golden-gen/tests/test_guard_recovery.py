@@ -9,7 +9,7 @@ import pytest
 
 from golden_gen.guard import run_guarded
 
-pytestmark = pytest.mark.usefixtures("controlled_host_ram")
+pytestmark = pytest.mark.usefixtures("controlled_host_ram", "native_linux_kernel")
 
 
 def fake_query(tmp_path, monkeypatch, delays):
