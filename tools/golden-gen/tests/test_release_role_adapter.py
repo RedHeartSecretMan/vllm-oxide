@@ -222,6 +222,7 @@ def synthetic_role_inputs(tmp_path):
     )
 
 
+@pytest.mark.usefixtures("controlled_host_ram")
 def test_role_preparation_executes_trusted_y_full_numerical_code_in_a_separate_process(
     tmp_path, monkeypatch
 ):
@@ -254,6 +255,7 @@ def test_role_preparation_executes_trusted_y_full_numerical_code_in_a_separate_p
     assert {p: sha(p) for p in before} == before
 
 
+@pytest.mark.usefixtures("controlled_host_ram")
 def test_rehashed_pass_summary_cannot_replace_independent_trusted_y_math(tmp_path):
     repo, run, entries, freeze = synthetic_role_inputs(tmp_path)
     preserved_result = run / "authoritative-result.json"
@@ -366,6 +368,7 @@ def complete_role_inputs(tmp_path):
     return repo, run, entries, freeze
 
 
+@pytest.mark.usefixtures("controlled_host_ram")
 def test_complete_role_graph_revalidates_original_numerical_and_actual_performance_roles(tmp_path):
     repo, run, entries, freeze = complete_role_inputs(tmp_path)
     result = validate_release_roles(repo, run, entries, freeze=freeze)
@@ -376,6 +379,7 @@ def test_complete_role_graph_revalidates_original_numerical_and_actual_performan
     )
 
 
+@pytest.mark.usefixtures("controlled_host_ram")
 def test_role_assets_survive_actual_rust_python_consumers_and_exact_report_candidate(tmp_path):
     from golden_gen.release_adapter import REPORT, git, prepare_bundle, render_report, verify_bundle
 
