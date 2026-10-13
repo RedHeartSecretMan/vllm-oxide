@@ -31,3 +31,11 @@ Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.1.0](https://git
 Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1).
 
 Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0).
+
+## Reviewed documentation commits
+
+| Version | Documentation maintenance commit | Original tag archive |
+|---|---|---|
+| `v0.1.0` | [`39a6960`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/39a6960fb6acfe8d79996b33bd235b654d40e931) | [`archive/before-doc-refresh-2026-10-13/v0.1.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.1.0) |
+| `v0.2.0.rc.1` | [`9049fe7`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/9049fe7490f62fc0e2402ca7a23918dd55c680df) | [`archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1) |
+| `v0.2.0` | [`6d2993e`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/6d2993e021d75976adbcd8734ee33d0ebb60c54e) | [`archive/before-doc-refresh-2026-10-13/v0.2.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0) |
