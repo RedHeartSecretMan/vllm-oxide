@@ -3,9 +3,8 @@
 [English](README.md) | **简体中文**
 
 > **v0.2.0：单 GPU Qwen3 离线推理。**
-> 支持范围与正式发布所需证据见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
+> 支持范围与已完成的验证见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
 > 已发布的标签与资产见 [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases)。
-> 使用下文的标签依赖示例前，对应版本需已出现在 Releases 中。
 
 [CI][ci-url]
 [License: Apache-2.0][license-url]
@@ -89,12 +88,13 @@ flowchart TD
 - **推理 / 发布门禁**（启用 `--features cuda`）：
   - NVIDIA GPU，计算能力 **sm_89** 及以上（Ada Lovelace RTX 40 系列、Hopper H100/H200 或更新型号）。
   - 建议至少 8 GB GPU 内存用于 Qwen3-0.6B。
-  - 安装 CUDA 驱动（已在 CUDA 12.x 和 13.2 上测试）。
+  - 安装 NVIDIA CUDA 驱动；本版本使用驱动 595.71 验证。
 
 ### 工具链
 
 - **Rust**：edition 2021，MSRV 为 **1.94.0**，由 `rust-toolchain.toml` 固定；CPU CI 同时检查当前 stable 工具链。
-- **系统**：Linux（唯一支持的 NVIDIA CUDA 平台）。Windows 和 macOS GPU 推理不在 v0.2.0 范围内。
+- **CUDA 构建**：安装包含 `nvcc` 的 CUDA Toolkit；本版本使用 Toolkit 13.2.51 验证。
+- **系统**：Linux，包括 WSL2。本次发布验证使用 WSL2；原生 Windows 和 macOS GPU 推理不在 v0.2.0 范围内。
 
 ## 快速开始
 
@@ -270,7 +270,7 @@ cargo test
 
 参考预言机为固定 PyTorch SDPA MATH 后端的 Transformers BF16。基线预言机为 FlashAttention 后端的 vLLM BF16；其配对平均 KL 构成额外门槛，不能豁免参考失败。固定前缀回放保留所有规定的预测行，包括预测 token 分叉后的行；自由生成的分叉和一致率单独诊断，不计算不同历史之间的验收 KL。
 
-旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议，旧 authoritative/publication 入口保持禁用。[schema5 发布适配器](tools/golden-gen/README.md#schema5-release-stages) 将完整原始分层证据接入性能、固定 CPU 门槛、报告、完整 manifest/压缩包组合及 Python/Rust 干净消费者验证。根据 [ADR-0028](docs/adr/0028-local-release-evidence.md)，本轮验收将完整证据保存在本地，无需上传 GitHub，也不采用分卷。干净的 evidence-only 候选和完整新审查仍为必需；既有工件保留原身份和原判定。
+旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议，旧 authoritative/publication 入口保持禁用。[schema5 发布适配器](tools/golden-gen/README.md#schema5-release-stages) 将完整原始分层证据接入性能、固定 CPU 门槛、报告、完整 manifest/压缩包组合及 Python/Rust 干净消费者验证。根据 [ADR-0028](docs/adr/0028-local-release-evidence.md)，原始证据保存在本地，无需上传 GitHub，也不采用分卷。[v0.2.0 验证摘要](docs/releases/goldens-v0.2.md)记录已批准的来源分工和实际产品验收；该摘要不声明旧组合证据包门禁已完成。既有工件保留原身份和原判定。
 
 CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或可选发布。本地证据包按[分层传输契约](docs/validation/layered-release-assets.md)仅包含 `manifest.json` 与 `goldens-v0.2.tar.gz` 两个文件。可选的手动 GitHub 发布还需独立用户授权，并要求每个资产严格小于 2 GiB；该上传限制不影响本地数值验收。
 

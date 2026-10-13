@@ -3,10 +3,9 @@
 **English** | [简体中文](README.zh-CN.md)
 
 > **v0.2.0 — single-GPU Qwen3 offline inference.**
-> Supported scope and formal release evidence requirements are recorded in the
+> Supported scope and completed validation are recorded in the
 > [v0.2.0 release notes](docs/releases/v0.2.0.md). Published tags and assets are
 > listed in [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases).
-> The tagged dependency example requires the corresponding published Release.
 
 [![CI][ci-badge]][ci-url]
 [![License: Apache-2.0][license-badge]][license-url]
@@ -91,12 +90,13 @@ Key design decisions (see `CONTEXT.md` for the full vocabulary):
 - **Inference / release gate** (with `--features cuda`):
   - NVIDIA GPU with compute capability **sm_89** or higher (Ada Lovelace RTX 40-series, Hopper H100/H200, or newer).
   - At least 8 GB of GPU memory recommended for Qwen3-0.6B.
-  - CUDA driver installed (tested with CUDA 12.x and 13.2).
+  - NVIDIA CUDA driver installed; this release was validated with driver 595.71.
 
 ### Toolchain
 
 - **Rust**: edition 2021, MSRV **1.94.0**, pinned by `rust-toolchain.toml`. CPU CI also tests the current stable toolchain.
-- **System**: Linux (the only supported NVIDIA CUDA platform). Windows and macOS GPU inference are outside v0.2.0.
+- **CUDA build**: install the CUDA Toolkit, including `nvcc`; this release was validated with Toolkit 13.2.51.
+- **System**: Linux, including WSL2. The release validation used WSL2; native Windows and macOS GPU inference are outside v0.2.0.
 
 ## Quick Start
 
@@ -272,7 +272,7 @@ The current release protocol is [ADR-0015](docs/adr/0015-layered-accuracy-valida
 
 The Reference oracle is Transformers BF16 with the fixed PyTorch SDPA MATH backend. The Baseline oracle is vLLM BF16 with FlashAttention; its paired mean KL contributes an additional gate and cannot waive a reference failure. Fixed-prefix replay preserves all declared prediction rows, including after a predicted-token divergence. Free-generation divergence and agreement are separate diagnostics, never different-history KL evidence.
 
-The old ADR-0012 schema-v4 manifests, L1=token/L2=logits terminology and `validate-release.sh` workflow are historical. Their authoritative/publication entrypoints stay disabled. The [schema5 release adapter](tools/golden-gen/README.md#schema5-release-stages) connects complete raw layered evidence to performance, fixed CPU gates, the report, the complete manifest/archive pair and Python/Rust clean consumption. Under [ADR-0028](docs/adr/0028-local-release-evidence.md), this acceptance run retains the complete evidence locally; it requires neither GitHub evidence uploads nor split archives. A clean evidence-only candidate and fresh full review remain mandatory. Existing artifacts retain their original identities and verdicts.
+The old ADR-0012 schema-v4 manifests, L1=token/L2=logits terminology and `validate-release.sh` workflow are historical. Their authoritative/publication entrypoints stay disabled. The [schema5 release adapter](tools/golden-gen/README.md#schema5-release-stages) connects complete raw layered evidence to performance, fixed CPU gates, the report, the complete manifest/archive pair and Python/Rust clean consumption. Under [ADR-0028](docs/adr/0028-local-release-evidence.md), raw evidence remains local; GitHub evidence uploads and split archives are unnecessary. The [v0.2.0 validation summary](docs/releases/goldens-v0.2.md) records the approved source roles and actual product acceptance. It does not claim completion of the legacy combined evidence-package gate. Existing artifacts retain their original identities and verdicts.
 
 No GPU collection or publication is implied by CPU tests. GPU stages and optional publication require their own authorization. The local bundle retains exactly `manifest.json` and `goldens-v0.2.tar.gz` under the [layered transport contract](docs/validation/layered-release-assets.md). Optional manual GitHub publication additionally requires independent user authority and assets strictly smaller than 2 GiB; that upload limit does not gate local numerical acceptance.
 
