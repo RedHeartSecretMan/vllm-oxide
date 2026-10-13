@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Usage and development help
+    url: https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/SUPPORT.md
+    about: Read the documentation and find the appropriate question or report entrypoint.
+  - name: Private security report
+    url: https://github.com/RedHeartSecretMan/vllm-oxide/security/advisories/new
+    about: Report security vulnerabilities privately; do not open a public issue.

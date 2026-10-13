@@ -1,0 +1,76 @@
+name: Bug report
+description: Report an error or unexpected behavior with a minimal reproduction.
+title: "[Bug] "
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first and check [SUPPORT.md](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/SUPPORT.md).
+        Report security vulnerabilities privately using [SECURITY.md](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/SECURITY.md).
+        Redact tokens and sensitive prompts. Model weights and raw acceptance evidence packages are not required.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Include the release tag or exact source commit and whether you have local changes.
+      placeholder: v0.2.0, or a full commit hash
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Paste a runnable CLI command or small Rust example and any required setup. Use a shareable prompt or token IDs.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Describe the error, incorrect result or performance change. Include a comparison workload for a regression.
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Model identity
+      description: For inference issues, give the model ID, immutable revision, dtype and whether the source is a Hub snapshot or local directory. Otherwise use not applicable.
+      placeholder: |
+        Model ID: Qwen/Qwen3-0.6B
+        Revision:
+        Dtype:
+        Source:
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and build
+      description: Give OS details and the build command/features. Include GPU details for CUDA issues; use not applicable for CPU-only checks.
+      placeholder: |
+        OS and kernel (native Linux or WSL, if relevant):
+        Rust version:
+        Build command and features:
+        GPU and VRAM:
+        NVIDIA driver:
+        CUDA toolkit:
+    validations:
+      required: true
+  - type: textarea
+    id: configuration
+    attributes:
+      label: Generation and engine configuration
+      description: Include sampling settings, token limits, batch size and EngineOptions. Use not applicable for build or tooling issues.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the relevant error or output, with sensitive information removed. No need for a full evidence archive.
+      render: text

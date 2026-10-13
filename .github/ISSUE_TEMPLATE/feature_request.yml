@@ -1,0 +1,33 @@
+name: Feature request
+description: Describe a problem or use case and a proposed improvement.
+title: "[Feature] "
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues and read the [current release scope](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/releases/v0.2.0.md) first.
+        v0.2.0 supports single-GPU, offline Qwen3-0.6B BF16 generation. Proposals beyond that scope are welcome; describe the additional requirements explicitly.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Who needs this, what are they trying to do, and what limitation do they encounter today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired result or API. An example is useful; an implementation is not required.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or current workaround
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and validation
+      description: Note relevant models, hardware or API changes and how the improvement could be checked. Distinguish measured results from estimates.
