@@ -14,8 +14,8 @@ Use the [main-workspace getting-started guide](../docs/getting-started.md) to ru
 
 ## Reproduce and report research
 
-Start from the prototype's pinned dependency commit and read its build/run requirements. Its historical nested manifest needs the documented isolated-copy run to avoid Cargo workspace discovery errors. Keep its independently generated `Cargo.lock`, build artifacts and logs local. Report the exact source, dependency resolution, GPU/driver/Toolkit, full stdout and exit code; the README's old test-machine reference is not proof of a current rerun.
+Start from the prototype's pinned dependency commit and read its build/run requirements. Its independent workspace and committed `Cargo.lock` support a direct run from this checkout. CPU tests exercise the complete-output validator. Keep generated build artifacts and logs local. Report the exact source, dependency resolution, GPU/driver/Toolkit, full stdout and exit code; the README's old test-machine reference is not proof of a current rerun.
 
-A new experiment should name its question, entrypoint, fixed inputs, observable success criteria and limits. Synthetic shape checks or sampled non-NaN values do not establish numerical equivalence. Promote a useful conclusion through a reviewed implementation and relevant engine tests, with any numerical measurements attached to their actual source identity.
+A new experiment should name its question, entrypoint, fixed inputs, observable success criteria and limits. Synthetic shape and complete finite-output checks do not establish model numerical equivalence. Promote a useful conclusion through a reviewed implementation and relevant engine tests, with any numerical measurements attached to their actual source identity.
 
 Architecture references: [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm), [vLLM](https://github.com/vllm-project/vllm) and [Candle](https://github.com/huggingface/candle). Community/documentation research on current `main` is [available separately](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/research/README.md).

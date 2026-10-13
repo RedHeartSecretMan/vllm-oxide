@@ -28,7 +28,7 @@ vllm-oxide 是一个 Rust 推理引擎，支持**单 GPU、同步、离线的 Qw
 
 ## 快速开始
 
-GPU 推理需要 Linux 或 WSL2、记录的 **Rust 1.94.0** 工具链、计算能力 **8.9 或更高**的 NVIDIA GPU、可用的 NVIDIA 驱动，以及包含 `nvcc` 的 CUDA Toolkit。RC 记录来自 RTX 4080/WSL2；需要兼容 CUDA 驱动和完整 Toolkit。历史 manifest 的 Rust 1.75 下限未验证，本次文档维护未新增硬件或工具链验证。
+GPU 推理需要 Linux 或 WSL2、记录的 **Rust 1.94.0** 工具链、计算能力 **8.9 或更高**的 NVIDIA GPU、可用的 NVIDIA 驱动，以及包含 `nvcc` 的 CUDA Toolkit。RC 记录来自 RTX 4080/WSL2；需要兼容 CUDA 驱动和完整 Toolkit。维护后的源码已固定 Rust 1.94.0；原 RC 测量与本次维护检查分别记录。
 
 克隆发布源码，通过自带示例使用验收时的固定模型 revision：
 

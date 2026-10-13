@@ -28,7 +28,7 @@ Serving, async streaming, multi-GPU/TP/NCCL, other model families, quantization,
 
 ## Quick start
 
-GPU inference needs Linux or WSL2, the recorded Rust **1.94.0** toolchain, an NVIDIA GPU with compute capability **8.9 or newer**, a working NVIDIA driver, and a CUDA Toolkit containing `nvcc`. RC results were recorded on RTX 4080/WSL2. Use a compatible CUDA driver and full Toolkit containing `nvcc`; the manifest's historical Rust 1.75 minimum was not verified. This documentation refresh does not add hardware or toolchain validation.
+GPU inference needs Linux or WSL2, the recorded Rust **1.94.0** toolchain, an NVIDIA GPU with compute capability **8.9 or newer**, a working NVIDIA driver, and a CUDA Toolkit containing `nvcc`. RC results were recorded on RTX 4080/WSL2. Use a compatible CUDA driver and full Toolkit containing `nvcc`; the maintained source now pins Rust 1.94.0. Original RC measurements remain separate from the maintenance checks.
 
 Clone the released source and run the provided example with the exact model revision used for validation:
 

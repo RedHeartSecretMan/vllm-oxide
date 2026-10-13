@@ -325,7 +325,7 @@ impl AttentionCall {
             || self.max_k < self.max_q
             || self.max_k > 1025
             || self.heads.1 == 0
-            || self.heads.0 % self.heads.1 != 0
+            || !self.heads.0.is_multiple_of(self.heads.1)
         {
             bail!("attention call is outside the single-request diagnostic");
         }
@@ -342,8 +342,8 @@ impl AttentionCall {
             for column in 0..self.max_k {
                 allowed.push(
                     (!self.causal.unwrap_or(false) || column <= row)
-                        && self.window.0.map_or(true, |left| column + left >= center)
-                        && self.window.1.map_or(true, |right| column <= center + right),
+                        && self.window.0.is_none_or(|left| column + left >= center)
+                        && self.window.1.is_none_or(|right| column <= center + right),
                 );
             }
         }

@@ -52,15 +52,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let model_path = PathBuf::from(&cli.model);
-    let source = if model_path.is_dir() {
-        Source::Local(model_path)
-    } else {
-        Source::Hub {
-            repo: cli.model,
-            revision: None,
-        }
-    };
+    let source = parse_model_arg(&cli.model);
 
     let mut llm = LLM::new(source, vllm_oxide::EngineOptions::default())
         .context("failed to initialise LLM")?;
@@ -82,6 +74,18 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_model_arg(raw: &str) -> Source {
+    let path = PathBuf::from(raw);
+    if path.is_dir() {
+        Source::Local(path)
+    } else {
+        Source::Hub {
+            repo: raw.to_string(),
+            revision: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -109,18 +113,6 @@ mod tests {
                 assert!(revision.is_none());
             }
             other => panic!("expected Source::Hub, got {other:?}"),
-        }
-    }
-
-    fn parse_model_arg(raw: &str) -> Source {
-        let path = PathBuf::from(raw);
-        if path.is_dir() {
-            Source::Local(path)
-        } else {
-            Source::Hub {
-                repo: raw.to_string(),
-                revision: None,
-            }
         }
     }
 }

@@ -14,9 +14,12 @@ __global__ void fill_const_f32_kernel(float* ptr, int64_t n, float val) {
     if (idx < n) ptr[idx] = val;
 }
 
-extern "C" void fill_const_f32_launch(float* ptr, int64_t n, float val, void* stream) {
+extern "C" int fill_const_f32_launch(float* ptr, int64_t n, float val, void* stream) {
+    if (ptr == nullptr || n <= 0) return (int)cudaErrorInvalidValue;
     int64_t threads = 256;
     int64_t blocks  = (n + threads - 1) / threads;
     cudaStream_t s  = (cudaStream_t)stream;
     fill_const_f32_kernel<<<(unsigned)blocks, (unsigned)threads, 0, s>>>(ptr, n, val);
+    // Launch errors are immediate; Rust synchronizes to check execution errors.
+    return (int)cudaGetLastError();
 }

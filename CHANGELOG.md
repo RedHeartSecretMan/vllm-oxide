@@ -1,5 +1,16 @@
 # Changelog
 
+## Source maintenance — 2026-10-14
+
+Version-specific maintenance is applied to the three existing release source
+snapshots at the user's request. It covers sampling numeric boundaries, model
+configuration validation, fixture output confinement, unaligned tensor reads,
+early EOS handling, and the research prototype's workspace and safety checks.
+Original measurements, budgets and historical verdicts retain their source
+identities. See [source maintenance](docs/version-doc-update.md) for scope and
+validation records.
+
+
 [Release history](docs/releases/README.md) · [GitHub Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 
 Historical implementation entries are retained below. The source tree belongs to experimental RC1; **48/66 numerical checks passed and 18 failed**, while full performance and the declared Rust minimum remained unverified. The [RC release notes](docs/releases/v0.2.0-rc.1.en.md) retain original evidence and asset identities.

@@ -53,6 +53,7 @@ mod ffi {
             ids_in: *mut u32,
             ids_out: *mut u32,
             limits: *mut u32,
+            wide_maximum: *mut f64,
             temp_storage: *mut c_void,
             temp_storage_bytes: usize,
             batch_size: u32,
@@ -100,6 +101,7 @@ pub(super) struct Workspace {
     ids_in: Tensor,
     ids_out: Tensor,
     limits: Tensor,
+    wide_maximum: Tensor,
     temp_storage: Tensor,
     history_tokens: Tensor,
     history_counts: Tensor,
@@ -134,7 +136,8 @@ impl Workspace {
             keys_out: alloc(vocab_size, DType::F32, "keys_out")?,
             ids_in: alloc(vocab_size, DType::U32, "ids_in")?,
             ids_out: alloc(vocab_size, DType::U32, "ids_out")?,
-            limits: alloc(2, DType::U32, "limits")?,
+            limits: alloc(3, DType::U32, "limits")?,
+            wide_maximum: alloc(2, DType::F64, "wide maximum")?,
             temp_storage: alloc(temp_storage_bytes.max(1), DType::U8, "CUB temp storage")?,
             history_tokens: alloc(history_capacity, DType::U32, "history tokens")?,
             history_counts: alloc(history_capacity, DType::U32, "history counts")?,
@@ -176,7 +179,8 @@ impl Workspace {
     pub(super) fn allocated_bytes(&self) -> usize {
         (self.vocab_size * std::mem::size_of::<f32>() * 2)
             + (self.vocab_size * std::mem::size_of::<u32>() * 2)
-            + (2 * std::mem::size_of::<u32>())
+            + (3 * std::mem::size_of::<u32>())
+            + (2 * std::mem::size_of::<f64>())
             + self.temp_storage.elem_count()
             + (self.history_capacity * std::mem::size_of::<u32>() * 2)
     }
@@ -438,6 +442,15 @@ pub(super) fn sample(
             _g_limits
         );
         cuda_ptr!(
+            workspace.wide_maximum,
+            f64,
+            "wide maximum",
+            wide_maximum_storage,
+            wide_maximum_view,
+            wide_maximum_ptr,
+            _g_wide_maximum
+        );
+        cuda_ptr!(
             workspace.temp_storage,
             u8,
             "CUB temp storage",
@@ -472,6 +485,7 @@ pub(super) fn sample(
                 ids_in_ptr as *mut u32,
                 ids_out_ptr as *mut u32,
                 limits_ptr as *mut u32,
+                wide_maximum_ptr as *mut f64,
                 temp_storage_ptr as *mut c_void,
                 workspace.temp_storage.elem_count(),
                 batch_u32,

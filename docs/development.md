@@ -8,7 +8,7 @@ Use `main` for new contributions. This guide describes the actual historical `v0
 
 | Component | Role |
 |---|---|
-| Rust 1.94.0, Rustfmt and Clippy | Recorded RC toolchain; the manifest's Rust 1.75 minimum was not verified |
+| Rust 1.94.0, Rustfmt and Clippy | Recorded RC and maintained source toolchain; Rust 1.94 minimum |
 | `crates/vllm-oxide` | Public `LLM` API, internal engine, models and CUDA kernels |
 | `crates/vllm-oxide-cli` | One raw-text prompt via the library API |
 | `crates/vllm-oxide-test` | Unsupported numerical capture, benchmark and transport executables |

@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Distributed through Git source and GitHub Releases; not crates.io.
+publish = false
 description = "A Rust port of nano-vllm trending toward vLLM's V1 architecture (single-GPU, Qwen3-focused, offline LLM inference)."
 
 [lib]

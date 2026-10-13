@@ -18,7 +18,7 @@ This guide uses the **historical v0.2.0.rc.1 source prerelease** and its fixed *
 | Component | Requirement |
 |---|---|
 | OS | Linux, including WSL2 |
-| Rust | Use the recorded Rust 1.94.0 toolchain with Rustfmt and Clippy; the historical 1.75 declaration was not verified |
+| Rust | Use the recorded Rust 1.94.0 toolchain with Rustfmt and Clippy; the maintained manifest and toolchain use Rust 1.94 |
 | GPU | One NVIDIA CUDA GPU with compute capability 8.9 or newer |
 | Build tools | CUDA Toolkit with `nvcc`, plus a compatible host C/C++ compiler and linker |
 | Runtime | A working NVIDIA CUDA driver and enough free GPU memory for weights, activations, and the KV cache |

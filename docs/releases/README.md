@@ -24,3 +24,19 @@ Use [the template](template.md) for English and Chinese descriptions: highlights
 | Publication | Correct tag, release date/status and bilingual body; preserve original attached assets |
 
 No model rerun or GitHub GPU runner is required for wording-only maintenance. Raw evidence stays local. Do not imply a historical verification asset was regenerated for refreshed docs, and do not use an older disabled golden publication path for source-release maintenance.
+
+## Authorized source maintenance of existing versions
+
+The 2026-10-14 maintenance explicitly includes code fixes in the three existing
+source snapshots, including `research` and `tools`. Use version-specific
+regression checks and review the executable diff. Preserve the original model
+validation definitions, budgets, measurement identities and historical verdicts.
+Record new checks separately; old PASS reports are not new measurements.
+
+Before updating a tag, record its exact object locally. Publish a reviewed
+maintenance descendant with an exact old-object force-with-lease check. Preserve
+Release IDs, original dates, status and attached assets, and synchronize the
+source identity and reviewed notes. Download each new archive and compare every
+tracked file with the reviewed commit. Remove temporary remote work branches;
+retain the three official tags without additional backup tags. See the
+[source maintenance record](../version-doc-update.md).
