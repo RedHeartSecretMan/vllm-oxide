@@ -1,8 +1,8 @@
-# vLLM 社区做法与 vllm-oxide 仓库建设
+# vLLM 社区做法与 vllm-oxide 公开展示建设
 
-核实日期：2026-10-13。目标是改善首次使用、贡献和版本发布体验，范围保持为单 GPU Qwen3 离线推理。
+核实日期：2026-10-13。此次范围覆盖 README、用户与开发文档、社区入口、仓库元数据和全部已发布版本的说明。功能边界仍以 [v0.2.0](../docs/releases/v0.2.0.md) 为准：单 GPU、Qwen3-0.6B、BF16、同步离线生成。
 
-以下建议依据 vLLM 官方文档、仓库源码和 Release 页面核实；Context7 文档查询使用 `/vllm-project/vllm`。
+以下建议依据 vLLM 官方文档、仓库源码和 Release 页面核实。此次已按仓库规则执行 Context7 `library` 查询；首次沙箱外请求返回 `fetch failed`，沙箱外重试成功，再从 `/vllm-project/vllm` 获取文档。检索结果中的发布流程与官方文档相符；模型注册和服务 CLI 片段与本次展示任务无关，不用于推导项目能力。
 
 ## 建议落实的六项
 
@@ -23,3 +23,48 @@
 - **文档建设不扩大功能承诺。** 当前支持边界以 [v0.2.0 发布说明](../docs/releases/v0.2.0.md) 为准；仓库外观改善不表示新增服务、多 GPU、其他模型或量化能力。
 
 这六项均为适配建议。vLLM 的源码和官方文档是参考来源，其规则不会自动成为 vllm-oxide 的贡献或发布要求。
+
+## 整个公开展示层的补充
+
+前述六项是基础入口；本次应把同一套定位和导航落实到整个仓库。
+
+| 展示面 | 建议立即落实 | 来源与依据 |
+| --- | --- | --- |
+| 项目身份 | README 双语、GitHub About/topics、Cargo 包描述和许可信息保持一致。明确本项目独立维护，链接 nano-vllm、vLLM 和 Candle；徽章只指向真实 CI、许可和版本，不暗示上游官方 Rust 版本或完整能力对等。 | vLLM README 用简短定位及真实的文档、安装和联系入口组织首页。[官方 README](https://github.com/vllm-project/vllm/blob/main/README.md) |
+| 使用与参考 | README 保留最短首次生成命令；安装条件、CLI、Rust API、批处理、本地 checkpoint、模型 revision 和配置放进对应指南。已删除的 API 不继续出现在当前示例中。 | 官方文档区分用户指南、API 和 CLI 参考。[文档入口](https://docs.vllm.ai/en/latest/)、[CLI 指南](https://docs.vllm.ai/en/latest/cli/) |
+| 架构导览 | 用实际 `LLM` → `Scheduler` → `EngineCore` 路径解释调度和 KV cache，链接源码、领域词汇及相关 ADR；未来 TP seam 标明未支持。 | vLLM 将 Architecture Overview 放在开发设计资料中。[架构概览](https://docs.vllm.ai/en/latest/design/arch_overview/) |
+| 排错与求助 | 为构建、CPU 开发/CUDA 推理、模型来源、显存预算和输出差异提供短排查入口；错误报告收集最小复现及必要环境。文档或 CPU 问题允许 GPU 字段不适用。 | vLLM 有独立排错指南，其 bug 表单要求环境与复现。[排错指南](https://docs.vllm.ai/en/latest/usage/troubleshooting/)、[Bug 表单](https://github.com/vllm-project/vllm/blob/main/.github/ISSUE_TEMPLATE/400-bug-report.yml) |
+| 子目录入口 | 为 ADR、validation、benchmarks 和 research 增加简短目录，说明当前入口、历史记录和诊断资料；每个入口都能返回文档索引。首次运行不需要先阅读内部验收设计。 | vLLM 把用户、开发设计、基准与社区分成独立导航；这里借鉴信息层级，无需复制网站部署。[文档导航](https://docs.vllm.ai/en/latest/) |
+| 社区入口 | Support、Security、贡献、Issues/PR 模板和 README 统一指向本仓库真实可用渠道。保留 best-effort 措辞；不创建空论坛/Slack、虚构邮箱、安全团队或响应时限。 | vLLM 按技术问题、讨论、贡献和私密漏洞报告分流；本项目按规模保留 GitHub 入口。[联系入口](https://github.com/vllm-project/vllm/blob/main/README.md#contact-us)、[安全政策](https://github.com/vllm-project/vllm/blob/main/SECURITY.md) |
+
+推荐文档入口以读者要完成的事情排序：第一次运行 → 使用和 API/CLI 参考 → 架构与开发 → 验证和性能 → 版本与迁移。具体文件名可以沿用现有路径。开发与验收资料的详尽程度不应迫使首页使用者理解来源角色、监督协议或执行 DAG。
+
+## 当前版本与两个早期版本统一格式
+
+vLLM 将版本重点、兼容性、变化类别与发行物集中呈现，并将重点变化链接到 PR。本项目可采用共同标题顺序，按各版真实内容填写；无需复制其全部模型或硬件分类。[官方 v0.31.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.31.0)
+
+1. 版本标题、原发布日期、状态和原标签链接。
+2. 本版重点：读者可观察到的能力或修复。
+3. 支持范围与环境。
+4. 获取源码与运行：使用该版本真实命令。
+5. 升级与兼容性。
+6. 验证摘要与已知限制。
+7. 发行物、完整变更和相关版本链接。
+
+本项目历史处理依据已经存在的 [RC1 记录](../docs/releases/v0.2.0-rc.1.md) 和 [正式版本记录](../docs/releases/v0.2.0.md)：
+
+- `v0.1.0` 标为早期版本，能力和命令按其标签源码核对；无法确认的历史 GPU 或模型验收不写为通过，迁移入口指向 0.2.0。
+- `v0.2.0-rc.1` 保留 prerelease 身份及当时的数值 **FAIL**；其 smoke 成功不升级为完整精度或性能通过。已被正式版替代的“尚未完成”项目标明是 RC 发布时状态，并链接正式版的后续结果。
+- `v0.2.0` 保持当前正式版本身份、原验证来源和已发布标签；基准数字继续绑定硬件、模型、dtype 与工作负载。
+- 三个 Release 只统一标题、正文和可读性；原发布日期、标签、目标提交、prerelease/Latest 状态及附件不因文案整理而改写。旧附件的适用版本和是否属于完整验收凭证写清。
+
+维护者发布指南应对应这个共同结构，版本目录清楚列出正式版、历史版及 RC，并让 CHANGELOG、仓库版本文件与 GitHub Release 相互可达。代码补丁使用新版本；文档纠错保留原标签。vLLM 的发布流程同样将版本标签和受测提交关联，但本项目不照搬其发布频率与构建矩阵。[发布流程](https://docs.vllm.ai/en/latest/contributing/release_process/)
+
+## 避免误导的最终检查
+
+- README 双语、GitHub About、Cargo 元数据、公共 API 示例与支持范围一致；所有入口真实可用，不新增未部署网站或未发布 docs.rs/crates.io 页面。
+- 当前指南不继续引导读者使用已移除 API、RC 参数、过时 Rust 下限或尚未实现的模型/TP 功能。
+- 历史 ADR 和诊断文件标明记录时间及适用范围；旧 `FAIL`、proposed/budget-pending 状态和旧资产发布设计保留原含义，读者可找到当前正式版结论。
+- CPU CI、文档 CI 与本地 GPU 验证的职责准确区分，WSL 不构成独立发布阻塞。文档修订无需重复 GPU 验收；当前源码与原始证据的来源身份保持不变。[本项目贡献指南](../CONTRIBUTING.md)、[公开 CUDA 检查](../docs/validation/public-gpu-smoke.md)
+- 验证摘要不从 CPU CI 通过推导模型精度，不将显存采样约束写成端到端延迟保证，不作 vLLM 性能对等声明。
+- 发行物准确区分 GitHub 源码归档与实际附件；模型权重、原始日志和完整证据包保留本地，不暗示它们已经上传或完成独立消费者门禁。

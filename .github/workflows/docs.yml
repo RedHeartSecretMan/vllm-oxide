@@ -7,6 +7,7 @@ on:
       - '**/*.md'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/workflows/docs.yml'
+      - 'crates/vllm-oxide/**'
       - 'tools/check_docs.py'
       - 'tools/test_check_docs.py'
   pull_request:
@@ -14,6 +15,7 @@ on:
       - '**/*.md'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/workflows/docs.yml'
+      - 'crates/vllm-oxide/**'
       - 'tools/check_docs.py'
       - 'tools/test_check_docs.py'
   workflow_dispatch:
@@ -35,3 +37,18 @@ jobs:
         run: python3 -m unittest discover -s tools -p test_check_docs.py
       - name: Check local documentation links
         run: python3 tools/check_docs.py
+
+  api:
+    name: Public Rust API documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: public-api-docs
+      - name: Build public API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked -p vllm_oxide --no-deps

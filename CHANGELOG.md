@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Current architecture, development, validation, benchmark, research and ADR
+  guides with clear separation from historical proposals and experimental data.
+- Matching English and Chinese release notes for all three published versions,
+  exact historical source/asset links, a shared version table and common format.
+- Community standards with GitHub's actual reporting routes, plus a bilingual
+  question form and consistent contributor entrypoints.
+- Public Rust API documentation checks in CPU CI.
 - User-oriented documentation index, pinned-model getting started guide and
   v0.2.0 API migration guide, with matching English and Chinese README entrypoints.
 - Bug, feature and documentation issue forms, a pull request template, support
@@ -20,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rust API examples pin the validated checkpoint and propagate errors; public
+  configuration/output docs and crate metadata describe the current interface.
+- Benchmark documentation distinguishes its 0.50 KV allocation setting from
+  the 0.90 API/CLI default and labels NVML values as device memory measurements.
 - Contributor commands now describe the actual locked CPU CI environments and
   separate local GPU validation from ordinary GitHub checks.
 - Agent instructions and ignore rules keep generated golden output, retained
@@ -73,10 +84,24 @@ Publication status and evidence requirements follow the [release notes](docs/rel
 `EngineOptions::dtype` continues to use `Option<candle_core::DType>`; these are
 transitive external signature types, not new crate-root re-exports.
 
+## [0.2.0-rc.1] - 2026-09-10
+
+### Added
+
+- Experimental source prerelease for trying the contracted public generation
+  API and CUDA Quick Start before complete numerical/performance acceptance.
+- A source-bound verification report and checksum file. Historical numerical
+  failures and incomplete checks remain documented in the [RC1 notes](docs/releases/v0.2.0-rc.1.en.md).
+
+The original Git tag is `v0.2.0.rc.1`; the hyphenated heading follows the Cargo
+package version. This candidate was superseded by v0.2.0.
+
 ## [0.1.0] - 2026-07-26
 
 ### Added
 
+- Historical experimental baseline; the original validation limits and two
+  fixture assets are described in the [v0.1.0 notes](docs/releases/v0.1.0.en.md).
 - Core inference engine: scheduler, block pool, KV cache manager, paged attention
 - Qwen3 model support via architecture-agnostic model registry (CausalLM trait)
 - Continuous batching with recompute-only preemption
@@ -100,4 +125,5 @@ transitive external signature types, not new crate-root re-exports.
 
 [Unreleased]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.1.0...v0.2.0
+[0.2.0-rc.1]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1
 [0.1.0]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0

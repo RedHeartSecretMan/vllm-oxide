@@ -4,6 +4,15 @@
 
 This guide uses the **v0.2.0 source release** and the validated **Qwen3-0.6B BF16** checkpoint. It covers offline generation through the Rust API and CLI. There is no inference server or streaming API in this release.
 
+[Requirements](#requirements) · [Install](#install-the-released-source) · [Model sources](#load-a-model) · [CLI](#cli) · [Rust API](#rust-api) · [Troubleshooting](#common-errors)
+
+| Your goal | Choose |
+|---|---|
+| Try the exact model revision without writing code | The [pinned model example](#use-a-pinned-hub-revision) |
+| Generate once from your own prompt | The [CLI](#cli) with a local checkpoint or Hub repo ID |
+| Batch requests, reuse a model, or adjust engine settings | The [Rust API](#rust-api) |
+| Contribute without a GPU | The [development guide](development.md) |
+
 ## Requirements
 
 | Component | Requirement |
@@ -14,7 +23,7 @@ This guide uses the **v0.2.0 source release** and the validated **Qwen3-0.6B BF1
 | Build tools | CUDA Toolkit with `nvcc`, plus a compatible host C/C++ compiler and linker |
 | Runtime | A working NVIDIA CUDA driver and enough free GPU memory for weights, activations, and the KV cache |
 
-Release validation used RTX 4080, driver 595.71, and CUDA Toolkit 13.2.51 on WSL2. These versions describe the tested configuration, not a minimum-version promise. The measured default workload peaked at approximately 10.5 GiB of device memory, including the allocated KV cache. Smaller-memory configurations have not received the same release validation.
+Release validation used RTX 4080, driver 595.71, and CUDA Toolkit 13.2.51 on WSL2. These versions describe the tested configuration, not a minimum-version promise. The fixed release benchmark peaked at approximately 10.5 GiB of device memory, including its allocated KV cache, with `gpu_memory_utilization=0.50`. The API and CLI default to `0.9`, so that benchmark is not a memory bound for the default configuration. Smaller-memory configurations have not received the same release validation.
 
 CPU development and tests do not require a GPU or CUDA Toolkit. A default CPU build does **not** provide CPU inference.
 
@@ -39,7 +48,7 @@ cargo run --locked --release -p vllm_oxide --example generate_qwen3 --features c
     hub:Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234
 ```
 
-The first run downloads the checkpoint and caches its files. The example understands `hub:<repo>`, `hub:<repo>@<revision>`, and local directory paths. Supplying a commit revision keeps model selection reproducible; omitting it follows the Hub's default branch.
+The first run downloads the checkpoint and caches its files. The example continues “The meaning of life is” with greedy decoding and at most 16 completion tokens, then prints the continuation. It understands `hub:<repo>`, `hub:<repo>@<revision>`, and local directory paths. Supplying a commit revision keeps model selection reproducible; omitting it follows the Hub's default branch. The fixed [checkpoint files on Hugging Face](https://huggingface.co/Qwen/Qwen3-0.6B/tree/7e4ae267688d671ddfca3122e4528ee980cf3234) are the same model revision used for release validation.
 
 ### Use a local checkpoint
 
@@ -53,7 +62,13 @@ cargo run --locked --release -p vllm_oxide_cli --features cuda -- \
 
 The validated smoke check for this prompt produced `Paris.`. A local directory is used directly, without Hub downloads. The loader resolves configuration, tokenizer, weights, dtype, and special tokens together for the lifetime of an `LLM`.
 
-For a cached Hub source, `HF_HUB_OFFLINE=1` disables network fetching. All files for the requested revision must already exist in the cache; missing files produce an error. `Source::Local` is the simplest way to select a specific complete checkpoint for fully offline use.
+For a cached Hub source, `HF_HUB_OFFLINE=1` disables model network fetching. All files for the requested revision must already exist in the cache; missing files produce an error. Build the application and populate its model files before disconnecting. `Source::Local` is the simplest way to select a specific complete checkpoint for fully offline generation.
+
+| Entry point | Local checkpoint | Hub source | Pinned Hub revision |
+|---|---|---|---|
+| Provided example | Directory argument | `hub:Qwen/Qwen3-0.6B` | `hub:Qwen/Qwen3-0.6B@<revision>` |
+| CLI | `--model <existing-directory>` | `--model Qwen/Qwen3-0.6B` | Use a local checkpoint from that revision |
+| Rust API | `Source::Local(path)` | `Source::Hub { repo, revision: None }` | `Source::Hub { repo, revision: Some(commit) }` |
 
 ## CLI
 
@@ -82,6 +97,8 @@ printf '%s' 'The meaning of life is' | \
 The CLI treats an existing directory as local and every other model argument as a Hub repo ID. It has **no revision flag**, and it does not parse the example's `hub:` or `@revision` syntax. To pin a revision, use the example, the Rust `Source::Hub` API, or an existing local checkpoint from that revision.
 
 Prompts are raw completion text. The CLI does not apply a chat template; format chat conversations before calling the engine if your application needs them.
+
+The CLI emits completion text to stdout and propagates construction/generation errors as a failed process. It submits one request, uses default engine settings, and has no switches for batch input, token-ID prompts, penalties, `ignore_eos`, cache budgets, dtype, GPU selection, or random seed. Use the Rust API for the supported controls it exposes.
 
 ## Rust API
 
@@ -130,7 +147,27 @@ fn main() -> anyhow::Result<()> {
 
 `LLM::generate(&mut self, prompts: &[Prompt], params: &[SamplingParams])` returns `anyhow::Result<Vec<RequestOutput>>`. Provide exactly one `SamplingParams` value per prompt. Each result contains `request_id`, completion `token_ids`, completion `text`, and `finished`; it does not include the prompt in the completion. Results preserve input order, and request IDs stay independent of that call's batch positions. `Prompt::Text` and `Prompt::TokenIds` can share a batch.
 
-Model loading and CUDA warmup happen in `LLM::new`. Construction and generation can fail, so propagate or handle their errors. Internal model, scheduler, cache, and sampler types are not public extension points. Generate local API documentation with `cargo doc --locked -p vllm_oxide --no-deps`.
+### Public types and output fields
+
+| Export | Purpose |
+|---|---|
+| `LLM` | Load and own one inference engine; call `new` and `generate` |
+| `Source` | Select a complete local checkpoint or a Hub repository/revision |
+| `EngineOptions` | Configure context, scheduling, cache allocation, and checkpoint dtype at construction |
+| `Prompt` | Supply raw `Text(String)` or pre-tokenized `TokenIds(Vec<u32>)` |
+| `SamplingParams` | Set each request's token-selection and completion-stopping policy |
+| `RequestOutput` | Read the completed request's identity, tokens, and text |
+
+| `RequestOutput` field | Type | Meaning |
+|---|---|---|
+| `request_id` | `usize` | Stable identity within the owning `LLM`; do not use it as a batch-array index |
+| `token_ids` | `Vec<u32>` | Generated completion tokens |
+| `text` | `String` | Decoded completion with special tokens skipped |
+| `finished` | `bool` | Completion state; ordinary successful offline generation returns finished requests |
+
+An empty prompt batch with an empty parameter slice returns an empty result. A non-empty batch validates sampling values and every prompt's context budget before admission. Token-ID prompts must use the selected checkpoint's vocabulary; the engine does not apply a chat template to either input variant.
+
+Model loading and CUDA warmup happen in `LLM::new`. Construction and generation can fail, so propagate or handle their errors. Calls are synchronous and use `&mut self`; the API does not expose per-token streaming, cancellation, or concurrent request submission. Internal model, scheduler, cache, and sampler types are not public extension points. Generate local API documentation with `cargo doc --locked -p vllm_oxide --no-deps`. See [architecture](architecture.md) for the execution path beneath the public API.
 
 ### Engine configuration
 
@@ -147,15 +184,16 @@ Do not infer low memory use from the 0.6B parameter count: default cache sizing 
 
 ### Sampling and input constraints
 
-| `SamplingParams` field | Accepted values |
-|---|---|
-| `temperature` | Non-negative, not NaN; `0` selects greedy. Positive infinity is an accepted uniform pre-filter corner case. |
-| `top_k` | `None` or `Some(k)` with `k >= 1`; values at least vocabulary size do nothing |
-| `top_p` | `None` or a finite value in `(0, 1]` |
-| `max_tokens` | At least `1`; counts completion tokens only |
-| `ignore_eos` | Ignore EOS stopping when true; still honor `max_tokens` |
-| `presence_penalty`, `frequency_penalty` | Finite values in `[-2, 2]` |
-| `repetition_penalty` | Finite and non-negative; `0` is the supported no-op convention |
+| `SamplingParams` field | Default | Accepted values and effect |
+|---|---|---|
+| `temperature` | `0.0` | Non-negative, not NaN; `0` selects greedy. Positive infinity is an accepted uniform pre-filter corner case. |
+| `top_k` | `None` | `None` or `Some(k)` with `k >= 1`; values at least vocabulary size do nothing |
+| `top_p` | `None` | `None` or a finite value in `(0, 1]` |
+| `max_tokens` | `16` | At least `1`; counts completion tokens only |
+| `ignore_eos` | `false` | Ignore EOS stopping when true; still honor `max_tokens` |
+| `presence_penalty` | `0.0` | Finite in `[-2, 2]`; subtract once from the logit of each previously seen token |
+| `frequency_penalty` | `0.0` | Finite in `[-2, 2]`; subtract in proportion to the previous token count |
+| `repetition_penalty` | `0.0` | Finite and non-negative; `0` is the supported no-op convention |
 
 Penalties apply before token selection. `temperature == 0` or `top_k == Some(1)` selects the greedy path; later top-k/top-p filtering is then inert. This project's sampling representation is not interchangeable with Python vLLM's.
 
@@ -173,4 +211,4 @@ Prompts must tokenize to at least one token. Their token count plus `max_tokens`
 | Context budget exceeded | Reduce prompt/completion length or choose an appropriate `max_model_len` within the model limit |
 | Insufficient device memory | Free other allocations and adjust Rust engine budgets; the CLI uses the default cache configuration |
 
-For an issue report, include the source tag/commit, model revision, Rust and CUDA versions, GPU/driver, exact command, and full error. The [contribution guide](../CONTRIBUTING.md) describes development checks. See the [release notes](releases/v0.2.0.md) and [validation summary](releases/goldens-v0.2.md) for the validated scope and performance limitations.
+For an issue report, include the source tag/commit, model revision, Rust and CUDA versions, GPU/driver, exact command, and full error. Ask through the [support channels](../SUPPORT.md). The [development guide](development.md) describes local checks; [release notes](releases/v0.2.0.en.md), [validation](validation/README.md), and [benchmarks](benchmarks/README.md) explain the shipped scope and measurements.

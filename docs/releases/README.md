@@ -1,11 +1,25 @@
-# Release guide
+# Releases and maintainer guide
 
-[v0.2.0](v0.2.0.md) is the current source release. This guide is for maintainers preparing future releases or improving an existing Release description.
+[Documentation home](../README.md) · [GitHub Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
+
+## Version history
+
+Use **v0.2.0** for the currently supported single-GPU Qwen3-0.6B/BF16 offline generation API. Earlier releases remain available for reproducibility; their historical failures and incomplete checks do not describe the current version.
+
+| Version | Published date | Status and validation | Release notes |
+|---|---|---|---|
+| [`v0.2.0`](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) | 2026-10-13 | Current release; numerical, public CUDA functionality and performance validation passed | [English](v0.2.0.en.md) · [中文](v0.2.0.md) |
+| [`v0.2.0.rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1) | 2026-09-10 | Historical experimental prerelease; 18 numerical failures, incomplete performance/minimum-toolchain verification | [English](v0.2.0-rc.1.en.md) · [中文](v0.2.0-rc.1.md) |
+| [`v0.1.0`](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0) | 2026-07-26 | Historical experimental release; four of eight full-output token checks differed, with skipped regression positions | [English](v0.1.0.en.md) · [中文](v0.1.0.md) |
+
+All three versions provide source archives. v0.1.0 also retains its original fixture archive and manifest; RC1 retains its original verification report and checksum file. v0.2.0 has no attached binary, model or raw-evidence assets. See the version's notes for exact download links and original asset digests.
+
+The historical RC Git tag is `v0.2.0.rc.1`; its Cargo package version and documentation filenames use `0.2.0-rc.1`. Do not substitute the filename spelling into a checkout or Release URL.
 
 ## Prepare the release
 
 1. Choose the supported model, dtype, hardware and public API scope. Keep user-visible changes in [CHANGELOG.md](../../CHANGELOG.md), including migration instructions for breaking changes.
-2. Align the workspace version in `Cargo.toml`, workspace packages in `Cargo.lock`, README examples, release notes and tag. Release tags use `vMAJOR.MINOR.PATCH`; prereleases use `vMAJOR.MINOR.PATCH-rc.N`. Historical tag names stay unchanged.
+2. Align the workspace version in `Cargo.toml`, workspace packages in `Cargo.lock`, README examples, release notes and tag. New release tags use `vMAJOR.MINOR.PATCH`; new prereleases use `vMAJOR.MINOR.PATCH-rc.N`. Historical tag names stay unchanged.
 3. Run the applicable checks and record their actual source identity:
 
    | Change | Validation |
@@ -16,7 +30,7 @@
    | Formal product release | CPU CI plus source-bound numerical, public CUDA functionality and performance evidence for the supported scope |
 
    GPU validation can run on a supported Linux/WSL2 machine. The optional self-hosted CUDA workflow is a convenience; GitHub-hosted GPU availability is not a release requirement. Preserve the declared numerical limits and record hardware-specific performance as a baseline.
-4. Start the user-facing notes from [template.md](template.md). Lead with behavior, fixes and compatibility; put source identities and detailed validation in a linked report. Describe exactly which artifacts are provided.
+4. Create matching English and Chinese user-facing notes from [template.md](template.md). Use the same section order: opening/version identity, highlights, compatibility/migration, getting the source, validation/performance, known limitations, and artifacts/links. Lead with behavior and fixes; link detailed validation rather than pasting raw logs.
 5. Open an integration PR. Use `breaking-change`, `enhancement`, `bug` or `documentation` labels as applicable. [`.github/release.yml`](../../.github/release.yml) groups GitHub-generated PR summaries; review the generated list before including it in the final notes.
 6. Merge the approved, checked candidate. Verify the merged tree matches the tested candidate, or validate any additional changes before selecting the release commit. Preserve each original evidence source rather than renaming previous results as new measurements.
 
@@ -33,7 +47,11 @@ RELEASE_NOTES=/absolute/path/to/reviewed-release-notes.md
 
 git tag -a "v$RELEASE_VERSION" "$RELEASE_COMMIT" -m "vllm-oxide v$RELEASE_VERSION"
 git push origin "refs/tags/v$RELEASE_VERSION"
-gh release create "v$RELEASE_VERSION"   --repo RedHeartSecretMan/vllm-oxide   --verify-tag --target "$RELEASE_COMMIT"   --title "v$RELEASE_VERSION — vllm-oxide"   --notes-file "$RELEASE_NOTES" --latest
+gh release create "v$RELEASE_VERSION" \
+  --repo RedHeartSecretMan/vllm-oxide \
+  --verify-tag --target "$RELEASE_COMMIT" \
+  --title "v$RELEASE_VERSION — release headline" \
+  --notes-file "$RELEASE_NOTES" --latest
 ```
 
 For a prerelease, use its prerelease version, add `--prerelease` and set `--latest=false`. Publishing follows the user's existing authorization; this guide does not itself authorize a new publication.
@@ -49,18 +67,22 @@ GitHub supplies source `.tar.gz` and `.zip` archives. Full golden captures, logi
 
 Published tags identify immutable source snapshots. Improve wording with `gh release edit --notes-file` and update current documentation through a PR. A code fix receives a new patch release; it never silently moves an existing version tag.
 
-The maintained [v0.2.0 English notes](v0.2.0.en.md) are also the GitHub Release
-description source. To synchronize a reviewed wording change after its PR lands:
+Each `*.en.md` file is the maintained source of that version's English GitHub Release description. Synchronize a reviewed wording change after its documentation PR lands:
 
 ```bash
+gh release edit v0.1.0 --repo RedHeartSecretMan/vllm-oxide \
+  --notes-file docs/releases/v0.1.0.en.md
+gh release edit v0.2.0.rc.1 --repo RedHeartSecretMan/vllm-oxide \
+  --notes-file docs/releases/v0.2.0-rc.1.en.md
 gh release edit v0.2.0 --repo RedHeartSecretMan/vllm-oxide \
   --notes-file docs/releases/v0.2.0.en.md
 ```
 
-## v0.2.0 records
+Before and after editing, compare the Release ID, tag, target commit, original publication timestamp, draft/prerelease/Latest status and asset identities. Description and title improvements preserve all of them; original failed or diagnostic records keep their verdicts.
 
-- [Product release notes](v0.2.0.md)
-- [English release notes](v0.2.0.en.md)
-- [Validation and performance summary](goldens-v0.2.md)
-- [Historical RC1 notes](v0.2.0-rc.1.md)
-- [GitHub Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
+## Validation records
+
+- [v0.2.0 validation and performance summary](goldens-v0.2.md)
+- [Validation guide](../validation/README.md)
+- [Migration to v0.2.0](../migration-v0.2.0.md)
+- [Contributing](../../CONTRIBUTING.md)

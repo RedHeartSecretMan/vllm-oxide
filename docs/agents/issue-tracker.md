@@ -1,46 +1,97 @@
-# Issue tracker: GitHub
+# Issue and pull request workflow
 
-Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+[Documentation index](../README.md) · [Contributing](../../CONTRIBUTING.md)
 
-## Conventions
+GitHub Issues track bugs, proposals and implementation tickets for
+`RedHeartSecretMan/vllm-oxide`. Use the `gh` CLI for tracker operations. Pull
+requests contain proposed changes; feature scope and dependency-ordered work
+remain in issues.
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
-- **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
-- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
-- **Comment on an issue**: `gh issue comment <number> --body "..."`
-- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **Close**: `gh issue close <number> --comment "..."`
+## Read before writing
 
-Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
+Read the issue body, comments, labels, assignees and dependencies before
+implementing a ticket. A `ready-for-agent` label describes a specified scope;
+open blockers still prevent execution. The [triage guide](triage-labels.md)
+defines the five workflow labels.
 
-## Pull requests as a triage surface
+```bash
+gh issue view 42 --repo RedHeartSecretMan/vllm-oxide --comments
+gh issue list --repo RedHeartSecretMan/vllm-oxide --state open \
+    --limit 100 --json number,title,labels,assignees
+gh pr view 42 --repo RedHeartSecretMan/vllm-oxide --comments
+gh pr diff 42 --repo RedHeartSecretMan/vllm-oxide
+```
 
-**PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
+Issues and PRs share a number space. Resolve a reference such as `#42` to its
+actual type before choosing `gh issue` or `gh pr` operations. Use explicit
+`--repo` outside the repository; inside a clone, `gh` can infer the remote.
 
-When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
+## Create and update
 
-- **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
-- **List external PRs for triage**: `gh pr list --state open --json number,title,body,labels,author,authorAssociation,comments` then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, or `NONE` (drop `OWNER`/`MEMBER`/`COLLABORATOR`).
-- **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
+Write multiline issue descriptions, PR descriptions and comments to a file,
+then pass `--body-file`. A quoted heredoc preserves literal Markdown, backticks
+and shell examples without evaluating their contents.
 
-GitHub shares one number space across issues and PRs, so a bare `#42` may be either — resolve with `gh pr view 42` and fall back to `gh issue view 42`.
+```bash
+issue_body_file=$(mktemp)
+cat > "$issue_body_file" <<'BODY'
+## Problem
 
-## When a skill says "publish to the issue tracker"
+Describe the concrete trigger and observed behavior.
 
-Create a GitHub issue.
+## Expected result
 
-## When a skill says "fetch the relevant ticket"
+Describe the change and its acceptance criteria.
+BODY
+gh issue create --repo RedHeartSecretMan/vllm-oxide \
+    --title 'Describe the problem' --label needs-triage \
+    --body-file "$issue_body_file"
+rm "$issue_body_file"
+```
 
-Run `gh issue view <number> --comments`.
+Use the same `--body-file` pattern with `gh issue comment`, `gh issue edit`,
+`gh pr create` and `gh pr comment`. Add or remove labels through `gh issue edit`
+or `gh pr edit`. Keep comments factual: include decisions, concrete results and
+source links rather than claiming a check that was not run.
 
-## Wayfinding operations
+When resolving an issue, record the result and implementing PR or commit in a
+comment, then close it with the appropriate reason. `completed` means its scope
+was delivered; `not planned` covers declined or superseded work. A draft PR
+closed without merging should explain whether its change was integrated
+elsewhere, replaced or not adopted.
 
-Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
+## Dependency-ordered work
 
-- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
-- **Child ticket**: an issue linked to the map as a GitHub sub-issue (`gh api` on the sub-issues endpoint). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed, the ticket is assigned to the driving dev.
-- **Blocking**: GitHub's **native issue dependencies** — the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only — the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed.
-- **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
-- **Claim**: `gh issue edit <n> --add-assignee @me` — the session's first write.
-- **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+Large approved work can use a single overview issue and child implementation
+tickets. Existing planning issues use `wayfinder:map` and `wayfinder:<type>`
+labels. Keep those historical relationships and their approved scope intact.
 
+- Link child tickets using GitHub sub-issues. If that facility is unavailable,
+  use a task list in the overview and `Part of #<overview>` in each child.
+- Represent blockers with GitHub's native issue dependencies. A text
+  `Blocked by: #<number>` line is a fallback when the native facility is unavailable.
+- Inspect the overview's open children and their live blockers before selecting
+  work. A runnable ticket is specified, unassigned and has no open blocker;
+  preserve the overview's ordering when choosing between runnable tickets.
+- Claim the selected ticket with `gh issue edit <number> --add-assignee @me`.
+  Use `feat/t<NN>-<slug>` for its implementation branch.
+- When complete, link the actual result, close the ticket and update the
+  overview with the decision or result pointer.
+
+The native dependency endpoint takes the blocker's numeric database `id`,
+which differs from the visible issue number and GraphQL `node_id`:
+
+```bash
+blocker_id=$(gh api repos/RedHeartSecretMan/vllm-oxide/issues/29 --jq .id)
+gh api --method POST \
+    repos/RedHeartSecretMan/vllm-oxide/issues/30/dependencies/blocked_by \
+    -F issue_id="$blocker_id"
+gh api repos/RedHeartSecretMan/vllm-oxide/issues/30 \
+    --jq '.issue_dependencies_summary.blocked_by'
+```
+
+The summary counts open blockers. The example adds “issue 30 is blocked by issue
+29”; substitute the actual approved ticket pair before performing a write.
+Closing every blocker makes that dependency gate clear. Updating documentation
+or cleaning up completed work does not itself authorize changing an approved
+issue graph.

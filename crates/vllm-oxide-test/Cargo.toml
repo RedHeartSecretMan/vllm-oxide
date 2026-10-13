@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Golden comparison crate — release gate that validates the Rust engine against golden fixtures (NOT a CI gate)."
+description = "Internal validation, CPU evidence transport and GPU measurement tools for vllm-oxide."
+readme = "README.md"
 publish = false
 
 [[bin]]

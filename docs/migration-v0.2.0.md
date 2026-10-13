@@ -1,8 +1,16 @@
 # Migrate from v0.1 to v0.2
 
-[Documentation index](README.md) · [Getting started](getting-started.md) · [Release notes](releases/v0.2.0.md)
+[Documentation index](README.md) · [Getting started](getting-started.md) · [Release notes](releases/v0.2.0.en.md)
 
 v0.2.0 is a breaking pre-1.0 release. Applications that already construct `LLM` and call `LLM::generate` keep those entrypoints, but must update output identity and respect stricter validation. Applications that imported internal engine or model types must move to the supported generation API.
+
+| Upgrade step | Action |
+|---|---|
+| Dependency | Pin `v0.2.0`, use Rust 1.94 or newer, and enable `cuda` for inference |
+| Imports | Retain only the six public generation types |
+| Outputs | Replace `seq_id` with `request_id`; associate results by vector position |
+| Inputs | Validate completion lengths, sampling policies, and checkpoint dtype/context metadata |
+| Verification | Exercise repeated calls and your application's real prompts on a GPU |
 
 ## Pin the release
 
@@ -80,4 +88,6 @@ The model source is resolved once per `LLM` construction so configuration, token
 
 ## Check behavior after upgrading
 
-Use the [pinned model example](getting-started.md#use-a-pinned-hub-revision), then exercise your application's prompts, sampling policies, and repeated calls on a GPU. CPU CI checks code and tooling, while CUDA function and numerical checks are separate. The [v0.2.0 validation summary](releases/goldens-v0.2.md) describes the shipped implementation's completed validation; it is not a promise that every hardware/model configuration or application prompt produces identical output to Python vLLM.
+Use the [pinned model example](getting-started.md#use-a-pinned-hub-revision), then exercise your application's prompts, sampling policies, and repeated calls on a GPU. CPU CI checks code and tooling, while CUDA function and numerical checks are separate. The [validation guide](validation/README.md) and [v0.2.0 summary](releases/goldens-v0.2.md) describe the shipped implementation's completed validation; they do not promise that every hardware/model configuration or application prompt produces identical output to Python vLLM.
+
+Keep your own sampling and model-source settings explicit during the upgrade. The CLI still handles one raw-text prompt per invocation, has no revision flag, and uses default engine options; see its [current limits](getting-started.md#cli). Published source tags remain immutable, so an application pinned to v0.1.0 stays on that release until its dependency is changed.

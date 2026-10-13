@@ -5,22 +5,26 @@ labels: [documentation, needs-triage]
 body:
   - type: markdown
     attributes:
-      value: Small corrections can also be sent directly as a pull request. No GPU validation is needed for a wording or link fix.
+      value: |
+        English and Chinese are both welcome / 欢迎使用中文或英文。
+        Small corrections can also be sent directly as a pull request. No GPU validation is needed for a wording or link fix.
+        Use the [documentation index](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/README.md) to find the current usage and release guides.
   - type: input
     id: location
     attributes:
       label: Page or file
-      description: Link the page and heading or give the file path. Include the release version if it is version-specific.
+      description: Link the page and heading or give the file path. Include the release version and documentation language when relevant.
     validations:
       required: true
   - type: textarea
     id: problem
     attributes:
       label: What is unclear or incorrect?
-      description: For a failing example, include the command and relevant error. Remove sensitive information.
+      description: Describe the missing or incorrect instruction. For a failing example, include the command and relevant error. Remove sensitive information.
     validations:
       required: true
   - type: textarea
     id: suggestion
     attributes:
       label: Suggested improvement
+      description: Describe the correction or example that would have helped. An implementation is optional.

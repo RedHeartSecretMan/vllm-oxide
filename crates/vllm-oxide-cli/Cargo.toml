@@ -6,7 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Thin CLI binary for vllm-oxide — parses argv and calls LLM::generate."
+description = "Command-line Qwen3 offline generation through vllm-oxide's synchronous Rust API."
+readme = "../../README.md"
+documentation = "https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/getting-started.md#cli"
 
 [features]
 default = []

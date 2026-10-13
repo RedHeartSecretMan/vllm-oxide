@@ -1,3 +1,5 @@
+# Change-type labels group generated notes; triage labels describe readiness.
+# Keep the final wildcard category last so uncategorized changes remain visible.
 changelog:
   categories:
     - title: Breaking changes

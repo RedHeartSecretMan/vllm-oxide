@@ -1,6 +1,6 @@
 # vllm-oxide
 
-A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture: a single-GPU, Qwen3 offline LLM inference engine with a correctness-first v0.2.0 contract.
+A Rust/CUDA engine for single-GPU, synchronous, offline Qwen3 inference, drawing on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm). The validated v0.2.0 scope is Qwen3-0.6B/BF16. This file defines repository vocabulary; start with the [architecture guide](docs/architecture.md) for a walkthrough and the [release notes](docs/releases/v0.2.0.en.md) for shipped behavior.
 
 ## Language
 
@@ -122,7 +122,7 @@ The validated per-request token-selection and completion-stopping policy. One co
 _Avoid_: generation config, decode params, sampling config.
 
 **EngineOptions**:
-Construction-time configuration for `LLM::new`: `max_num_batched_tokens` (default 16384), `max_num_seqs` (512), `max_model_len`, `gpu_memory_utilization` (0.9), `enforce_eager` (always true in v0.1), `dtype` override. Mirrors nano-vllm's `Config`.
+Construction-time configuration for `LLM::new`: a shared prefill/decode token budget (`max_num_batched_tokens`, default 16384), concurrency (`max_num_seqs`, 512), context length (`max_model_len`, 4096), KV allocation fraction (`gpu_memory_utilization`, 0.9), eager execution (`enforce_eager` must be true), and a checkpoint dtype override.
 _Avoid_: engine config, runtime options.
 
 ## Correctness
@@ -132,7 +132,7 @@ A content-addressed model-output record for a fixed input and oracle identity un
 _Avoid_: reference output, expected output, snapshot, oracle output.
 
 **Golden asset bundle**:
-The immutable release pair containing one standalone `Golden release manifest` and one compressed archive of the complete declared evidence. It is the only published transport for a golden version; individual fixture release assets are outside the contract.
+The optional immutable transport pair containing one standalone `Golden release manifest` and one compressed archive of the complete declared evidence. Individual fixture assets are outside this transport contract. The v0.2.0 product release keeps raw evidence local and publishes source archives; it does not publish a golden bundle or claim completion of the separate bundle-consumer gate.
 _Avoid_: fixture pack, golden package, per-fixture assets.
 
 **Golden release manifest**:
@@ -168,7 +168,7 @@ The reproducible, evidence-only measurements for fixed single-request and batch 
 _Avoid_: benchmark gate, performance SLA, vLLM parity claim.
 
 **Golden release evidence report**:
-The committed Markdown record that binds the exact environment, kernels, corpus, approved tolerance, comparison totals, performance samples, limitations, and two release-asset hashes for `goldens-v0.2`. It is release evidence, not a third release asset.
+The committed Markdown summary of actual validation sources, environment, kernels, corpus, budgets, comparison totals, performance samples and limitations. Original raw evidence retains its identities locally; any separately published transport records its own archive and manifest hashes.
 _Avoid_: release manifest, benchmark artifact, extra golden asset.
 
 **Operator verification (L0)**:
