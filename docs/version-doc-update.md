@@ -20,4 +20,4 @@ The original attached verification report names its original source. It is not a
 
 The release page records the final documentation commit after publication. New users should use [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0); this refreshed historical RC retains its numerical and performance limitations. Raw acceptance packages stay local.
 
-Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1).
+Original implementation: [`21cd848`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/21cd848fb1256dd908a29d4f3b08596fe1dd39fc).
