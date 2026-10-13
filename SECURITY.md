@@ -1,6 +1,6 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+## Supported versions
 
 | Version | Supported |
 |---------|-----------|
@@ -10,21 +10,22 @@
 Security fixes target the latest published 0.2.x release. This is a community
 project with no guaranteed response or maintenance service level.
 
-## Reporting a Vulnerability
+## Report a vulnerability
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Use [GitHub Security Advisories](https://github.com/RedHeartSecretMan/vllm-oxide/security/advisories/new)
-to report privately. Include:
+Private vulnerability reporting is enabled. Use
+[GitHub Security Advisories](https://github.com/RedHeartSecretMan/vllm-oxide/security/advisories/new)
+to submit a private report in English or Chinese. Include:
 
-- Description of the vulnerability
-- Steps to reproduce
-- Potential impact
+- Description of the vulnerability and potential impact
+- Minimal steps to reproduce
+- Affected version or exact source commit and any local changes
+- Platform and relevant model identity, revision and source
 - Suggested fix (if any)
-- Affected version or commit, platform and relevant model source
 
 Reports are reviewed on a best-effort basis. Please keep vulnerability details
-private until a fix or disclosure plan has been agreed.
+private while a fix and disclosure plan are discussed.
 
 ## Scope
 

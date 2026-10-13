@@ -1,4 +1,8 @@
-//! `vllm_oxide` provides synchronous, offline Qwen3 generation on one CUDA GPU.
+//! Synchronous, offline Qwen3 generation on one CUDA GPU.
+//!
+//! The validated v0.2.0 workload is Qwen3-0.6B/BF16. Inference requires the
+//! `cuda` feature, Linux or WSL2, and an NVIDIA GPU with compute capability 8.9
+//! or newer. CPU-only builds support development and tests.
 //!
 //! The supported v0.2.0 interface is the composition root [`LLM`], its
 //! constructor [`LLM::new`], and generation through [`LLM::generate`]. The
@@ -16,21 +20,29 @@
 //!
 //! let source = Source::Hub {
 //!     repo: "Qwen/Qwen3-0.6B".to_string(),
-//!     revision: None,
+//!     revision: Some("7e4ae267688d671ddfca3122e4528ee980cf3234".to_string()),
 //! };
-//! let mut llm = LLM::new(source, EngineOptions::default()).unwrap();
+//! let mut llm = LLM::new(source, EngineOptions::default())?;
 //! let outputs: Vec<RequestOutput> = llm
 //!     .generate(
 //!         &[Prompt::Text("The meaning of life is".to_string())],
 //!         &[SamplingParams::default()],
-//!     )
-//!     .unwrap();
+//!     )?;
 //! assert_eq!(outputs.len(), 1);
+//! # Ok::<(), anyhow::Error>(())
 //! ```
+//!
+//! See the [usage guide](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/getting-started.md)
+//! for batching, model sources and configuration, and the
+//! [migration guide](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/migration-v0.2.0.md)
+//! for upgrading applications from v0.1.
 //!
 //! Engine, scheduler, cache, attention, loader, registry, model, sampler, and
 //! utility mechanics are intentionally internal. These compile-fail examples
 //! guard representative paths as an external crate would see them.
+//!
+//! <details>
+//! <summary>Internal API boundary checks</summary>
 //!
 //! ```compile_fail
 //! use vllm_oxide::Scheduler;
@@ -95,6 +107,8 @@
 //!     let _ = llm.generate_logits(prompt, 1);
 //! }
 //! ```
+//!
+//! </details>
 //!
 //! This file is the **only** module that issues top-level `pub use`
 //! (ADR-0004 R4). Internal modules default to `pub(crate)` or stricter;

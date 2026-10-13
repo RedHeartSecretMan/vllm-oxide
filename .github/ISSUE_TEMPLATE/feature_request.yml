@@ -6,8 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Search existing issues and read the [current release scope](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/releases/v0.2.0.md) first.
-        v0.2.0 supports single-GPU, offline Qwen3-0.6B BF16 generation. Proposals beyond that scope are welcome; describe the additional requirements explicitly.
+        English and Chinese are both welcome / 欢迎使用中文或英文。
+        Search existing issues and read the current release scope ([English](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/releases/v0.2.0.en.md) / [中文](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/releases/v0.2.0.md)) first.
+        v0.2.0 supports single-GPU, synchronous, offline Qwen3-0.6B BF16 generation. Proposals beyond that scope are welcome; describe the additional requirements explicitly.
   - type: textarea
     id: problem
     attributes:
@@ -30,4 +31,4 @@ body:
     id: scope
     attributes:
       label: Scope and validation
-      description: Note relevant models, hardware or API changes and how the improvement could be checked. Distinguish measured results from estimates.
+      description: Note relevant models, hardware or API changes and how the improvement could be checked. For performance proposals, specify the workload and comparison. Distinguish measured results from estimates.

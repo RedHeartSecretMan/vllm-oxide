@@ -1,24 +1,18 @@
 ## Summary
 
-<!-- Explain the problem and resulting behavior. Link the issue, if any.
-Use a small diff sketch, call tree or example when it makes the change clearer. -->
+<!-- Explain the concrete problem and resulting behavior. Link the issue when
+there is one; use "Fixes #..." only when this PR completes that issue's scope.
+English and Chinese are both welcome. -->
 
-## Evidence
+## Validation
 
-- **Before:**
-- **After:**
+<!-- List the checks actually run and their results. Describe relevant checks
+you could not run. A link or wording fix needs no GPU validation.
+For inference changes, include the source/model revision, environment,
+configuration and relevant local GPU results. Keep model weights and full raw
+validation packages outside git. -->
 
-<!-- List the checks actually run and their results, including relevant commands.
-For documentation, checking links and examples is sufficient.
-For GPU behavior, include the environment/model revision and relevant local results.
-Explain checks you could not run; do not claim them as passed or upload raw evidence packages. -->
+## Compatibility and rollout
 
-## Merge Danger
-
-**Door:** two-way / one-way
-
-<!-- Is the change reversible? Note any upgrade step or public API change. -->
-
-**Blast Radius:**
-
-<!-- Name the affected behavior or users. Keep this proportional to the change. -->
+<!-- Describe public API changes, upgrade steps or operational impact when
+applicable. For a small reversible change, "No migration required" is enough. -->

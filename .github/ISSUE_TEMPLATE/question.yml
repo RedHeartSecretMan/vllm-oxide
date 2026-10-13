@@ -1,0 +1,35 @@
+name: Usage or development question
+description: Ask for help using or contributing to vllm-oxide.
+title: "[Question] "
+labels: [question, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English and Chinese are both welcome / 欢迎使用中文或英文。
+        Read [SUPPORT.md](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/SUPPORT.md) and search existing issues first.
+        Report security vulnerabilities privately through [SECURITY.md](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/SECURITY.md).
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and where do you need help? Include the documentation you followed.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or source commit
+      description: Give the release tag or source commit when relevant; use not applicable for a general question.
+      placeholder: v0.2.0, or an exact commit hash
+  - type: textarea
+    id: context
+    attributes:
+      label: Relevant example and environment
+      description: Include a small command or Rust example if helpful. Model revision, configuration and GPU details are only needed for inference questions. Remove sensitive information.
+      render: text
+  - type: textarea
+    id: attempts
+    attributes:
+      label: What have you tried?
+      description: Describe the result and include short, relevant logs. No model weights or raw validation archive is needed.

@@ -25,9 +25,9 @@ pub const HF_HUB_OFFLINE_ENV: &str = "HF_HUB_OFFLINE";
 /// `LLM::new` resolves either variant once into configuration, tokenizer, and
 /// safetensors artifacts with one immutable model identity.
 ///
-/// `Local` is the parity anchor (golden comparison runs against a local
-/// snapshot); `Hub` is for ad-hoc / interactive use. `Hub` honours the
-/// `HF_HUB_OFFLINE` process setting and short-circuits to the local cache.
+/// Use a complete local checkpoint or pin a Hub commit revision for reproducible
+/// model selection. Hub sources honor `HF_HUB_OFFLINE` and use only already
+/// cached artifacts when that process setting is enabled.
 #[derive(Debug, Clone)]
 pub enum Source {
     /// Absolute or relative path to a directory containing one of:
@@ -39,7 +39,9 @@ pub enum Source {
     /// revision (`"main"`, a commit SHA, a tag). `None` resolves to the
     /// Hub's default branch.
     Hub {
+        /// Model repository, such as `Qwen/Qwen3-0.6B`.
         repo: String,
+        /// Commit, tag or branch; `None` selects the Hub default branch.
         revision: Option<String>,
     },
 }
