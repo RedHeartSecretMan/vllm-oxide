@@ -1,296 +1,368 @@
-# golden-gen — Golden Fixture Generator for vllm-oxide
+# golden-gen — Validation tooling
 
-> **Dev-only — NOT in CI.** This harness runs manually on a GPU machine before each
-> release to produce golden fixtures. It is NOT run in continuous integration and
-> is NOT a dependency of the vllm-oxide Rust crates. See issue #14.
+This private Python package coordinates vllm-oxide's **`layered-accuracy-v1`**
+validation: **L0 operators and state invariants, L1 model numerics, and L2 decoding
+and public behavior**. Hugging Face Transformers BF16 is the reference oracle;
+[vLLM](https://github.com/vllm-project/vllm) BF16 supplies baseline observations.
+A baseline never overrides a reference failure or automatically chooses budgets.
 
-This harness generates **golden fixture files** for the vllm-oxide project with
-**HuggingFace Transformers** BF16 SDPA as the authoritative Reference oracle and
-**vLLM** BF16 as the Baseline oracle. Transformers supplies expected correctness;
-vLLM supplies same-prefix calibration observations and can never override a
-reference failure or select acceptance thresholds automatically.
+The package also provides CPU adapter/transport tests, fixed-workload performance
+validation, local evidence packaging, and the retained historical schema-v4
+fixture tools. It is not a runtime dependency of the inference engine and is not
+published to PyPI.
+
+| Start here | Purpose |
+|---|---|
+| [Validation guide](../../docs/validation/README.md) | Current protocol, entrypoints and evidence boundaries |
+| [Development guide](../../docs/development.md) | Repository setup and ordinary CPU CI |
+| [v0.2.0 validation summary](../../docs/releases/goldens-v0.2.md) | Actual released precision, behavior and performance results |
+| [Rust tools](../../crates/vllm-oxide-test/README.md) | Capture, benchmark and CPU transport executables |
+| [Repository tools](../README.md) | Documentation checks and the relationship between current and historical tooling |
+| [Diagnostic scripts](scripts/README.md) | Exact BF16 probe and fixed historical layer-localization commands, inputs and outputs |
+
+Ordinary GitHub CI runs CPU tests, static checks and validation-tool adapters.
+Actual model collection, CUDA public smoke and performance measurements run on a
+local GPU. Linux and WSL2 are supported; a GitHub GPU runner is optional. A green
+CPU suite or a synthetic fixture does not establish model accuracy. Complete raw
+evidence remains local, outside Git, including captures, receipts, guards,
+original logs and telemetry. Product source releases do not imply that a golden
+asset bundle was published or that an old combined bundle passed full verification.
+
+## Documentation revision and source provenance
+
+This maintained v0.2.0 archive refreshes documentation while preserving the
+original implementation. Historical validation binds exact source commits,
+Definition bytes, reviewed binaries and approved calibration records. Reproduce
+an original stage using its actual measured/evaluator checkout and retained
+inputs from the [validation summary](../../docs/releases/goldens-v0.2.md), rather
+than substituting this documentation commit as a measurement identity. See the
+[version-specific revision](../../docs/releases/version-doc-update.md) and
+[shared maintenance record](../../docs/version-doc-update.md). No new GPU run or
+bundled unpublished input is implied by the documentation refresh.
+
+## Setup and CPU tests
+
+Use Python **3.12**, the repository's `uv.lock`, and Rust **1.94+** (the checkout
+pins 1.94.0). Run these commands from the repository root:
+
+```bash
+uv sync --project tools/golden-gen --locked --extra dev
+uv run --project tools/golden-gen --locked --extra dev \
+    python -m golden_gen.layered_cli --help
+uv run --project tools/golden-gen --locked --extra dev \
+    python -m golden_gen.release_cli --help
+uv run --project tools/golden-gen --locked --extra dev \
+    python -m golden_gen.public_gpu_smoke --help
+cargo build --locked -p vllm_oxide_test --bin vllm-oxide-verify-bundle
+```
+
+The module name selects the protocol; `golden-gen` / `python -m golden_gen`
+selects the retained schema-v4 CLI, not the layered workflow. Help commands
+parse arguments without loading a model. The two current CLIs use an action
+argument and shared flags rather than separate installed console commands.
+For example, `python -m golden_gen.layered_cli collect --help` and
+`python -m golden_gen.release_cli verify --help` show their parser's complete
+flag set; stage-specific requirements are checked when the selected action runs.
+
+Complete adapter tests use two environments, matching CI: the development
+interpreter runs pytest/Ruff/mypy; the locked worker interpreter imports
+Torch/vLLM in CPU subprocesses. Installing worker wheels does not run GPU
+inference. Choose two separate absolute environment paths:
+
+```bash
+export CPU_DEV_ENV=/absolute/path/to/golden-dev
+export CPU_WORKER_ENV=/absolute/path/to/golden-worker
+UV_PROJECT_ENVIRONMENT="$CPU_DEV_ENV" \
+    uv sync --project tools/golden-gen --locked --extra dev
+UV_PROJECT_ENVIRONMENT="$CPU_WORKER_ENV" \
+    uv sync --project tools/golden-gen --locked --all-extras
+cargo build --locked -p vllm_oxide_test --bin vllm-oxide-verify-bundle
+GOLDEN_WORKER_TEST_PYTHON="$CPU_WORKER_ENV/bin/python" \
+GOLDEN_TRANSPORT_TEST_BINARY="$PWD/target/debug/vllm-oxide-verify-bundle" \
+PYTEST_ADDOPTS="" PYTHONNOUSERSITE=1 \
+    "$CPU_DEV_ENV/bin/python" -m pytest tools/golden-gen/tests -q
+"$CPU_DEV_ENV/bin/python" -m ruff check \
+    tools/golden-gen/src tools/golden-gen/tests tools/golden-gen/scripts
+"$CPU_DEV_ENV/bin/python" -m mypy --config-file tools/golden-gen/pyproject.toml \
+    tools/golden-gen/src tools/golden-gen/scripts
+```
+
+If `CARGO_TARGET_DIR` is set, point `GOLDEN_TRANSPORT_TEST_BINARY` at that target
+directory instead. Missing worker/transport tools, skipped cases and empty test
+output cannot satisfy complete CPU evidence. `release_cli cpu` records the nine
+fixed CPU gates and their actual command outputs; hand-written PASS summaries
+are not substitutes.
+
+## GPU preparation
+
+Production inference supports a Linux CUDA host, including WSL2, with an NVIDIA
+SM 8.9+ GPU, a compatible driver and the CUDA Toolkit. The source-bound oracle
+and acceptance reproduction tools are stricter: `environment.py` and the
+runtime schema require **exactly SM 8.9 and CUDA Toolkit 13.2.51**, alongside the
+locked runtime/model identities. These checks preserve the measured profile;
+they are not a new publishing rule or a general production-hardware minimum.
+Allow the required host/device memory and disk for the declared corpus.
+
+Prepare the locked GPU extras, dependencies and complete pinned checkpoint
+before collection. The recorded oracle environment is Python 3.12, PyTorch
+2.10.0 (CUDA 12.8), Transformers 4.57.6, vLLM 0.18.1, xgrammar 0.2.3 and Triton
+3.6.0. Exact model/config/tokenizer/weight and wheel identities are checked;
+package version labels alone do not establish equivalence.
+
+Before starting the prepared measurement process, set `PYTHONHASHSEED=0`,
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`, and the required Hugging Face, Transformers,
+uv and Cargo offline settings. Run GPU owners serially in fresh processes under
+the existing resource guards, including the 16 GiB available-host-RAM floor.
+The candidate binary must already be built from the reviewed checkout; layered
+collection neither installs dependencies nor invokes Cargo. Use fresh evidence
+paths outside the reviewed source and retain failed attempts unchanged. Storage
+needs follow the frozen row inventory; do not reuse the historical corpus's
+small disk estimate for dense full-logit evidence.
+
+For production build, warmup, repeated `LLM::generate`, mixed input and CLI
+coverage, use the separate [public GPU smoke guide](../../docs/validation/public-gpu-smoke.md).
+Its result explicitly does not replace numerical acceptance.
+
+For the model source, the recorded checkpoint is
+[`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) revision
+`7e4ae267688d671ddfca3122e4528ee980cf3234`. Supply its complete local directory
+through `--model-dir` for the Python CLIs (`--model-path` for Rust producers and
+the layer probe). The directory must include `config.json`, `tokenizer.json`
+and the single `model.safetensors`; alternative shards or replacement files
+are rejected by the release oracle. Model acquisition is a preparation step,
+not an implicit download during source-bound collection.
 
 ## Layered accuracy protocol (new workflow)
 
-`python -m golden_gen.layered_cli --help` is the versioned
-`layered-accuracy-v1` entrypoint. L0 means operator verification, L1 model
-numerical verification, and L2 decoding/public behavior verification. The
-schema fields are `operator_checks`, `numerical_checks`, and `behavior_checks`.
-The sections below labeled **legacy** retain their old L1=token/L2=logits meaning;
-their manifests, markers, tolerances and release actions cannot satisfy this protocol.
+`python -m golden_gen.layered_cli --help` lists the current entrypoint. The
+protocol and layer fields are `layered-accuracy-v1`, `operator_checks`,
+`numerical_checks`, and `behavior_checks`. Registry and budget bytes come from
+[`layered-accuracy-cases.json`](../../docs/validation/layered-accuracy-cases.json)
+and [`layered-accuracy-budgets.json`](../../docs/validation/layered-accuracy-budgets.json),
+bound to the clean source and tracked Definition index. Pending budgets are
+`INVALID`, never defaults. Every member is a numerical case; execution groups
+only batch them. The old 28 development cases are not a fresh holdout.
 
-The new reader requires clean source identity and tracked Definition/index binding
-for `docs/validation/layered-accuracy-cases.json` and
-`docs/validation/layered-accuracy-budgets.json`. Pending budgets are `INVALID`,
-not defaults. The old 28 cases are development inputs, not a fresh holdout.
-Every member is a separate numerical case; an execution group only batches them.
+All stages take `--repo-root` and `--run-dir`. Select group/engine/variant values
+from the frozen owner inventory; internal `worker` and `worker-aux` actions are
+launched by the collector rather than used as manual entrypoints.
 
-This is a CPU-prepared measurement workflow, **not release acceptance**. No GPU
-command should run before its separate stage authorization. Use the prepared,
-locked runtime with `PYTHONHASHSEED=0`, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, and HF,
-Transformers, uv and Cargo offline settings established before process startup.
-All GPU owners are serial fresh processes under the 16 GiB available-RAM guard.
-The candidate binary must already be built from the reviewed source; collection
-never invokes Cargo or installs dependencies.
+| Action | Inputs and result |
+|---|---|
+| `collect` | `--model-dir`, `--group`, `--engine` (`reference`, `baseline`, `candidate`) and `--variant` (`primary`, `replay`, `control`, `control-replay`). Candidate collection also uses `--candidate-binary`. Collects a fixed-history or declared unforced owner. |
+| `collect-aux` | Same owner flags. Collects the candidate `operators` suite or a declared standalone public behavior case with primary/replay variants. |
+| `assemble-observation` | `--manifest` names the output; assembles every declared calibration and auxiliary owner. Assembly itself is nonaccepting and creates no success marker. |
+| `observe` | Reads `--manifest`, checks raw rows, replays, mechanisms and ownership. Only complete observations receive an observation marker; unknown budgets remain `INVALID`. |
+| `faults` | Requires a complete calibration `--manifest`; `--output` is inside the dedicated run root. Generates CPU-only isolated fault evidence and rechecks original hashes. |
+| `assemble-authoritative` | In addition to `--manifest`, requires `--calibration-evidence`, `--calibration-manifest`, `--calibration-marker` and `--fault-evidence` inside the run root. Requires approved budgets. |
+| `authoritative` | Independently reproduces calibration/fault provenance and assesses fresh declared measurements against every approved gate. |
 
-The frozen unique-owner inventory supplies the `--group`, `--engine` and
-`--variant` values. The supported stages are:
+For a prepared, reviewed measurement checkout, one operator owner can be
+collected with the actual auxiliary entrypoint below. The absolute placeholders
+must refer to the matching prebuilt binary, pinned local model and a fresh
+external evidence root; this single owner is not complete release evidence.
 
-- `collect`: one fixed-history owner (`primary`/`replay`) or unforced owner
-  (`control`/candidate-only `control-replay`), with `--model-dir` and, for the
-  candidate, `--candidate-binary`.
-- `collect-aux`: one candidate operator suite (`--group operators`) or a
-  standalone public behavior case, with `primary` or `replay`.
-- `assemble-observation`: hash and assemble every declared calibration and
-  auxiliary owner. `--manifest` names the output manifest. Assembly alone is
-  nonaccepting and creates no success marker.
-- `observe`: validate raw data, replays, actual mechanisms and ownership against
-  that manifest. Only complete observations receive an observation marker;
-  incomplete/invalid evidence exits 2. Unknown numeric budgets remain `INVALID`
-  even when observation collection is complete.
-- `faults`: CPU-only isolated fault models based on a complete calibration
-  `--manifest`, written to `--output`. Normal input files are hard-linked read-only
-  into private temporary mirrors; mutations are written to fresh filenames, never
-  into shared inodes. Original artifact hashes are rechecked after simulation.
-- `assemble-authoritative`: available only after budget approval; additionally
-  requires `--calibration-evidence`, `--calibration-manifest`,
-  `--calibration-marker`, and `--fault-evidence` inside the run root.
-- `authoritative`: independently reproduce approved calibration/fault evidence
-  and assess fresh measurements. Every case's absolute mean/peak KL, paired mean
-  KL excess over vLLM, and reference choice loss are independent gates. TV and
-  top-5 overlap are diagnostics; the summary is case-equal, never token-weighted.
+```bash
+uv run --project tools/golden-gen --locked --extra gpu \
+    python -m golden_gen.layered_cli collect-aux \
+    --repo-root "$PWD" --measurement-repo "$PWD" \
+    --run-dir /absolute/path/to/fresh-layered-run \
+    --model-dir /absolute/path/to/pinned-qwen3-checkpoint \
+    --group operators --engine candidate --variant primary \
+    --candidate-binary /absolute/path/to/built/vllm-oxide-fixed-prefix
+```
 
-All stages also take `--repo-root` and `--run-dir`. Keep original calibration
-artifacts in a subdirectory of the overall run root; authoritative owners use new
-directories, so the original source/marker is not relabeled or overwritten.
-Markers rehash the full declared capture/receipt/guard/setup dependency graph.
-Definition-only approval changes may bridge calibration to fresh measurements;
-execution-source changes require fresh calibration. Old markers are never inputs.
+For numerical owners use `collect` and the exact declared execution-group ID;
+for an operator replay use the separately declared `replay` variant. Do not
+derive acceptance from a successful collection exit: it only records that
+owner's raw evidence, and complete inventory assembly/evaluation are separate.
 
-For a new calibration after an implementation change, `collect` and `collect-aux`
-accept `--fresh-observation`. This mode permits only the frozen calibration owner
-inventory and remains nonaccepting; it does not inherit the prior backend's
-calibration approval. The worker uses the declared checkout and the invoking
-GPU-only Python environment.
+Keep calibration inputs and fresh authoritative owners in separate directories
+under the overall run root. `--fresh-observation` is valid only for `collect`
+and `collect-aux`: it collects the frozen calibration inventory after an
+implementation change, stays nonaccepting, and cannot inherit a previous
+backend's approval. Definition-only approval changes have their documented
+bridge; executable changes require fresh calibration.
 
-After the new calibration and source bindings are approved, the
-`bounded-telemetry-fresh-v1` supervision policy produces manifest schema 3. Supply
-`--measurement-repo` during collection and `--supervision-policy` during
-assembly; no retained-owner ledger is allowed. Every owner must carry a full
-schema-2 guard and original worker metadata. Source-role CPU gates, replay,
-calibration/fault provenance and the full artifact closure remain mandatory.
-The earlier recovery policy and manifest schema 2 still require their exact
-original retained ledger. See [ADR-0021](../../docs/adr/0021-fresh-supervised-release-evidence.md).
+The `bounded-telemetry-fresh-v1` policy uses layered manifest schema 3:
+collection takes `--measurement-repo`, assembly takes `--supervision-policy`,
+and every owner retains a full schema-2 guard and original worker metadata.
+It forbids a retained-owner ledger. Historical recovery manifest schema 2
+still requires its exact original `--retained-owner-ledger`; do not mix these
+profiles. See the [supervision contract](../../docs/validation/layered-supervision-contract.md)
+and [fresh evidence ADR](../../docs/adr/0021-fresh-supervised-release-evidence.md).
 
-Supervised `release_cli performance` also requires `--measurement-repo` and the
-selected policy's separate `measurement_benchmark_binary` hash/build binding.
-It executes that checkout and records performance wrapper schema 2; a legacy
-wrapper cannot satisfy this gate. The native memory monitor requests 10 ms
-samples, checks each actual interval against 50 ms before truncation, and records
-the observed maximum interval rounded upward. See
-[ADR-0022](../../docs/adr/0022-bind-performance-measurement-and-monitoring.md).
+Fixed replay records exactly T predictions for `prompt + continuation[:t]`,
+with separate predicted and advance tokens; the final advance does not claim
+another forward. Controls advance only their own raw greedy predictions.
+Prefix/cache-pressure/waiting cases retain actual ordered and detokenized
+`LLM::generate` outputs plus independent controls. Shared owner evidence is
+counted once. Relabeling forced rows does not establish public behavior.
 
-Fixed replay records exactly T predictions for prompt+continuation[:t], with a
-separate predicted and advance token. Recording the final advance does not claim
-another forward. Controls advance only their own raw greedy predictions. Public
-prefix/cache-pressure/waiting cases also retain the actual ordered/detokenized
-`LLM::generate` return values and use a separate control replay. Their owners are
-shared with collection-equivalence evidence and counted once, not twice. Merely
-relabeling forced rows never establishes public behavior coverage.
+For vLLM, native and externally returned request IDs are opaque complete
+strings. Baseline captures retain both in explicit `request_bindings` using
+`vllm-owner-local-v1`; capture-local IDs remain stable across batch movement.
+Rows, execution events and mappings must agree; aliases and rebinding fail.
 
-vLLM request IDs are opaque: its internal ID can differ from the externally
-returned ID. Baseline captures declare `request_identity=vllm-owner-local-v1`
-and retain both complete strings in an explicit per-member `request_bindings`
-table. Capture-local integer IDs are assigned when native requests are first
-observed and remain stable across batch moves and setup calls; they are not
-parsed from a string prefix or recomputed from a current batch slot. Rows and
-execution events must agree with the mapping, and aliases/rebinding are rejected.
+Absolute mean/peak KL, paired mean KL excess over the baseline, and reference
+choice loss are independent case gates. TV and top-5 overlap are diagnostics;
+case summaries are not token-weighted. Missing coverage is `INVALID`, while a
+measured numerical or stop/length policy violation is `FAIL`. Do not select new
+holdout prompts after inspecting acceptance outcomes. Full definitions live in
+the [layered contract](../../docs/validation/layered-accuracy-contract.md).
 
-No early resolved EOS means missing required coverage (`INVALID`), not a diagnosis
-of model inaccuracy or an EOS-state-machine bug. Emitting EOS and violating the
-stop/length policy is a behavior `FAIL`. Do not select replacement holdout prompts
-after seeing acceptance outcomes.
-
-The new CLI deliberately exposes no tag, release, upload or publication action.
-The old shell `authoritative`/`publish` stages and direct publication preparation
-stay disabled. The schema5 release adapter below consumes complete layered evidence.
-Numerical acceptance still requires subsequent performance evidence, the release
-report, local bundle/clean-consumer verification and final review. For the current
-acceptance run, retain all evidence locally under
-[ADR-0028](../../docs/adr/0028-local-release-evidence.md); no GitHub evidence upload
-or archive splitting is required. Optional publication is a separate operation
-requiring explicit independent authorization. CPU tests do not establish GPU
-numerical accuracy. Dense raw inventories need substantially more disk space than
-the legacy corpus; budget storage from the frozen row inventory before collection.
+Markers rehash the complete declared captures, receipts, guards and setup graph.
+Changed executable/source inputs, unknown budgets, stale or missing evidence,
+empty coverage and failed comparisons reject acceptance. Old markers and raw
+FAIL results are never relabeled. This CLI exposes no tag, upload or publication
+action.
 
 ## Schema5 release stages
 
-`python -m golden_gen.release_cli --help` exposes separately invocable `cpu`,
-`performance`, `bundle`, `verify`, `report` and `publish` stages. All require
-`--repo-root` and a fresh external `--marker`. Failure writes no success marker.
-These are CPU-tested implementation paths, not evidence of GPU acceptance. The
-current release acceptance uses `cpu`, `performance`, `bundle`, `verify` and
-`report`, followed by full candidate review. It does not run `publish`; the
-complete original evidence and both bundle files must remain on durable local
-storage rather than relying only on a temporary run directory.
+`python -m golden_gen.release_cli --help` lists `cpu`, `performance`, `bundle`,
+`verify`, `report` and optional `publish`. All require `--repo-root` and a fresh
+external `--marker`; failures write no success marker. These implemented paths
+and their CPU tests are distinct from actual model acceptance. In particular,
+[v0.2.0's product validation summary](../../docs/releases/goldens-v0.2.md) does
+not claim that the historical combined bundle passed complete consumer acceptance.
 
-- `cpu`: `--output` is a fresh log directory; supply the development `--python`,
-  prepared `--worker-python`, CPU `--rust-binary` (the verify-bundle executable),
-  and shared `--target-dir`. The producer executes nine fixed gates: default
-  core, workspace, internal-golden, fmt, Clippy, cargo-deny, pytest, Ruff and
-  mypy. Actual commands, environment/toolchain, status and raw logs are retained;
-  no supplied PASS summary can replace execution. The default core output must
-  show the fixed 128-token pressure regression actually running.
-- `performance`: after separate GPU stage authorization, use `--output` for a
-  fresh directory, `--model-dir`, `--benchmark-binary` and
-  `--authoritative-manifest`. This revalidates authoritative evidence before
-  owning a GPU and records current runtime, guarded execution and original
-  synchronized telemetry for the ADR-0012 fixed workloads. Never invoke it
-  during CPU-only preparation.
-- `bundle`: supply `--run-dir`, fresh `--output`, `--authoritative-manifest`,
-  `--authoritative-marker`, `--performance-evidence` and `--cpu-evidence`.
-  All four evidence entrypoints must be beneath the same run root. The adapter
-  snapshots every relevant source's selected Definition bytes without changing
-  their original identities, recomputes the complete evidence and emits exactly
-  local `manifest.json` and `goldens-v0.2.tar.gz`. It never splits or drops files
-  to meet a remote upload limit.
-- `verify`: use `--bundle-dir`, `--cache-dir` and CPU `--rust-binary`. It runs
-  Rust and Python transport readers on the actual two files, reconstructs the
-  closure in a private fresh cache, and re-evaluates raw semantics and performance
-  before exposing the verified immutable install. The Rust flag
-  `--layered-transport` alone explicitly returns `accepting=false`.
-- `report`: the same verification arguments plus a fresh external `--output`
-  produce Markdown. Commit those exact bytes at `docs/releases/goldens-v0.2.md`
-  in the evidence-only candidate; do not add the report to the two asset files.
-- `publish` (optional manual GitHub operation): the verification arguments plus
-  `--review`, `--review-base` and
-  independent `VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2` authority are required.
-  The review JSON uses protocol `layered-accuracy-v1`, schema1,
-  kind `full_candidate_review`, exact `base`, `candidate: {commit,tree}` and
-  SHA256 of the complete `git diff --binary BASE...CANDIDATE`. `axes.standards`
-  and `axes.spec` each bind an original report `{path,sha256}` relative to the
-  review JSON and require `unresolved_findings: []`. The adapter recomputes the
-  bundle and report, refuses existing/partial remote state, creates one direct
-  tag and release, uploads exactly two assets and validates downloaded bytes.
-  Before any remote write it checks each actual asset is strictly smaller than
-  2 GiB. Failed remote operations are never automatically overwritten or repaired.
-  Local acceptance neither requires nor authorizes this operation.
+| Stage | Required stage inputs and behavior |
+|---|---|
+| `cpu` | Fresh `--output`, development `--python`, prepared `--worker-python`, CPU `--rust-binary` and `--target-dir`. Executes default core, workspace, internal-golden, fmt, Clippy, cargo-deny, pytest, Ruff and mypy. |
+| `performance` | Fresh `--output`, `--model-dir`, built `--benchmark-binary` and `--authoritative-manifest`. Revalidates authoritative provenance before guarded GPU measurement and records raw synchronized telemetry. |
+| `bundle` | `--run-dir`, fresh `--output`, `--authoritative-manifest`, `--authoritative-marker`, `--performance-evidence`, `--cpu-evidence`. All four evidence entrypoints must be under the same run root. Recomputes complete evidence and writes the exact local two-file bundle. |
+| `verify` | `--bundle-dir`, fresh `--cache-dir`, CPU `--rust-binary`. Runs Rust/Python readers and reconstructs/evaluates the full raw semantics before immutable installation. |
+| `report` | Verification inputs plus fresh external `--output`. Renders the verified Markdown report; it is separate from the asset pair. |
+| `publish` | Verification inputs plus `--review`, `--review-base` and independent `VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2` authority. Optional manual GitHub operation; not part of local acceptance. |
 
-Release schema5 local bounds are 16 MiB per manifest, 50,000 artifacts, 8 GiB
-minus one byte per artifact (the USTAR field limit), 1 TiB total extracted bytes
-and 2 TiB compressed archive bytes. The 2-TiB bound applies to Python packing
-and Python/Rust local installation; it preserves finite bounded reads.
-Artifact filenames are `artifact-NNNNNN.bin` in sorted ASCII logical-path order;
-identical bytes at different logical paths remain distinct records. Consumers
-enforce canonical gzip/USTAR headers, exact lengths/hashes, bounded streaming,
-complete inventories and immutable no-replace installation. Disk capacity is
-checked before packing/extraction. GitHub's strictly-less-than-2-GiB per-asset
-limit is enforced only by optional `publish`, not `bundle`, `verify` or `report`.
-Local capacity or format-bound failures still reject the operation; no silent
-splitting, evidence omission or encoding changes are permitted.
-
-The committed registry/budgets remain authoritative. Pending budgets or any
-missing source, owner, replay, raw telemetry, CPU gate or original evidence
-reject the new release path. Final candidate review and publication authorization
-stay outside the archive to avoid self-reference. Tests use synthetic evidence
-and injected transports; they never establish Qwen GPU correctness or publication
-permission.
-
-For the current renewal, keep calibration `2dc9445` unchanged. Measurement X
-may add only the approved policy, its supervision digest pointer, Definition index
-and approval ADR. Apply the local transport repair solely to the separately
-frozen supervisor/evaluator Y, preserving protected measurement Git objects and
-all reference/mathematical checks. Both sources need complete CPU evidence and
-review. This routing does not broaden calibration-to-measurement executable
-equivalence, reuse calibration owners for authority or approve the new 747-owner
-confirmation; see the [supervision contract](../../docs/validation/layered-supervision-contract.md).
-
-## Legacy workflow prerequisites (historical)
-
-- Linux with one NVIDIA sm_89 GPU and no unrelated CUDA compute process
-- At least 32 GiB host RAM; every GPU-owning stage stops below 16 GiB available
-- Python 3.12, PyTorch 2.10.0 (CUDA 12.8), Transformers 4.57.6,
-  vLLM 0.18.1, xgrammar 0.2.3, and Triton 3.6.0 from `uv.lock`
-- CUDA toolkit 13.2.51 for the Rust/Candle candidate
-- `uv` package manager (see [docs.astral.sh/uv](https://docs.astral.sh/uv/))
-- About 12 GiB free disk on a fresh host; the current release keeps all machine
-  evidence below `/tmp/vllm-oxide-dag-v0.2.0/t45-artifacts`
-
-## Legacy same-prefix release workflow
-
-`tools/validate-release.sh` exposes separately invocable, content-marked stages:
-
-- `env` installs registry dependencies from locked wheels only, then validates
-  exact model/tokenizer hashes and runtime identities. It retains actual installer
-  logs and matches every live registry distribution's wheel tags/build to the lock.
-- `generate` runs Transformers and vLLM in separate fresh processes twice,
-  verifies bit-identical replay, and assembles exactly 28 cases / 56 assets.
-- `calibrate` records baseline evidence without selecting acceptance thresholds.
-- `observe` opens only `canonical_01`, `canonical_02`, `canonical_03`, and
-  `canonical_05a`; it keeps the other four full-logit cases sealed and always
-  exits non-zero (`3`) after writing the normalized observation.
-- `authoritative` is unavailable until that observation is added through a
-  reviewed Definition checkpoint. It then runs and replays all 28 candidate cases.
-- `benchmark`, `report`, and `bundle` produce the fixed performance evidence,
-  evidence-only report, and exact two-asset bundle.
-- `verify-local` exercises the production Rust downloader against that exact pair
-  in a new cache before any publication operation is available.
-- `publish` and `verify` are separate. `publish` is inert unless the user supplies
-  the explicit publication guard and frozen candidate identity.
-
-Start each release attempt with a fresh run root:
+For an already prepared local schema5 bundle, the basic consumer command is:
 
 ```bash
-./tools/validate-release.sh env \
-  /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id> \
-  /path/to/Qwen3-0.6B
+uv run --project tools/golden-gen --locked --extra dev \
+    python -m golden_gen.release_cli verify \
+    --repo-root "$PWD" \
+    --bundle-dir /absolute/path/to/local-evidence-bundle \
+    --cache-dir /absolute/path/to/fresh-verified-cache \
+    --rust-binary "$PWD/target/debug/vllm-oxide-verify-bundle" \
+    --marker /absolute/path/to/fresh-verify-marker.json
 ```
 
-Run later stages one at a time with the same root. Never use
-`tools/golden-gen/output/`: it is ignored legacy working state and is rejected as
-release evidence. Each successful stage creates a JSON marker binding the
-generator commit/tree, predecessor marker, and output checksums. A failed stage
-creates no successor marker.
+Use the actual CPU reader path if `CARGO_TARGET_DIR` differs. A source-routed
+bundle also needs the exact approved `--source-role-freeze` and
+`--source-role-freeze-sha256`; omission is not permission to ignore its source
+roles. The command reconstructs original evidence and checks its semantics;
+it does not rerun GPU model inference or make an arbitrary bundle accepting.
 
-Generation, baseline calibration, and policy approval keep separate immutable
-fixture/manifest copies. Marker checks recursively rehash predecessor outputs and
-reject changed executable inputs. GPU owners run under a process-lifetime RAM
-watchdog, with disk/RAM/GPU evidence before and after execution. Rust GPU runners
-also check their compiler-produced source fingerprint against the clean reviewed
-worktree. Reports retain complete runtime identities and every benchmark repetition.
+The CPU producer retains actual command/environment/toolchain/raw logs and
+requires the default-core 128-token mixed pressure regression to run. It rejects
+skipped or empty comparisons. CPU gate evidence validates code/tooling behavior,
+not GPU model accuracy.
 
-The vLLM baseline uses a pinned `worker_cls` subclass because WSL starts a fresh
-EngineCore process. That worker enables and verifies deterministic algorithms
-before CUDA initialization. Its ready/complete RPC records retain actual flags,
-PID, every attention layer's FlashAttention-2 backend, and eager/no-graph settings
-in `oracle-run.json`; missing or inconsistent worker evidence fails generation.
-The spawn regression is CPU-only and can use the prepared release interpreter:
-`GOLDEN_WORKER_TEST_PYTHON=<run-root>/env/.venv/bin/python pytest tests/test_worker_determinism.py`.
+Performance uses the ADR-0012 fixed workloads: one request (`canonical_04`) and
+four requests (`canonical_05`), each with one discarded warmup and three measured
+64-token greedy repetitions. Original synchronized timing and raw memory traces
+are mandatory. Supervised collection binds `--measurement-repo` and the policy's
+benchmark binary/build hash; the legacy wrapper is not interchangeable. The
+current direct NVML method targets **5 ms** and enforces the unchanged strict
+**50 ms** completion-gap and API-span ceilings; a faster sampling target never
+excuses a late record. Performance figures are local evidence, not a universal
+throughput floor or a vLLM parity claim.
 
-```bash
-uv run python -m golden_gen --help
-```
+Source-role routing additionally takes both `--source-role-freeze` and its
+independently approved `--source-role-freeze-sha256`, and is limited to local
+`performance`, `bundle`, `verify` and `report`. It preserves the actual distinct
+numerical measurement/evaluator, performance producer and release evaluator
+identities. It cannot relabel old measurements or permit arbitrary source edits.
+The routed performance stage also requires `--run-dir`, `--authoritative-marker`,
+`--cpu-evidence` and `--measurement-repo`. Its CPU envelope/schema and memory
+records remain bound to those original sources; a caller-supplied PASS or an
+unselected proposal supplies no authority.
+
+## Golden asset bundle contract
+
+The local schema5 pair is exactly **`manifest.json`** and
+**`goldens-v0.2.tar.gz`**, preserving all raw evidence and source topology. Keep
+both on durable local storage, together with the original evidence, rather than
+relying on a temporary run directory. No GitHub evidence upload or archive
+splitting is required. See [ADR-0028](../../docs/adr/0028-local-release-evidence.md)
+and the [asset specification](../../docs/validation/layered-release-assets.md).
+
+Schema5 limits are 16 MiB per manifest, 50,000 artifacts, 8 GiB minus one byte
+per artifact (USTAR field limit), 1 TiB total extracted bytes and 2 TiB compressed
+archive bytes. These finite bounds apply to local packing and Rust/Python
+installation. Disk capacity is checked before packing/extraction.
+
+Artifact names are `artifact-NNNNNN.bin` in sorted ASCII logical-path order;
+identical bytes at different logical paths remain separate records. The gzip
+header has mtime 0 and no source filename. USTAR entries are regular root files
+with mode `0644`, uid/gid 0, empty owner/group names and mtime 0. The manifest is
+outside the archive. Consumers enforce canonical headers, complete inventory,
+exact lengths/hashes, bounded streaming and immutable no-replace installation
+under `<cache-root>/goldens-v0.2/<archive-sha256>`. The Rust
+`--layered-transport` flag verifies transport only and reports `accepting=false`;
+Python verification also evaluates raw semantics.
+
+Optional publication requires an independent full candidate review, not a
+synthetic test or an archive's own summary. The review JSON binds protocol
+`layered-accuracy-v1`, schema 1, kind `full_candidate_review`, exact `base`,
+`candidate: {commit, tree}` and SHA-256 of `git diff --binary BASE...CANDIDATE`.
+Both `axes.standards` and `axes.spec` bind original `{path, sha256}` reports
+relative to the review JSON and require `unresolved_findings: []`. Review and
+publication authority stay outside the archive to avoid self-reference.
+
+`publish` revalidates the bundle/report, refuses existing or partial remote
+state, creates the golden tag/release, uploads the exact two assets and checks
+downloaded bytes. Each asset must be **strictly smaller than 2 GiB** before any
+remote write. This remote limit is not a local bundle limit. Failures are not
+automatically overwritten or repaired; splitting archives or dropping evidence
+is outside the contract. GitHub's automatic product source archives are not
+these golden API assets.
+
+## Historical schema-v4 reference
+
+The retained `python -m golden_gen` CLI and `tools/validate-release.sh` implement
+the earlier `same-prefix-v1` corpus, with L1=token, L2=logits and a debug L3
+skeleton. The original corpus had 28 cases / 56 oracle assets. Its manifests,
+tolerances, markers and verdicts keep their old meanings; they do not satisfy
+the current L0/L1/L2 protocol. The shell's `authoritative` and `publish` actions
+and the old direct publication preparation are disabled.
+
+### Legacy same-prefix release workflow
+
+Historical stages were `env`, `generate`, `calibrate`, `observe`,
+`authoritative`, `benchmark`, `report`, `bundle`, `verify-local`, `publish` and
+`verify`. Generation ran separate Transformers/vLLM processes twice, required
+bit-identical replay and kept baseline calibration separate from correctness.
+The observation opened only `canonical_01`, `canonical_02`, `canonical_03` and
+`canonical_05a`, left four full-logit cases sealed and exited 3 after recording
+its nonaccepting result. It did not approve thresholds or holdout access.
+The legacy shell retains its original fixed run-root assumptions; it is not a
+general setup or release command for new work.
+
+Historical markers recursively bound predecessor output, runtime, clean
+source and binary identity. Generation, calibration and policy approval used
+separate immutable copies. The spawn worker's deterministic flags, PID,
+FlashAttention-2 layers and eager/no-graph settings were retained in
+`oracle-run.json`; missing worker metadata rejected the old run.
 
 ### Dry-run (no GPU)
 
-```bash
-cd tools/golden-gen
-uv run python -m golden_gen generate --dry-run --output-dir /tmp/golden-dry-run
-```
-
-Produces a schema-valid but uncalibrated fake manifest and synthetic
-`.safetensors` fixtures without loading any model or GPU. It exercises lifecycle
-plumbing only and is never publishable release evidence.
-
-### Testing (CPU-only)
+From the repository root:
 
 ```bash
-cd tools/golden-gen
-uv run pytest
+uv run --project tools/golden-gen --locked --extra dev python -m golden_gen \
+    generate --dry-run --output-dir /absolute/path/to/fresh-golden-dry-run
 ```
 
-All unit tests run on CPU and do not require a GPU. The plain `generate` command
-is dry-run only; there is no direct real-generation or arbitrary-tolerance bypass.
+This creates a schema-valid **uncalibrated synthetic** manifest and fixtures to
+exercise historical plumbing. It cannot establish model correctness or produce
+publishable release evidence. Plain `generate` is dry-run only; there is no
+arbitrary-tolerance bypass. `tools/golden-gen/output/` is ignored historical
+working state, must not be committed, and is rejected as release evidence.
+
+The following field and tensor tables describe **schema-v4 only** and retain
+that format's exact definitions. Schema5 uses opaque raw artifact records and
+the layered protocol described above.
 
 ## Manifest Schema
 
@@ -395,67 +467,42 @@ Batch prompt specifications are expanded into concrete fixture cases and run thr
 both oracle adapters. Any vLLM deviation is retained only as Baseline oracle
 calibration evidence; the Transformers output remains the Reference oracle target.
 
-## Golden asset bundle contract
+## Source map
 
-The current acceptance retains exactly local `manifest.json` and
-`goldens-v0.2.tar.gz`, preserving the complete raw evidence and source topology.
-The schema5 `bundle` / `verify` / `report` stages above implement the active
-workflow. The older shell publication example is historical and its publication
-entrypoint stays disabled.
+The three [diagnostic scripts](scripts/README.md) complement this map:
+`bf16_reference_probe.py` checks residual/RMSNorm/RoPE operation order,
+`silu_reference_probe.py` checks the fixed gated-SiLU rounding example, and
+`canonical03_layer_probe.py` verifies and localizes exact historical captures.
+Their own guide documents device flags, immutable inputs, stdout reports and
+trace layout. They do not generate accepting fixtures or rerun the release gates.
 
-The archive is gzip-compressed USTAR. It contains every and only the declared
-artifact filename at its root, sorted by ASCII filename. Every entry is a regular
-file with mode `0644`, uid/gid `0`, empty owner/group names, and mtime `0`; the
-gzip header has mtime `0` and no source filename. The manifest is never inside
-the archive. A fresh local consumer verifies the exact two files, schema,
-versions, archive and artifact checksums, source bindings and complete raw
-semantics, and atomically installs verified content under
-`<cache-root>/goldens-v0.2/<archive-sha256>`.
+| Module or directory | Responsibility |
+|---|---|
+| `layered_cli.py`, `layered_workflow.py`, `layered_manifest.py` | Current collection, inventory assembly and source-bound evaluation |
+| `fixed_prefix.py`, `fixed_prefix_oracles.py`, `fixed_prefix_vllm.py` | Frozen histories, replay validation and oracle adapters |
+| `operator_verification.py`, `behavior_verification.py` | L0 operators and L2 public behavior checks |
+| `layered_accuracy.py`, `layered_faults.py` | Numerical metrics, budgets and isolated fault models |
+| `release_cli.py`, `release_cpu.py`, `release_performance.py` | CPU evidence and fixed-workload performance stages |
+| `release_adapter.py`, `release_transport.py`, `release_roles.py` | Local bundle, raw verification and explicit source-role bindings |
+| `release_memory_method.py`, `guard.py`, `supervision.py` | Memory records and guarded execution |
+| `public_gpu_smoke.py` | Production build and public API/CLI smoke |
+| `cli.py`, `schema.py`, `oracles/` | Retained schema-v4 fixture CLI/schema/oracle tools |
+| `prompts/`, `tests/` | Historical prompt inputs and CPU regression/fault tests |
 
-If independently requested and authorized later, manual `release_cli publish`
-checks the remote per-asset capacity before publishing these same two files.
-GitHub's automatic source archives are not API release assets; individual
-`.safetensors` uploads or split archives are outside this contract. This release
-acceptance does not run golden publication.
+## Common setup and evidence errors
 
-## File Layout
+| Symptom | Check and next action |
+|---|---|
+| `ModuleNotFoundError: golden_gen`, Torch or Transformers | Use `uv run --project tools/golden-gen` with the required locked extras, or the prepared absolute interpreter. The development environment alone does not include the model runtime. |
+| Deterministic-environment rejection | Set `PYTHONHASHSEED=0` and `CUBLAS_WORKSPACE_CONFIG=:4096:8` before launching a fresh process. Runtime imports must not precede setup. |
+| Missing adapter or CPU transport evidence | Build the CPU reader and set `GOLDEN_WORKER_TEST_PYTHON` / `GOLDEN_TRANSPORT_TEST_BINARY` to the prepared tools; inspect the raw test output. A partial or skipped suite is not complete CPU evidence. |
+| Model hash or alternative-weight rejection | Locate the complete pinned local checkpoint. Do not edit expected hashes or use a different revision under the same directory name. |
+| Source, tree, worker or binary mismatch | Use the reviewed checkout and its matching previously built binary. Source identity includes tracked definitions; replacing only a PASS marker cannot repair the graph. |
+| Existing output, marker or cache | Choose the fresh path required by that stage and retain the rejected run. The tools use no-replace writes; deleting earlier evidence to retry is not required. |
+| Performance telemetry gap or API-span failure | Preserve all original timing and memory traces and investigate sampler/owner contention. The 50 ms limits stay unchanged; no averaging or omitted repetition repairs a failed record. |
+| Bundle verification returns `INVALID` | Read the reported reasons and verify the raw inputs, source topology and finite transport limits. Rust transport-only success does not replace Python semantic evaluation. |
 
-```
-tools/golden-gen/
-├── README.md
-├── pyproject.toml
-├── .gitignore
-├── .python-version
-├── prompts/
-│   ├── canonical.jsonl       # 5 canonical prompts
-│   └── regression.jsonl      # 20 regression prompts
-├── src/
-│   └── golden_gen/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── cli.py            # argparse entrypoint
-│       ├── config.py         # Constants
-│       ├── schema.py         # Pydantic v2 models
-│       ├── prompts.py        # JSONL loader
-│       ├── io.py             # safetensors save/load
-│       ├── manifest.py       # manifest build/write/read
-│       ├── assets.py         # deterministic archive + exact-two bundle publisher
-│       ├── generate.py       # oracle × prompt orchestration
-│       ├── calibrate.py      # baseline observations + explicit tolerance policy
-│       └── oracles/
-│           ├── __init__.py
-│           ├── base.py       # Oracle protocol + result dataclass
-│           ├── fake.py       # Deterministic fake (--dry-run)
-│           ├── transformers_oracle.py
-│           └── vllm_oracle.py
-└── tests/
-    ├── __init__.py
-    ├── conftest.py
-    ├── test_schema.py
-    ├── test_prompts.py
-    ├── test_io.py
-    ├── test_manifest.py
-    ├── test_calibrate.py
-    ├── test_fake_oracle.py
-    └── test_cli.py
-```
+For CUDA builds, hardware visibility, memory sizing and application errors, use
+the [engine troubleshooting guide](../../docs/getting-started.md#common-errors).
+For collection-policy and source-role questions, use the linked validation
+contracts rather than substituting flags from the legacy CLI or shell wrapper.

@@ -34,7 +34,9 @@
 
 原性能 producer 的 `canonical_04`、`canonical_05` 各丢弃一次 warmup，再测量三次。下表为固定 RTX 4080/WSL2 环境中的中位数；batch 吞吐为四请求总吞吐。
 
-| 工作负载 | Prefill token/s | Decode token/s | TTFT ms | 峰值显存 MiB |
+六次原始 telemetry 绑定相同配置：BF16、`max_model_len=4096`、每步 token 预算 16384、最大并发 512、`gpu_memory_utilization=0.50`。采样为 greedy（temperature 0）、每请求 64 个 completion token、`ignore_eos=true`，三个 penalty 均为 0，top-k/top-p 关闭。API/CLI 默认显存比例为 0.90，本基准的 0.50 及其显存结果不是默认配置。NVML 记录的是整张设备已用显存，可能包含其他 GPU 分配。
+
+| 工作负载 | Prefill token/s | Decode token/s | TTFT ms | 设备显存用量峰值 MiB |
 |---|---:|---:|---:|---:|
 | 单请求 `canonical_04` | 13910.2653 | 29.7601 | 40.9622 | 10756 |
 | 四请求 `canonical_05` | 1715.8632 | 115.8207 | 36.7626 | 10692 |

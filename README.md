@@ -2,117 +2,46 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> **v0.2.0 — single-GPU Qwen3 offline inference.**
-> Supported scope and completed validation are recorded in the
-> [v0.2.0 release notes](docs/releases/v0.2.0.md). Published tags and assets are
-> listed in [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases).
+[![CI](https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/RedHeartSecretMan/vllm-oxide)](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-[![CI][ci-badge]][ci-url]
-[![License: Apache-2.0][license-badge]][license-url]
+vllm-oxide is a Rust engine for **single-GPU, synchronous, offline Qwen3 inference**, built on [Candle](https://github.com/huggingface/candle) and project-owned CUDA kernels. It draws on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm)'s architecture, with continuous batching, prefix caching, a paged KV cache, and recompute preemption.
 
-[ci-badge]: https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml/badge.svg
-[ci-url]: https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml
-[license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
-[license-url]: LICENSE
+**v0.2.0 is available as source.** The validated workload is **Qwen3-0.6B in BF16** on one CUDA GPU. See the [release notes](docs/releases/v0.2.0.en.md), [validation summary](docs/releases/goldens-v0.2.md), and [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
 
-A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture, with a correctness-first v0.2.0 contract.
+[Getting started](docs/getting-started.md) · [Documentation](docs/README.md) · [Architecture](docs/architecture.md) · [Releases](docs/releases/README.md) · [Contributing](CONTRIBUTING.md)
 
-- **Single-GPU, offline inference** — no server, no async. Continuous batching, prefix caching, paged KV cache, and recompute-only preemption in a synchronous engine.
-- **Qwen3 generation contract** — the supported library boundary is synchronous `LLM::generate` on one CUDA GPU; model registration and execution mechanics remain internal.
-- **Two-tier correctness** — CI property tests catch regressions fast; a GPU release gate with golden fixtures validates numerical output against a transformers oracle.
+## What you can build
 
-[Architecture](#architecture-overview) | [Quick Start](#quick-start) | [Testing](#testing) | [Contributing](#contributing)
+Embed the engine in a Rust application, submit a batch of text or token-ID prompts, and receive completed text and token IDs. Reuse one `LLM` across calls to retain its model and cache allocation. The CLI offers the same generation path for one prompt at a time.
 
-## Table of Contents
+| Area | v0.2.0 support |
+|---|---|
+| Model and execution | [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B), BF16, one CUDA GPU, synchronous offline generation |
+| Request handling | Continuous batching within a generation call, chunked prefill, stable request IDs, input-order results |
+| KV cache | Paged storage, shared-prefix caching, copy-on-write, recompute preemption |
+| Token selection | Greedy, temperature, top-k, top-p, presence/frequency/repetition penalties, EOS and token-limit stopping |
+| Distribution | Tagged source, a Rust library, and a CLI; no prebuilt binary or published crates.io package |
 
-- [What is this?](#what-is-this)
-- [Architecture overview](#architecture-overview)
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Library usage](#library-usage)
-- [Build features](#build-features)
-- [Testing](#testing)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [Minimum Supported Rust Version (MSRV)](#minimum-supported-rust-version-msrv)
-- [Security](#security)
-- [License](#license)
+Serving, async streaming, multi-GPU/TP/NCCL, other model families, quantization, LoRA, speculative decoding, and CUDA Graphs are outside this release. Architecture inspiration does not imply API compatibility or feature parity with upstream vLLM.
 
----
+## Quick start
 
-## What is this?
+GPU inference needs Linux or WSL2, Rust **1.94 or newer**, an NVIDIA GPU with compute capability **8.9 or newer**, a working NVIDIA driver, and a CUDA Toolkit containing `nvcc`. The release was tested on RTX 4080 with driver 595.71 and Toolkit 13.2.51; other hardware and toolkit combinations have not received the same release validation.
 
-vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https://github.com/huggingface/candle) and project-owned CUDA kernels, it provides a synchronous, in-process engine with:
-
-- Continuous batching and prefix caching
-- Paged KV cache (`block_size = 256`)
-- Recompute-only preemption
-
-v0.2.0 supports **single-GPU Qwen3 offline generation**: one in-process, synchronous `LLM::generate` interface with no server or async runtime. Other model families, serving APIs, TP/NCCL, CUDA Graphs, quantization, LoRA, and speculative decoding are outside this release boundary.
-
-### Project goals
-
-- A drop-in replacement for Python inference engines in production — correct first, then fast.
-- Architecture decisions recorded as ADRs (`docs/adr/`), domain vocabulary documented in `CONTEXT.md`.
-
-## Architecture overview
-
-```mermaid
-flowchart TD
-    LLM["LLM::new(source, opts)"] -->|owns| EC["EngineCore"]
-
-    subgraph EC ["EngineCore — synchronous step() loop"]
-        direction LR
-        SCH[Scheduler] --> BLK[Blocks]
-        BLK --> KVM[KVCacheManager]
-        KVM --> KV[PagedKVCache]
-        KV --> FWD["model.forward()"]
-        FWD --> LOG[compute_logits]
-        LOG --> SMP[Sampler]
-        SMP --> OUT["detokenize → RequestOutput"]
-    end
-```
-
-The engine runs a synchronous `step()` loop: schedule tokens, prepare tensors, run the model forward pass (hidden states), compute logits from the last-token hidden state, sample the next token, update the KV cache, and repeat until all sequences finish.
-
-Key design decisions (see `CONTEXT.md` for the full vocabulary):
-
-- **Paged attention**: K/V cache stored in fixed-size blocks (`block_size = 256`). Initial prefill reads projection K/V; continued prefill and decode read the paged cache. Both use bounded FP32 attention math over BF16/F16 storage ([ADR-0020](docs/adr/0020-bounded-reference-arithmetic.md)).
-- **Prefix caching**: Chained XXH64 hash table in `BlockPool` deduplicates common prompt prefixes across requests (CoW semantics).
-- **TP seam**: The internal `ParallelStyle` trait + `TpConfig` enum preserve a future feasibility seam. v0.2.0 supports `TpConfig::Single` only; TP/NCCL is not a runtime capability.
-- **CausalLM trait**: An internal engine-facing model contract. The inventory registry, loader, scheduler, cache, attention metadata, and sampler are implementation details behind `LLM`.
-
-## Requirements
-
-### Hardware
-
-- **CPU-only** (tests, development): any x86-64 or aarch64 machine. No GPU needed.
-- **Inference / release gate** (with `--features cuda`):
-  - NVIDIA GPU with compute capability **sm_89** or higher (Ada Lovelace RTX 40-series, Hopper H100/H200, or newer).
-  - At least 8 GB of GPU memory recommended for Qwen3-0.6B.
-  - NVIDIA CUDA driver installed; this release was validated with driver 595.71.
-
-### Toolchain
-
-- **Rust**: edition 2021, MSRV **1.94.0**, pinned by `rust-toolchain.toml`. CPU CI also tests the current stable toolchain.
-- **CUDA build**: install the CUDA Toolkit, including `nvcc`; this release was validated with Toolkit 13.2.51.
-- **System**: Linux, including WSL2. The release validation used WSL2; native Windows and macOS GPU inference are outside v0.2.0.
-
-## Quick Start
-
-### Build
+Clone the released source and run the provided example with the exact model revision used for validation:
 
 ```bash
-# CPU-only build (tests, development iteration)
-cargo build
-
-# Production build with CUDA backend
-cargo build --features cuda --release
+git clone --branch v0.2.0 --depth 1 https://github.com/RedHeartSecretMan/vllm-oxide.git
+cd vllm-oxide
+cargo run --locked --release -p vllm_oxide --example generate_qwen3 --features cuda -- \
+    hub:Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234
 ```
 
-### Run the CLI
+The first run builds the CUDA backend and downloads model files. The example generates a continuation of “The meaning of life is”. Later runs reuse downloaded files. A local model directory can be passed instead of the `hub:` argument.
 
-The thin CLI (`crates/vllm-oxide-cli`) accepts a model source and an optional prompt:
+To choose your own prompt, use the CLI with a local checkpoint:
 
 ```bash
 export QWEN3_MODEL_DIR=/absolute/path/to/Qwen3-0.6B
@@ -120,39 +49,11 @@ cargo run --locked --release -p vllm_oxide_cli --features cuda -- \
     --model "$QWEN3_MODEL_DIR" --max-tokens 2 "The capital of France is"
 ```
 
-The directory must contain `Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234`. The [public GPU smoke gate](docs/validation/public-gpu-smoke.md) verifies the model hashes and executes this exact command, real warmup, 100 repeated calls and mixed requests. Hub IDs remain convenient for exploration but do not pin a revision through the CLI.
+The CLI also accepts a Hub repo ID, such as `Qwen/Qwen3-0.6B`, but does not expose a revision flag. See [getting started](docs/getting-started.md) for CLI options, local checkpoints, and offline use.
 
-If no prompt is given on the command line, the CLI reads from stdin:
+## Use from Rust
 
-```bash
-echo "The meaning of life is" | \
-    cargo run --release -p vllm_oxide_cli --features cuda -- \
-        --model Qwen/Qwen3-0.6B
-```
-
-#### CLI flags
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-m`, `--model` | Local checkpoint directory _or_ HuggingFace Hub repo id (e.g. `Qwen/Qwen3-0.6B`). Existing directories resolve to local checkpoints; everything else resolves to the Hub. | (required) |
-| `prompt` (positional) | Prompt text. Reads from stdin when not provided. | stdin |
-| `--temperature` | Sampling temperature. `0` = greedy (deterministic). | `0` |
-| `--top-k` | Top-k sampling: keep only the `k` highest-logit tokens. | `None` (disabled) |
-| `--top-p` | Top-p (nucleus) sampling: keep smallest token set with cumulative probability >= `p`. | `None` (disabled) |
-| `--max-tokens` | Maximum tokens to generate. | `16` |
-
-### Running the library example
-
-```bash
-# Construct LLM and generate through the supported public interface
-cargo run --release --example generate_qwen3 --features cuda -- hub:Qwen/Qwen3-0.6B
-```
-
-The examples accept `hub:<repo>` and `hub:<repo>@<revision>` URLs, or a local directory path.
-
-## Library usage
-
-Add `vllm_oxide` as a dependency in your `Cargo.toml`:
+Pin the source release in your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -160,149 +61,59 @@ vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag 
 anyhow = "1"
 ```
 
-The complete supported crate-root surface is `LLM`, `EngineOptions`, `Prompt`, `SamplingParams`, `RequestOutput`, and `Source`. `LLM::new` constructs the composition root and `LLM::generate` accepts batched prompts with one sampling policy per prompt:
-
 ```rust
-use vllm_oxide::{LLM, Prompt, SamplingParams, EngineOptions, Source};
+use vllm_oxide::{EngineOptions, Prompt, SamplingParams, Source, LLM};
 
 fn main() -> anyhow::Result<()> {
-    // Build the engine from a HuggingFace Hub repo.
     let mut llm = LLM::new(
         Source::Hub {
             repo: "Qwen/Qwen3-0.6B".into(),
-            revision: None,
+            revision: Some("7e4ae267688d671ddfca3122e4528ee980cf3234".into()),
         },
         EngineOptions::default(),
     )?;
-
-    // Run inference on a batch of prompts.
     let outputs = llm.generate(
-        &[
-            Prompt::Text("The meaning of life is".into()),
-            Prompt::Text("Once upon a time".into()),
-        ],
-        &[
-            SamplingParams {
-                max_tokens: 64,
-                temperature: 0.7,
-                ..Default::default()
-            },
-            SamplingParams {
-                max_tokens: 32,
-                temperature: 0.0, // greedy
-                ..Default::default()
-            },
-        ],
+        &[Prompt::Text("The capital of France is".into())],
+        &[SamplingParams {
+            max_tokens: 2,
+            ..Default::default()
+        }],
     )?;
-
-    for output in outputs {
-        println!(
-            "[{}] {} (finished: {})",
-            output.request_id, output.text, output.finished
-        );
-    }
-
+    println!("{}", outputs[0].text);
     Ok(())
 }
 ```
 
-### Key types
+The supported public types are `LLM`, `EngineOptions`, `Prompt`, `SamplingParams`, `RequestOutput`, and `Source`. `generate` accepts one sampling policy per prompt and returns outputs in input order with stable request IDs. Text and token-ID prompts can share a batch. See the [usage guide](docs/getting-started.md#rust-api) and [v0.2 migration guide](docs/migration-v0.2.0.md) for details.
 
-| Type | Description |
-|------|-------------|
-| `LLM` | Composition root. Constructed via `LLM::new(source, options)`, invoked via `LLM::generate(prompts, params)`. |
-| `Prompt` | Input enum: `Text(String)` for natural-language prompts, `TokenIds(Vec<u32>)` for pre-tokenized fixtures. Both are accepted in the same batch. |
-| `SamplingParams` | Per-prompt configuration: `temperature`, `top_k`, `top_p`, `max_tokens`, `ignore_eos`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`. Default is greedy (temperature=0). |
-| `RequestOutput` | Per-request result: `{ request_id, token_ids, text, finished }`. The result vector preserves input-prompt order; request identity does not expose the internal sequence identifier. Both decoded text and raw token IDs are always provided. |
-| `EngineOptions` | Construction-time config: `max_num_batched_tokens` (default 16384), `max_num_seqs` (512), `max_model_len`, `gpu_memory_utilization` (0.9), eager execution (CUDA Graphs are out of v0.2.0 scope), and a `dtype` override. |
-| `Source` | Weight source: `Source::Local(PathBuf)` for a local directory, or `Source::Hub { repo, revision }` for HuggingFace Hub. |
+## Scope and performance
 
-`LLM::new` and `LLM::generate` return `anyhow::Result`; `anyhow::Error` is a transitive signature type rather than a vllm-oxide root export. Likewise, `EngineOptions::dtype` uses `Option<candle_core::DType>` without re-exporting `DType`.
+The implementation prioritizes numerical correctness. The release's [validation summary](docs/releases/goldens-v0.2.md) records completed numerical, behavior, and public CUDA checks. In the fixed RTX 4080/WSL2 workload, median decode throughput was **29.7601 token/s for one request** and **115.8207 token/s across four requests**. See [benchmarks](docs/benchmarks/README.md) for the workload, measurement boundaries, and memory usage. These observations do not establish a cross-hardware guarantee or vLLM performance parity.
 
-### Sampling parameter semantics
+## Development and validation
 
-| Field | Supported v0.2.0 semantics |
-|-------|----------------------------|
-| `temperature` | Not NaN and `>= 0`; `0` selects greedy, while positive infinity remains the uniform pre-filter corner case. |
-| `top_k` | `None` or `Some(k)` with `k >= 1`; values at least the vocabulary size are a no-op. |
-| `top_p` | `None` or a finite value in `(0, 1]`; `1` is a no-op. |
-| `max_tokens` | At least `1`; counts completion tokens only. |
-| `ignore_eos` | Ignores model-resolved EOS stopping when true, but never bypasses `max_tokens`. |
-| `presence_penalty`, `frequency_penalty` | Finite values in `[-2, 2]`. |
-| `repetition_penalty` | Finite and `>= 0`; `0` is the accepted no-op convention. |
-
-Every combination of individually valid fields is supported. Penalties run before selection; `temperature == 0` or `top_k == Some(1)` selects the greedy path, making later top-k/top-p filtering inert.
-
-## Build features
-
-vllm-oxide uses a `cuda` feature gate to separate CPU-only development from GPU inference:
-
-```toml
-[features]
-default = []        # CPU-only — tests and dev iteration run without CUDA.
-cuda = ["candle-core/cuda"]  # Production backend.
-```
-
-Default is CPU-only so `cargo test` runs on CI without a GPU. Production callers (the CLI, the engine) pass `--features cuda`.
-
-The workspace release harness additionally enables default-off `internal-golden`. It adds no public Rust item and is unsupported diagnostic tooling: only an explicitly configured release-gate call captures full logits into a private, fail-closed temporary artifact. Enabling the feature alone performs no diagnostic I/O.
-
-## Testing
-
-vllm-oxide has two distinct test tiers with different guarantees:
-
-### Tier 1: CI gate (every push, CPU-only)
+CPU development does not require CUDA:
 
 ```bash
-# Unit tests, property tests — no GPU required
-cargo test
+cargo build --locked --workspace
+cargo test --locked --workspace
 ```
 
-Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation, config parsing, `Source` classification, and CLI argument parsing. CI additionally runs workspace/internal-golden tests, Clippy, formatting, dependency auditing, and complete Python pytest/Ruff/mypy checks on their locked environments. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full matrix.
+A CPU build supports development and tests; **actual inference requires `--features cuda` and a GPU**. Automatic GitHub CI checks compilation, formatting, Clippy, Rust tests, Python CPU validation tooling, and dependencies. Numerical accuracy, CUDA API/CLI behavior, and performance are validated separately on a local GPU. CI success alone does not establish model accuracy.
 
-### Tier 2: Release gate (manual, GPU)
+For contribution setup and complete checks, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development guide](docs/development.md). The [architecture overview](docs/architecture.md) maps a generation call to the current implementation, and the [validation guide](docs/validation/README.md) separates routine CI from real-model checks.
 
-The current release protocol is [ADR-0015](docs/adr/0015-layered-accuracy-validation.md) and the [layered accuracy contract](docs/validation/layered-accuracy-contract.md). Its entrypoint is `python -m golden_gen.layered_cli`; see the [workflow instructions](tools/golden-gen/README.md#layered-accuracy-protocol-new-workflow). Case definitions and numerical budgets require reviewed checkpoints. Missing definitions, pending budgets or incomplete evidence remain INVALID.
+## Community and project information
 
-| Layer | Required evidence |
-|-------|-------------------|
-| L0 | Operator numerical checks and exact execution-state invariants |
-| L1 | Full-logit FP64 KL on identical frozen histories: absolute mean/peak limits and paired mean excess over vLLM |
-| L2 | Reference-choice loss, plus real unforced public generation and independent replay |
-
-The Reference oracle is Transformers BF16 with the fixed PyTorch SDPA MATH backend. The Baseline oracle is vLLM BF16 with FlashAttention; its paired mean KL contributes an additional gate and cannot waive a reference failure. Fixed-prefix replay preserves all declared prediction rows, including after a predicted-token divergence. Free-generation divergence and agreement are separate diagnostics, never different-history KL evidence.
-
-The old ADR-0012 schema-v4 manifests, L1=token/L2=logits terminology and `validate-release.sh` workflow are historical. Their authoritative/publication entrypoints stay disabled. The [schema5 release adapter](tools/golden-gen/README.md#schema5-release-stages) connects complete raw layered evidence to performance, fixed CPU gates, the report, the complete manifest/archive pair and Python/Rust clean consumption. Under [ADR-0028](docs/adr/0028-local-release-evidence.md), raw evidence remains local; GitHub evidence uploads and split archives are unnecessary. The [v0.2.0 validation summary](docs/releases/goldens-v0.2.md) records the approved source roles and actual product acceptance. It does not claim completion of the legacy combined evidence-package gate. Existing artifacts retain their original identities and verdicts.
-
-No GPU collection or publication is implied by CPU tests. GPU stages and optional publication require their own authorization. The local bundle retains exactly `manifest.json` and `goldens-v0.2.tar.gz` under the [layered transport contract](docs/validation/layered-release-assets.md). Optional manual GitHub publication additionally requires independent user authority and assets strictly smaller than 2 GiB; that upload limit does not gate local numerical acceptance.
-
-### CI green vs numerically validated
-
-| | CI gate | Release gate |
-|---|---|---|
-| **When** | Every push | Manual, before tagging |
-| **Where** | CPU-only | GPU (sm_89+) |
-| **What** | Rust/MSRV, Python, lint and dependency checks | Public CUDA smoke plus complete golden comparison |
-| **Proves** | Compiles + types correct | Numerically correct within tolerance |
-
-## Documentation
-
-- **[CONTEXT.md](CONTEXT.md)** — Domain vocabulary and ubiquitous language. Every term used in the codebase (`CausalLM`, `BlockPool`, `PagedKVCache`, `EngineCore`, `Prompt`, `SamplingParams`, etc.) is defined here with "Avoid" notes for synonyms that should not be used.
-- **[docs/adr/](docs/adr/)** — Architecture Decision Records, including the correctness-first v0.2.0 scope and [ADR-0011](docs/adr/0011-public-generation-contract.md), which records the breaking public-interface contraction.
-- **Crate source** — Each module carries a doc comment that explains its role and the ADR-0004 dependency DAG. The `lib.rs` doc comment is the best starting point.
-
-## Contributing
-
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for branch conventions, commit format, and the CI pipeline before opening a pull request.
-
-## Minimum Supported Rust Version (MSRV)
-
-The supported minimum is **Rust 1.94.0**. The workspace manifest and `rust-toolchain.toml` agree, and CI runs the Rust checks on both 1.94.0 and stable. This replaces the unverified historical 1.75 declaration; it does not assert numerical release acceptance.
-
-## Security
-
-To report a security vulnerability, please use [GitHub Security Advisories](https://github.com/RedHeartSecretMan/vllm-oxide/security/advisories/new). Do **not** open a public issue for security reports.
+| Looking for | Start here |
+|---|---|
+| Usage help, bugs, or a feature proposal | [Support](SUPPORT.md) and [GitHub Issues](https://github.com/RedHeartSecretMan/vllm-oxide/issues) |
+| A contribution | [Contributing](CONTRIBUTING.md) and [open pull requests](https://github.com/RedHeartSecretMan/vllm-oxide/pulls) |
+| Community expectations | [Community standards](CODE_OF_CONDUCT.md) |
+| A private security report | [Security policy](SECURITY.md) |
+| Version history or an upgrade | [Releases](docs/releases/README.md), [changelog](CHANGELOG.md), and [v0.2 migration](docs/migration-v0.2.0.md) |
+| Implementation decisions and experiments | [Architecture](docs/architecture.md), [ADRs](docs/adr/), and [research](research/README.md) |
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) for details.
+[Apache-2.0](LICENSE).

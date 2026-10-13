@@ -5,7 +5,18 @@ All notable changes to vllm-oxide will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Documentation maintenance
+
+- Align English and Chinese project introductions, usage, architecture,
+  migration, contribution and community guidance with the released v0.2.0 API.
+- Add documentation, validation, benchmark, release and ADR navigation, plus
+  matching English and Chinese historical release notes.
+- Explain research experiments and validation tools with their actual inputs,
+  outputs, prerequisites, commands and evidence limits in this source snapshot.
+- Preserve the original implementation, dependency lockfiles, GPU measurements,
+  historical failures and published asset identities. No runtime or tool code
+  changes are part of this revision; see
+  [source documentation revision](docs/releases/version-doc-update.md).
 
 ## [0.2.0] - 2026-10-13
 
@@ -55,10 +66,24 @@ Publication status and evidence requirements follow the [release notes](docs/rel
 `EngineOptions::dtype` continues to use `Option<candle_core::DType>`; these are
 transitive external signature types, not new crate-root re-exports.
 
-## [0.1.0] - 2025-07-29
+## [0.2.0-rc.1] - 2026-09-10
 
 ### Added
 
+- Experimental source prerelease for trying the contracted public generation
+  API and CUDA Quick Start before complete numerical/performance acceptance.
+- A source-bound verification report and checksum file. Historical numerical
+  failures and incomplete checks remain documented in the [RC1 notes](docs/releases/v0.2.0-rc.1.en.md).
+
+The original Git tag is `v0.2.0.rc.1`; the hyphenated heading follows the Cargo
+package version. This candidate was superseded by v0.2.0.
+
+## [0.1.0] - 2026-07-26
+
+### Added
+
+- Historical experimental baseline; the original validation limits and two
+  fixture assets are described in the [v0.1.0 notes](docs/releases/v0.1.0.en.md).
 - Core inference engine: scheduler, block pool, KV cache manager, paged attention
 - Qwen3 model support via architecture-agnostic model registry (CausalLM trait)
 - Continuous batching with recompute-only preemption
@@ -82,4 +107,5 @@ transitive external signature types, not new crate-root re-exports.
 
 [Unreleased]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.1.0...v0.2.0
+[0.2.0-rc.1]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1
 [0.1.0]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0
