@@ -65,7 +65,42 @@ GitHub supplies source `.tar.gz` and `.zip` archives. Full golden captures, logi
 - Link the migration guide, complete changelog, supported environment, validation summary and known limitations in the Release description.
 - Close only the release work completed under the agreed scope; record deferred work separately from a passing product check.
 
-Published tags identify immutable source snapshots. Improve wording with `gh release edit --notes-file` and update current documentation through a PR. A code fix receives a new patch release; it never silently moves an existing version tag.
+Published tags normally identify immutable source snapshots. Improve wording with `gh release edit --notes-file` and update current documentation through a PR. A code fix receives a new patch release.
+
+## Authorized documentation refresh of an existing version
+
+The user explicitly requested that all three existing source archives include
+the improved version-specific documentation, including their `research` and
+`tools` directories. This is a documentation-maintenance exception, not a
+backport of v0.2.0 behavior into older releases.
+
+For this operation:
+
+1. Create one documentation commit directly from each original release commit.
+   Keep executable source, dependencies, lockfiles, registries, raw evidence and
+   recorded numerical results unchanged. Documentation must describe that
+   version's actual commands and implementation.
+2. Review and validate each version's guides, local links, shell examples and
+   complete source-file diff. Store the original annotated tag object under an
+   `archive/before-doc-refresh-2026-10-13/<version>` tag so it remains available
+   for exact provenance and rollback.
+3. Publish the reviewed maintenance commits on named branches. Update existing
+   release tags only under the user's explicit authority, with a force-with-lease
+   check against each original remote tag object. A changed remote ref stops the
+   update; it must be inspected rather than overwritten.
+4. Sync the Release's source commit and notes to the documentation revision,
+   naming the original implementation and measurement sources separately.
+   Preserve the Release ID, original publication date, draft/prerelease/Latest
+   status and attached evidence assets.
+5. Download the refreshed GitHub source archive for each tag. Verify its new
+   documentation and that all non-documentation runtime files are byte-identical
+   to the original implementation. Verify archived tag objects still resolve to
+   the original sources.
+
+Each source archive includes `docs/version-doc-update.md` to explain the
+maintenance revision. It does not claim new GPU measurements or change a
+historical failure into PASS. Regular releases continue to use new version tags
+for behavior changes.
 
 Each `*.en.md` file is the maintained source of that version's English GitHub Release description. Synchronize a reviewed wording change after its documentation PR lands:
 

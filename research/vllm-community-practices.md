@@ -8,12 +8,12 @@
 
 | 优先级 | 官方做法 | 适合本项目的落实方式 |
 | --- | --- | --- |
-| 1 | vLLM README 把安装、Quickstart、支持模型和贡献入口集中展示。[README](https://github.com/vllm-project/vllm/blob/main/README.md) | 英文和中文 README 使用相同顺序：定位与支持边界、源码安装、固定模型的最小 CLI 示例、Rust 示例、文档和贡献入口。先让用户完成第一次生成，再链接架构和详细参数。注明本项目独立维护，与上游的关系是参考和借鉴。 |
+| 1 | vLLM README 把安装、Quickstart、支持模型和贡献入口集中展示。[README](https://github.com/vllm-project/vllm/blob/main/README.md) | 英文和中文 README 使用相同顺序：定位与支持边界、源码安装、固定模型的最小 CLI 示例、Rust 示例、文档和贡献入口。先让用户完成第一次生成，再链接架构和详细参数。架构参考处直接链接 nano-vllm 与 vLLM。 |
 | 2 | vLLM 文档区分用户指南、开发指南、基准测试及 API/CLI 参考；贡献页要求用户可见行为变化同步更新文档，并说明如何预览文档。[贡献文档](https://docs.vllm.ai/en/latest/contributing/#documentation) | 用一个 `docs/README.md` 整理当前 Markdown，分别指向使用、开发、验收和架构资料；先检查内部链接及示例，不必新增 MkDocs/Read the Docs 部署。贡献指南准确列出仓库现有 CPU CI 命令，另列本地 CUDA 功能、精度和性能检查。 |
 | 3 | vLLM 的 bug 表单要求环境、最小复现和实际结果；PR 模板分为概要、具体主张、验证和设计细节。[Bug 表单](https://github.com/vllm-project/vllm/blob/main/.github/ISSUE_TEMPLATE/400-bug-report.yml)、[PR 模板](https://github.com/vllm-project/vllm/blob/main/.github/PULL_REQUEST_TEMPLATE.md) | 增加简短的 bug、功能建议、文档问题表单及 PR 模板。bug 收集版本/提交、模型 revision、构建 feature、Rust/CUDA/GPU、命令或最小 Rust 代码、预期和实际结果。PR 写清修复行为和实际检查；GPU 相关变化注明本地验证环境与结果。保留现有五种 triage 标签和 Conventional Commits。 |
 | 4 | vLLM 将安全报告指向私密 GitHub Security Advisories，并在 README 将普通问题与安全报告分流。[安全政策](https://github.com/vllm-project/vllm/blob/main/SECURITY.md)、[README](https://github.com/vllm-project/vllm/blob/main/README.md#contact-us) | 增加简短 `SECURITY.md`：可信模型来源、敏感信息不写入公开报告、支持版本和私密报告入口。采用仓库真实可用的渠道；如尚未启用 GitHub 私密报告，先由维护者启用，不能写成已经可用。不承诺响应时限、安全团队或 CVE 流程。 |
 | 5 | 核实时最新 vLLM Release 为 v0.31.0，说明按亮点、发行物、模型/引擎变化等组织，并明确列出破坏性变更、平台和安装方式。[v0.31.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.31.0) | 完善 v0.2.0 的公开说明：本版重点、相对上一版的变化、支持范围、升级/安装步骤、已知限制和验证摘要。明确当前发行物只有源码，没有预编译包或 crates.io 发布。基准数字绑定 GPU、模型、dtype 和工作负载，不写跨硬件保证或 vLLM 对等性能。将来源角色、原始证据和历史诊断放到链接的验收文档中，公开说明使用读者能直接理解的产品语言。 |
-| 6 | vLLM 发布流程记录版本与 release branch/RC/final tag 的关系，并把手工端到端性能验证绑定到发布提交；流程按固定硬件比较回归。[发布流程](https://docs.vllm.ai/en/latest/contributing/release_process/) | 增加维护者发布清单与发布说明模板：版本一致、变更汇总、支持边界、CPU CI、受影响的 GPU 检查、发行物清单、tag/commit/Release 核对。发布说明以仓库文件为维护来源，再同步到 GitHub Release；保留已经发布的 v0.2.0 tag，文档补充不改写历史标签。源码发布继续让 GitHub 提供源码归档，原始验收证据按当前约定留在本地。 |
+| 6 | vLLM 发布流程记录版本与 release branch/RC/final tag 的关系，并把手工端到端性能验证绑定到发布提交；流程按固定硬件比较回归。[发布流程](https://docs.vllm.ai/en/latest/contributing/release_process/) | 增加维护者发布清单与发布说明模板：版本一致、变更汇总、支持边界、CPU CI、受影响的 GPU 检查、发行物清单、tag/commit/Release 核对。发布说明以仓库文件为维护来源，再同步到 GitHub Release；历史源码文档修订按下文的本次授权范围执行，保留原受测代码与证据身份。源码发布继续让 GitHub 提供源码归档，原始验收证据按当前约定留在本地。 |
 
 ## 明确的取舍
 
@@ -30,7 +30,7 @@
 
 | 展示面 | 建议立即落实 | 来源与依据 |
 | --- | --- | --- |
-| 项目身份 | README 双语、GitHub About/topics、Cargo 包描述和许可信息保持一致。明确本项目独立维护，链接 nano-vllm、vLLM 和 Candle；徽章只指向真实 CI、许可和版本，不暗示上游官方 Rust 版本或完整能力对等。 | vLLM README 用简短定位及真实的文档、安装和联系入口组织首页。[官方 README](https://github.com/vllm-project/vllm/blob/main/README.md) |
+| 项目身份 | README 双语、GitHub About/topics、Cargo 包描述和许可信息保持一致。链接 nano-vllm、vLLM 和 Candle；徽章只指向真实 CI、许可和版本，支持范围按项目已实现能力填写。 | vLLM README 用简短定位及真实的文档、安装和联系入口组织首页。[官方 README](https://github.com/vllm-project/vllm/blob/main/README.md) |
 | 使用与参考 | README 保留最短首次生成命令；安装条件、CLI、Rust API、批处理、本地 checkpoint、模型 revision 和配置放进对应指南。已删除的 API 不继续出现在当前示例中。 | 官方文档区分用户指南、API 和 CLI 参考。[文档入口](https://docs.vllm.ai/en/latest/)、[CLI 指南](https://docs.vllm.ai/en/latest/cli/) |
 | 架构导览 | 用实际 `LLM` → `Scheduler` → `EngineCore` 路径解释调度和 KV cache，链接源码、领域词汇及相关 ADR；未来 TP seam 标明未支持。 | vLLM 将 Architecture Overview 放在开发设计资料中。[架构概览](https://docs.vllm.ai/en/latest/design/arch_overview/) |
 | 排错与求助 | 为构建、CPU 开发/CUDA 推理、模型来源、显存预算和输出差异提供短排查入口；错误报告收集最小复现及必要环境。文档或 CPU 问题允许 GPU 字段不适用。 | vLLM 有独立排错指南，其 bug 表单要求环境与复现。[排错指南](https://docs.vllm.ai/en/latest/usage/troubleshooting/)、[Bug 表单](https://github.com/vllm-project/vllm/blob/main/.github/ISSUE_TEMPLATE/400-bug-report.yml) |
@@ -55,10 +55,22 @@ vLLM 将版本重点、兼容性、变化类别与发行物集中呈现，并将
 
 - `v0.1.0` 标为早期版本，能力和命令按其标签源码核对；无法确认的历史 GPU 或模型验收不写为通过，迁移入口指向 0.2.0。
 - `v0.2.0-rc.1` 保留 prerelease 身份及当时的数值 **FAIL**；其 smoke 成功不升级为完整精度或性能通过。已被正式版替代的“尚未完成”项目标明是 RC 发布时状态，并链接正式版的后续结果。
-- `v0.2.0` 保持当前正式版本身份、原验证来源和已发布标签；基准数字继续绑定硬件、模型、dtype 与工作负载。
-- 三个 Release 只统一标题、正文和可读性；原发布日期、标签、目标提交、prerelease/Latest 状态及附件不因文案整理而改写。旧附件的适用版本和是否属于完整验收凭证写清。
+- `v0.2.0` 保持当前正式版本身份和原验证来源；基准数字继续绑定硬件、模型、dtype 与工作负载。
+- 三个 Release 的标题、正文、目录导航和工具说明采用同一结构，能力与命令仍按各版代码填写。原发布日期、prerelease/Latest 状态及附件保持历史事实。旧附件的适用版本和是否属于完整验收凭证写清。
 
-维护者发布指南应对应这个共同结构，版本目录清楚列出正式版、历史版及 RC，并让 CHANGELOG、仓库版本文件与 GitHub Release 相互可达。代码补丁使用新版本；文档纠错保留原标签。vLLM 的发布流程同样将版本标签和受测提交关联，但本项目不照搬其发布频率与构建矩阵。[发布流程](https://docs.vllm.ai/en/latest/contributing/release_process/)
+本次用户进一步要求三个版本的**源码归档内文档**也达到相同标准，且补齐
+`research/` 与 `tools/` 的内容细节。这比前一轮只更新 `main` 和 Release 页面
+的范围更广。此次版本文档修订从各自原始发布提交派生，仅修改文档；若同步调整
+发布标签，应明确记录原代码提交、文档修订提交与新标签目标，并保留原提交可追溯。
+旧精度、性能与实验结果继续指向原受测源码，不能将文档提交宣称为重新跑过 GPU
+验收。此范围来自本项目用户的明确要求，不是 vLLM 的历史标签处理规定。
+
+三个快照的工具说明应逐个核对已有源码：原型是否属于 Cargo workspace、依赖与
+CUDA 特性、CLI 参数、模型来源、输入/输出、CPU/GPU 条件，以及结果是否仅为诊断。
+早期版本不存在的脚本或新协议不能复制成该版本已实现的功能；源码中预期的 PASS
+文案也不等于保留了真实测量记录。
+
+维护者发布指南应对应这个共同结构，版本目录清楚列出正式版、历史版及 RC，并让 CHANGELOG、仓库版本文件与 GitHub Release 相互可达。代码补丁使用新版本；此次文档修订按上述授权保留代码与测量的历史身份。vLLM 的发布流程同样将版本标签和受测提交关联，但本项目不照搬其发布频率与构建矩阵。[发布流程](https://docs.vllm.ai/en/latest/contributing/release_process/)
 
 ## 避免误导的最终检查
 

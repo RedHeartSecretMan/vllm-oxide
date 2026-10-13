@@ -17,6 +17,8 @@ published to PyPI.
 | [Development guide](../../docs/development.md) | Repository setup and ordinary CPU CI |
 | [v0.2.0 validation summary](../../docs/releases/goldens-v0.2.md) | Actual released precision, behavior and performance results |
 | [Rust tools](../../crates/vllm-oxide-test/README.md) | Capture, benchmark and CPU transport executables |
+| [Repository tools](../README.md) | Documentation checks and the relationship between current and historical tooling |
+| [Diagnostic scripts](scripts/README.md) | Exact BF16 probe and fixed historical layer-localization commands, inputs and outputs |
 
 Ordinary GitHub CI runs CPU tests, static checks and validation-tool adapters.
 Actual model collection, CUDA public smoke and performance measurements run on a
@@ -37,8 +39,18 @@ uv run --project tools/golden-gen --locked --extra dev \
     python -m golden_gen.layered_cli --help
 uv run --project tools/golden-gen --locked --extra dev \
     python -m golden_gen.release_cli --help
+uv run --project tools/golden-gen --locked --extra dev \
+    python -m golden_gen.public_gpu_smoke --help
 cargo build --locked -p vllm_oxide_test --bin vllm-oxide-verify-bundle
 ```
+
+The module name selects the protocol; `golden-gen` / `python -m golden_gen`
+selects the retained schema-v4 CLI, not the layered workflow. Help commands
+parse arguments without loading a model. The two current CLIs use an action
+argument and shared flags rather than separate installed console commands.
+For example, `python -m golden_gen.layered_cli collect --help` and
+`python -m golden_gen.release_cli verify --help` show their parser's complete
+flag set; stage-specific requirements are checked when the selected action runs.
 
 Complete adapter tests use two environments, matching CI: the development
 interpreter runs pytest/Ruff/mypy; the locked worker interpreter imports
@@ -71,11 +83,13 @@ are not substitutes.
 
 ## GPU preparation
 
-Model validation requires a Linux CUDA host, including WSL2, with an NVIDIA
-**SM 8.9+** GPU, a compatible driver, CUDA Toolkit including `nvcc`, and sufficient
-host/device memory and disk. The release was measured on RTX 4080/SM 8.9 with
-CUDA Toolkit 13.2.51. These are recorded test identities, not a promise that every
-newer driver, library version or GPU configuration has been validated.
+Production inference supports a Linux CUDA host, including WSL2, with an NVIDIA
+SM 8.9+ GPU, a compatible driver and the CUDA Toolkit. The source-bound oracle
+and acceptance reproduction tools are stricter: `environment.py` and the
+runtime schema require **exactly SM 8.9 and CUDA Toolkit 13.2.51**, alongside the
+locked runtime/model identities. These checks preserve the measured profile;
+they are not a new publishing rule or a general production-hardware minimum.
+Allow the required host/device memory and disk for the declared corpus.
 
 Prepare the locked GPU extras, dependencies and complete pinned checkpoint
 before collection. The recorded oracle environment is Python 3.12, PyTorch
@@ -96,6 +110,15 @@ small disk estimate for dense full-logit evidence.
 For production build, warmup, repeated `LLM::generate`, mixed input and CLI
 coverage, use the separate [public GPU smoke guide](../../docs/validation/public-gpu-smoke.md).
 Its result explicitly does not replace numerical acceptance.
+
+For the model source, the recorded checkpoint is
+[`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) revision
+`7e4ae267688d671ddfca3122e4528ee980cf3234`. Supply its complete local directory
+through `--model-dir` for the Python CLIs (`--model-path` for Rust producers and
+the layer probe). The directory must include `config.json`, `tokenizer.json`
+and the single `model.safetensors`; alternative shards or replacement files
+are rejected by the release oracle. Model acquisition is a preparation step,
+not an implicit download during source-bound collection.
 
 ## Layered accuracy protocol (new workflow)
 
@@ -121,6 +144,26 @@ launched by the collector rather than used as manual entrypoints.
 | `faults` | Requires a complete calibration `--manifest`; `--output` is inside the dedicated run root. Generates CPU-only isolated fault evidence and rechecks original hashes. |
 | `assemble-authoritative` | In addition to `--manifest`, requires `--calibration-evidence`, `--calibration-manifest`, `--calibration-marker` and `--fault-evidence` inside the run root. Requires approved budgets. |
 | `authoritative` | Independently reproduces calibration/fault provenance and assesses fresh declared measurements against every approved gate. |
+
+For a prepared, reviewed measurement checkout, one operator owner can be
+collected with the actual auxiliary entrypoint below. The absolute placeholders
+must refer to the matching prebuilt binary, pinned local model and a fresh
+external evidence root; this single owner is not complete release evidence.
+
+```bash
+uv run --project tools/golden-gen --locked --extra gpu \
+    python -m golden_gen.layered_cli collect-aux \
+    --repo-root "$PWD" --measurement-repo "$PWD" \
+    --run-dir /absolute/path/to/fresh-layered-run \
+    --model-dir /absolute/path/to/pinned-qwen3-checkpoint \
+    --group operators --engine candidate --variant primary \
+    --candidate-binary /absolute/path/to/built/vllm-oxide-fixed-prefix
+```
+
+For numerical owners use `collect` and the exact declared execution-group ID;
+for an operator replay use the separately declared `replay` variant. Do not
+derive acceptance from a successful collection exit: it only records that
+owner's raw evidence, and complete inventory assembly/evaluation are separate.
 
 Keep calibration inputs and fresh authoritative owners in separate directories
 under the overall run root. `--fresh-observation` is valid only for `collect`
@@ -179,6 +222,24 @@ not claim that the historical combined bundle passed complete consumer acceptanc
 | `verify` | `--bundle-dir`, fresh `--cache-dir`, CPU `--rust-binary`. Runs Rust/Python readers and reconstructs/evaluates the full raw semantics before immutable installation. |
 | `report` | Verification inputs plus fresh external `--output`. Renders the verified Markdown report; it is separate from the asset pair. |
 | `publish` | Verification inputs plus `--review`, `--review-base` and independent `VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2` authority. Optional manual GitHub operation; not part of local acceptance. |
+
+For an already prepared local schema5 bundle, the basic consumer command is:
+
+```bash
+uv run --project tools/golden-gen --locked --extra dev \
+    python -m golden_gen.release_cli verify \
+    --repo-root "$PWD" \
+    --bundle-dir /absolute/path/to/local-evidence-bundle \
+    --cache-dir /absolute/path/to/fresh-verified-cache \
+    --rust-binary "$PWD/target/debug/vllm-oxide-verify-bundle" \
+    --marker /absolute/path/to/fresh-verify-marker.json
+```
+
+Use the actual CPU reader path if `CARGO_TARGET_DIR` differs. A source-routed
+bundle also needs the exact approved `--source-role-freeze` and
+`--source-role-freeze-sha256`; omission is not permission to ignore its source
+roles. The command reconstructs original evidence and checks its semantics;
+it does not rerun GPU model inference or make an arbitrary bundle accepting.
 
 The CPU producer retains actual command/environment/toolchain/raw logs and
 requires the default-core 128-token mixed pressure regression to run. It rejects
@@ -396,6 +457,13 @@ calibration evidence; the Transformers output remains the Reference oracle targe
 
 ## Source map
 
+The three [diagnostic scripts](scripts/README.md) complement this map:
+`bf16_reference_probe.py` checks residual/RMSNorm/RoPE operation order,
+`silu_reference_probe.py` checks the fixed gated-SiLU rounding example, and
+`canonical03_layer_probe.py` verifies and localizes exact historical captures.
+Their own guide documents device flags, immutable inputs, stdout reports and
+trace layout. They do not generate accepting fixtures or rerun the release gates.
+
 | Module or directory | Responsibility |
 |---|---|
 | `layered_cli.py`, `layered_workflow.py`, `layered_manifest.py` | Current collection, inventory assembly and source-bound evaluation |
@@ -408,3 +476,21 @@ calibration evidence; the Transformers output remains the Reference oracle targe
 | `public_gpu_smoke.py` | Production build and public API/CLI smoke |
 | `cli.py`, `schema.py`, `oracles/` | Retained schema-v4 fixture CLI/schema/oracle tools |
 | `prompts/`, `tests/` | Historical prompt inputs and CPU regression/fault tests |
+
+## Common setup and evidence errors
+
+| Symptom | Check and next action |
+|---|---|
+| `ModuleNotFoundError: golden_gen`, Torch or Transformers | Use `uv run --project tools/golden-gen` with the required locked extras, or the prepared absolute interpreter. The development environment alone does not include the model runtime. |
+| Deterministic-environment rejection | Set `PYTHONHASHSEED=0` and `CUBLAS_WORKSPACE_CONFIG=:4096:8` before launching a fresh process. Runtime imports must not precede setup. |
+| Missing adapter or CPU transport evidence | Build the CPU reader and set `GOLDEN_WORKER_TEST_PYTHON` / `GOLDEN_TRANSPORT_TEST_BINARY` to the prepared tools; inspect the raw test output. A partial or skipped suite is not complete CPU evidence. |
+| Model hash or alternative-weight rejection | Locate the complete pinned local checkpoint. Do not edit expected hashes or use a different revision under the same directory name. |
+| Source, tree, worker or binary mismatch | Use the reviewed checkout and its matching previously built binary. Source identity includes tracked definitions; replacing only a PASS marker cannot repair the graph. |
+| Existing output, marker or cache | Choose the fresh path required by that stage and retain the rejected run. The tools use no-replace writes; deleting earlier evidence to retry is not required. |
+| Performance telemetry gap or API-span failure | Preserve all original timing and memory traces and investigate sampler/owner contention. The 50 ms limits stay unchanged; no averaging or omitted repetition repairs a failed record. |
+| Bundle verification returns `INVALID` | Read the reported reasons and verify the raw inputs, source topology and finite transport limits. Rust transport-only success does not replace Python semantic evaluation. |
+
+For CUDA builds, hardware visibility, memory sizing and application errors, use
+the [engine troubleshooting guide](../../docs/getting-started.md#common-errors).
+For collection-policy and source-role questions, use the linked validation
+contracts rather than substituting flags from the legacy CLI or shell wrapper.
