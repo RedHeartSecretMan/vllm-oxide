@@ -520,12 +520,10 @@ fn read_named_tensor_as_i64(tensors: &SafeTensors, name: &str) -> Result<Vec<i64
             // tensor's payload address to be aligned for a typed slice.
             Ok(view
                 .data()
-                .chunks_exact(8)
-                .map(|chunk| {
-                    let mut bytes = [0; 8];
-                    bytes.copy_from_slice(chunk);
-                    i64::from_le_bytes(bytes)
-                })
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| i64::from_le_bytes(*chunk))
                 .collect())
         }
         other => anyhow::bail!("tensor '{}' has dtype {:?}, expected I64", name, other),
@@ -549,12 +547,10 @@ fn read_named_tensor_as_f32(tensors: &SafeTensors, name: &str) -> Result<Vec<f32
             // tensor's payload address to be aligned for a typed slice.
             Ok(view
                 .data()
-                .chunks_exact(4)
-                .map(|chunk| {
-                    let mut bytes = [0; 4];
-                    bytes.copy_from_slice(chunk);
-                    f32::from_le_bytes(bytes)
-                })
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk))
                 .collect())
         }
         other => anyhow::bail!("tensor '{}' has dtype {:?}, expected F32", name, other),
