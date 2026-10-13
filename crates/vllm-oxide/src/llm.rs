@@ -66,6 +66,36 @@ impl Default for EngineOptions {
     }
 }
 
+impl EngineOptions {
+    fn validate(&self) -> Result<()> {
+        if !self.enforce_eager {
+            bail!("enforce_eager must be true; CUDA Graphs are not supported");
+        }
+        for (name, value) in [
+            ("max_num_batched_tokens", self.max_num_batched_tokens),
+            ("max_num_seqs", self.max_num_seqs),
+        ] {
+            if value == 0 {
+                bail!("{name} must be greater than zero");
+            }
+        }
+        // Warmup exercises a prefill token followed by one decode token.
+        if self.max_model_len < 2 {
+            bail!("max_model_len must be at least 2");
+        }
+        if !self.gpu_memory_utilization.is_finite()
+            || !(0.0..=1.0).contains(&self.gpu_memory_utilization)
+            || self.gpu_memory_utilization == 0.0
+        {
+            bail!("gpu_memory_utilization must be finite and in (0, 1]");
+        }
+        if let Some(dtype) = self.dtype {
+            crate::loader::validate_model_dtype(dtype, "requested dtype")?;
+        }
+        Ok(())
+    }
+}
+
 /// Input prompt for [`LLM::generate`]. Text and token IDs may share a batch.
 #[derive(Debug, Clone)]
 pub enum Prompt {
@@ -107,6 +137,7 @@ impl LLM {
     /// and validates the CUDA device compute capability (≥ sm_89). No request is
     /// admitted until all initialization work succeeds.
     pub fn new(model: impl Into<Source>, options: EngineOptions) -> Result<Self> {
+        options.validate()?;
         let source: Source = model.into();
 
         let device = Device::cuda_if_available(0).map_err(|e| {
@@ -1275,6 +1306,70 @@ mod tests {
 
     mod engine_options {
         use super::*;
+
+        struct UnresolvedSource;
+
+        impl From<UnresolvedSource> for Source {
+            fn from(_: UnresolvedSource) -> Self {
+                panic!("invalid options must be rejected before converting the model source")
+            }
+        }
+
+        fn assert_pre_device_error(options: EngineOptions, field: &str) {
+            let error = LLM::new(UnresolvedSource, options)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains(field), "expected {field}, got {error}");
+        }
+
+        #[test]
+        fn rejects_invalid_options_before_model_source_or_device_setup() {
+            type InvalidOptionCase = (fn(&mut EngineOptions), &'static str);
+            let cases: &[InvalidOptionCase] = &[
+                (|options| options.enforce_eager = false, "enforce_eager"),
+                (
+                    |options| options.max_num_batched_tokens = 0,
+                    "max_num_batched_tokens",
+                ),
+                (|options| options.max_num_seqs = 0, "max_num_seqs"),
+                (|options| options.max_model_len = 0, "max_model_len"),
+                (|options| options.max_model_len = 1, "max_model_len"),
+                (
+                    |options| options.dtype = Some(DType::F32),
+                    "requested dtype",
+                ),
+            ];
+            for (change, field) in cases {
+                let mut options = EngineOptions::default();
+                change(&mut options);
+                assert_pre_device_error(options, field);
+            }
+            for utilization in [-0.1, 0.0, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                assert_pre_device_error(
+                    EngineOptions {
+                        gpu_memory_utilization: utilization,
+                        ..EngineOptions::default()
+                    },
+                    "gpu_memory_utilization",
+                );
+            }
+        }
+
+        #[test]
+        fn accepts_supported_construction_option_boundaries() {
+            EngineOptions::default().validate().unwrap();
+            EngineOptions {
+                max_num_batched_tokens: 1,
+                max_num_seqs: 1,
+                max_model_len: 2,
+                gpu_memory_utilization: 1.0,
+                dtype: Some(DType::F16),
+                ..EngineOptions::default()
+            }
+            .validate()
+            .unwrap();
+        }
 
         #[test]
         fn default_has_sane_values() {

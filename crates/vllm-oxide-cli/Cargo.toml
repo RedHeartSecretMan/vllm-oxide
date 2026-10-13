@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Distributed through Git source and GitHub Releases; not crates.io.
+publish = false
 description = "Command-line Qwen3 offline generation through vllm-oxide's synchronous Rust API."
 readme = "../../README.md"
 documentation = "https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/getting-started.md#cli"

@@ -14,13 +14,14 @@ installation path are described in the [getting-started guide](../docs/getting-s
 
 ## Reproduce or inspect an experiment
 
-The prototype has no model download, CLI flags, or dedicated tests. It is
-outside the root Cargo workspace, so its guide uses a fresh external copy for
-execution rather than a failing in-tree `cargo run`. Its PASS messages cover a
-constant-fill readback and an attention shape/sampled-NaN check; they do not
-establish numerical model accuracy or performance. Read its
-[source and dependency map](prototype-candle-stack/README.md#source-and-dependency-map)
-before rebuilding the pinned CUDA dependencies.
+The prototype uses synthetic inputs without model downloads or CLI flags. Its
+independent workspace and committed lockfile support direct runs from this
+checkout. CPU tests cover the output validator; CUDA runs check a constant-fill
+readback, launch/execution errors and the shape plus every finite attention
+output value. These checks establish interoperability, rather than model
+accuracy or production performance. Read its
+[source and dependencies](prototype-candle-stack/README.md#source-and-dependencies)
+before rebuilding the pinned CUDA stack.
 
 The repository-design note links the official pages consulted and records the
 scope and date of its conclusions. Advice about contribution or release
