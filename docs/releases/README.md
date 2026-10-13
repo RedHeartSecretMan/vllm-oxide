@@ -12,3 +12,19 @@ This archive contains version-specific notes for v0.1.0. The [current release hi
 The historical source documentation has been refreshed; [the maintenance record](../version-doc-update.md) identifies the original implementation commit and what changed. The update does not modify version numbers, feature support, original fixture assets, measurements or historical verdicts.
 
 Release notes follow the shared structure: highlights, compatibility/migration, obtaining source, validation/performance, limitations, and artifacts/links. Report actual test scope and source provenance; CPU checks and GPU acceptance remain separate. Keep raw evidence local and never convert historical FAIL/skipped results into PASS.
+
+## Authorized source maintenance of existing versions
+
+The 2026-10-14 maintenance explicitly includes code fixes in the three existing
+source snapshots, including `research` and `tools`. Use version-specific
+regression checks and review the executable diff. Preserve the original model
+validation definitions, budgets, measurement identities and historical verdicts.
+Record new checks separately; old PASS reports are not new measurements.
+
+Before updating a tag, record its exact object locally. Publish a reviewed
+maintenance descendant with an exact old-object force-with-lease check. Preserve
+Release IDs, original dates, status and attached assets, and synchronize the
+source identity and reviewed notes. Download each new archive and compare every
+tracked file with the reviewed commit. Remove temporary remote work branches;
+retain the three official tags without additional backup tags. See the
+[source maintenance record](../version-doc-update.md).

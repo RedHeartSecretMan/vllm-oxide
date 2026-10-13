@@ -14,11 +14,10 @@ use tokenizers::Tokenizer as HFTokenizer;
 use crate::attention::PagedKVCache;
 use crate::config::{default_dtype_from_config_json, Source};
 use crate::engine::{
-    EngineCore, KvCacheManager, RequestOutput, Scheduler,
     scheduler::{
-        DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS,
-        DEFAULT_GPU_MEMORY_UTILIZATION,
+        DEFAULT_GPU_MEMORY_UTILIZATION, DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS,
     },
+    EngineCore, KvCacheManager, RequestOutput, Scheduler,
 };
 use crate::models::registry::{build as build_model, BuiltModel};
 use crate::sampler::{Sampler, SamplingParams};
@@ -55,6 +54,32 @@ impl Default for EngineOptions {
     }
 }
 
+impl EngineOptions {
+    fn validate(&self) -> Result<()> {
+        if !self.enforce_eager {
+            bail!("enforce_eager must be true; CUDA Graphs are not supported");
+        }
+        for (name, value) in [
+            ("max_num_batched_tokens", self.max_num_batched_tokens),
+            ("max_num_seqs", self.max_num_seqs),
+        ] {
+            if value == 0 {
+                bail!("{name} must be greater than zero");
+            }
+        }
+        if self.max_model_len < 1 {
+            bail!("max_model_len must be at least 1");
+        }
+        if !self.gpu_memory_utilization.is_finite()
+            || !(0.0..=1.0).contains(&self.gpu_memory_utilization)
+            || self.gpu_memory_utilization == 0.0
+        {
+            bail!("gpu_memory_utilization must be finite and in (0, 1]");
+        }
+        Ok(())
+    }
+}
+
 /// Input prompt for `LLM::generate`. Supports both natural-language text
 /// and pre-tokenized fixtures (useful for golden comparison tests).
 #[derive(Debug, Clone)]
@@ -81,10 +106,12 @@ impl LLM {
     /// activation memory, sizes the KV cache pool from remaining free GPU
     /// memory, validates the CUDA device compute capability (≥ sm_89).
     pub fn new(model: impl Into<Source>, options: EngineOptions) -> Result<Self> {
+        options.validate()?;
         let source: Source = model.into();
 
-        let device = Device::cuda_if_available(0)
-            .map_err(|e| anyhow!("CUDA device unavailable: {e}. vllm-oxide v0.1 requires a GPU."))?;
+        let device = Device::cuda_if_available(0).map_err(|e| {
+            anyhow!("CUDA device unavailable: {e}. vllm-oxide v0.1 requires a GPU.")
+        })?;
         if !device.is_cuda() {
             bail!("vllm-oxide v0.1 requires a CUDA device. CPU-only inference is not supported.");
         }
@@ -117,9 +144,7 @@ impl LLM {
             attn_meta,
         } = build_model(source.clone(), &device, options.max_model_len)?;
 
-        let num_gpu_blocks = warmup_and_size_kv_pool(
-            &device, &dtype, &options, &paged_kv,
-        )?;
+        let num_gpu_blocks = warmup_and_size_kv_pool(&device, &dtype, &options, &paged_kv)?;
 
         tracing::info!(num_gpu_blocks, "sized KV cache pool after warmup");
 
@@ -131,7 +156,13 @@ impl LLM {
             let num_kv_heads = old_shape[4];
             let head_dim = old_shape[5];
             *lock = PagedKVCache::new(
-                num_layers, num_gpu_blocks, block_size, num_kv_heads, head_dim, dtype, &device,
+                num_layers,
+                num_gpu_blocks,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                dtype,
+                &device,
             )?;
         }
 
@@ -141,11 +172,7 @@ impl LLM {
             options.gpu_memory_utilization,
         );
 
-        let kv_cache_manager = KvCacheManager::new(
-            num_gpu_blocks,
-            256,
-            paged_kv.clone(),
-        );
+        let kv_cache_manager = KvCacheManager::new(num_gpu_blocks, 256, paged_kv.clone());
 
         let sampler = Sampler::new_with_seed(0);
 
@@ -161,7 +188,10 @@ impl LLM {
 
         // Load tokenizer.
         let tokenizer = load_tokenizer(&source)?;
-        tracing::info!(vocab_size = tokenizer.get_vocab_size(true), "tokenizer loaded");
+        tracing::info!(
+            vocab_size = tokenizer.get_vocab_size(true),
+            "tokenizer loaded"
+        );
 
         Ok(Self {
             engine,
@@ -234,6 +264,8 @@ impl LLM {
                 .sum::<usize>();
 
         if total_tokens > 0 {
+            // Human-readable throughput logging accepts a rounded token count.
+            #[allow(clippy::cast_precision_loss)]
             let tok_per_sec = total_tokens as f64 / elapsed.as_secs_f64();
             tracing::info!(
                 total_tokens,
@@ -293,7 +325,11 @@ impl LLM {
         }
 
         if logits_list.is_empty() {
-            return Ok(candle_core::Tensor::zeros((0, 0), DType::F32, &self.device)?);
+            return Ok(candle_core::Tensor::zeros(
+                (0, 0),
+                DType::F32,
+                &self.device,
+            )?);
         }
 
         let refs: Vec<&candle_core::Tensor> = logits_list.iter().collect();
@@ -393,12 +429,9 @@ fn load_tokenizer(source: &Source) -> Result<HFTokenizer> {
                     hf_hub::RepoType::Model,
                     rev.to_string(),
                 ));
-                rh.get("tokenizer.json")
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "HF_HUB_OFFLINE=1 and tokenizer.json for `{repo}` not cached"
-                        )
-                    })?
+                rh.get("tokenizer.json").ok_or_else(|| {
+                    anyhow!("HF_HUB_OFFLINE=1 and tokenizer.json for `{repo}` not cached")
+                })?
             } else {
                 let api = hf_hub::api::sync::ApiBuilder::new().build()?;
                 let rh = api.repo(hf_hub::Repo::with_revision(
@@ -489,8 +522,7 @@ fn warmup_and_size_kv_pool(
         device.synchronize().ok();
         let (free_bytes, total_bytes) = cuda_mem_info()?;
 
-        let kv_pool_bytes =
-            (free_bytes as f64 * options.gpu_memory_utilization as f64) as usize;
+        let kv_pool_bytes = (free_bytes as f64 * options.gpu_memory_utilization as f64) as usize;
 
         let dtype_bytes = match dtype {
             DType::BF16 | DType::F16 => 2usize,
@@ -547,12 +579,7 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
     use candle_core::cuda::cudarc::driver::sys;
     let mut free: usize = 0;
     let mut total: usize = 0;
-    let result = unsafe {
-        sys::cuMemGetInfo_v2(
-            &mut free as *mut usize,
-            &mut total as *mut usize,
-        )
-    };
+    let result = unsafe { sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!("cuMemGetInfo_v2 failed with error code {}", result as i32);
     }
@@ -566,6 +593,65 @@ mod tests {
 
     mod engine_options {
         use super::*;
+
+        struct UnresolvedSource;
+
+        impl From<UnresolvedSource> for Source {
+            fn from(_: UnresolvedSource) -> Self {
+                panic!("invalid options must be rejected before converting the model source")
+            }
+        }
+
+        fn assert_pre_device_error(options: EngineOptions, field: &str) {
+            let error = LLM::new(UnresolvedSource, options)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains(field), "expected {field}, got {error}");
+        }
+
+        #[test]
+        fn rejects_invalid_options_before_model_source_or_device_setup() {
+            type InvalidOptionCase = (fn(&mut EngineOptions), &'static str);
+            let cases: &[InvalidOptionCase] = &[
+                (|options| options.enforce_eager = false, "enforce_eager"),
+                (
+                    |options| options.max_num_batched_tokens = 0,
+                    "max_num_batched_tokens",
+                ),
+                (|options| options.max_num_seqs = 0, "max_num_seqs"),
+                (|options| options.max_model_len = 0, "max_model_len"),
+            ];
+            for (change, field) in cases {
+                let mut options = EngineOptions::default();
+                change(&mut options);
+                assert_pre_device_error(options, field);
+            }
+            for utilization in [-0.1, 0.0, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                assert_pre_device_error(
+                    EngineOptions {
+                        gpu_memory_utilization: utilization,
+                        ..EngineOptions::default()
+                    },
+                    "gpu_memory_utilization",
+                );
+            }
+        }
+
+        #[test]
+        fn accepts_supported_construction_option_boundaries() {
+            EngineOptions::default().validate().unwrap();
+            EngineOptions {
+                max_num_batched_tokens: 1,
+                max_num_seqs: 1,
+                max_model_len: 1,
+                gpu_memory_utilization: 1.0,
+                dtype: Some(DType::F16),
+                ..EngineOptions::default()
+            }
+            .validate()
+            .unwrap();
+        }
 
         #[test]
         fn default_has_sane_values() {

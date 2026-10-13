@@ -1,59 +1,65 @@
 //! Throwaway prototype — validates T3 "Stack A" assumption (a):
 //! the candle Tensor → cudarc CudaSlice → extern "C" kernel seam.
 //!
-//! Pattern lifted verbatim from mistral.rs `mistralrs-paged-attn`
+//! Pattern adapted from mistral.rs `mistralrs-paged-attn`
 //! (commit e124932, `src/cuda/backend/paged_attention.rs` + `mod.rs`).
 //!
 //! Success criterion: allocate a candle CUDA tensor, hand its raw device
 //! pointer + CUstream to a hand-written `.cu` kernel, read back, confirm
 //! the kernel ran. If this works, T3's riskiest assumption holds.
 
-use candle_core as candle;
-use candle::backend::BackendStorage; // .as_cuda_slice(), .device()
 use candle::cuda_backend::cudarc::driver::DevicePtr; // .device_ptr()
-use candle_core::cuda::cudarc::driver::DeviceSlice; // .slice(range)
+use candle_core as candle;
 use candle_core::cuda::cudarc::driver::sys::CUstream;
+use candle_core::cuda::cudarc::driver::DeviceSlice; // .slice(range)
 use candle_core::{Device, Result, Storage, Tensor};
 use core::ffi::c_void;
 
+mod validation;
+
 extern "C" {
-    pub fn fill_const_f32_launch(ptr: *mut c_void, n: i64, val: f32, stream: CUstream);
+    fn fill_const_f32_launch(ptr: *mut c_void, n: i64, val: f32, stream: CUstream) -> i32;
 }
 
 fn main() -> Result<()> {
-    let dev = Device::cuda_if_available(0)?;
+    let dev = Device::new_cuda(0)?;
     println!("[proto] device: {:?}", dev);
 
     // Allocate a 1024-element f32 tensor on GPU, zero-initialized.
     let n: usize = 1024;
     let t = Tensor::zeros(n, candle::DType::F32, &dev)?;
 
-    // --- The mistral.rs unwrap chain (verbatim shape) ---
-    // storage_and_layout() -> (Arc<Storage>, Layout)
-    let (storage_arc, layout) = t.storage_and_layout();
-    let cuda_storage = match &*storage_arc {
-        Storage::Cuda(s) => s,
-        _ => candle_core::bail!("expected CUDA storage"),
-    };
-    // as_cuda_slice::<T>() -> &CudaSlice<T>  (needs BackendStorage trait)
-    let slice = cuda_storage.as_cuda_slice::<f32>()?;
-    // .slice(range) applies the layout offset (needs DeviceSlice trait)
-    let slice = slice.slice(layout.start_offset()..);
-
-    // dev handle for stream extraction
-    let cuda_dev = cuda_storage.device();
-
-    // --- Pointer + stream extraction (mirrors `slice_ptr` in mod.rs) ---
-    // device_ptr(stream) -> (u64, SyncOnDrop). The guard MUST outlive the kernel call.
-    let (ptr, _guard) = slice.device_ptr(slice.stream());
-    let stream = cuda_dev.cuda_stream().cu_stream();
-
-    // --- The extern "C" call ---
     let val: f32 = 42.0;
-    unsafe {
-        fill_const_f32_launch(ptr as *mut c_void, n as i64, val, stream);
+    {
+        // Keep storage and the pointer guard in a scope ending before readback.
+        // This tensor has no other users; the fill runs on its own Candle stream.
+        let (storage_lock, layout) = t.storage_and_layout();
+        let cuda_storage = match &*storage_lock {
+            Storage::Cuda(s) => s,
+            _ => candle_core::bail!("expected CUDA storage"),
+        };
+        // The pinned CudaStorage exposes a typed CUDA slice.
+        let slice = cuda_storage.as_cuda_slice::<f32>()?;
+        // .slice(range) applies the layout offset (needs DeviceSlice trait)
+        let slice = slice.slice(layout.start_offset()..);
+
+        // --- Pointer + stream extraction (mirrors `slice_ptr` in mod.rs) ---
+        // device_ptr(stream) -> (u64, SyncOnDrop). The guard MUST outlive the kernel call.
+        let (ptr, _guard) = slice.device_ptr(slice.stream());
+        let stream = slice.stream().cu_stream();
+
+        // --- The extern "C" call ---
+        // SAFETY: the fresh contiguous F32 tensor contains n writable elements,
+        // its allocation/storage lock and pointer guard remain alive, and the
+        // kernel uses that same stream. Synchronize before releasing these borrows
+        // because device_ptr tracks reads, while this narrow experiment writes.
+        let status = unsafe { fill_const_f32_launch(ptr as *mut c_void, n as i64, val, stream) };
+        if status != 0 {
+            candle_core::bail!("[proto][A] CUDA launch failed with runtime status {status}");
+        }
+        // Also surface asynchronous execution errors; launch success is not completion.
+        dev.synchronize()?;
     }
-    // _guard dropped here (after the call) — correct ordering.
 
     // --- Verify: read back via candle ---
     let sum = t.sum_all()?.to_vec0::<f32>()?;
@@ -66,8 +72,7 @@ fn main() -> Result<()> {
 
     let ok = (sum - expected).abs() < 1e-3 && (max - val).abs() < 1e-6 && (min - val).abs() < 1e-6;
     if !ok {
-        println!("[proto][A] FAIL — values don't match. Kernel did not write expected data.");
-        std::process::exit(1);
+        candle_core::bail!("[proto][A] FAIL — kernel values don't match");
     }
     println!("[proto][A] PASS — cudarc seam works; kernel ran on GPU through candle Tensor.");
 
@@ -77,10 +82,8 @@ fn main() -> Result<()> {
 /// Phase B — validate the `candle-flash-attn` paged kernel (PR #3655).
 ///
 /// Calls `flash_attn_varlen_paged_windowed` with a minimal batch=1 config and
-/// confirms it runs on sm_89. This is the API the engine will actually use for
-/// the hot path — so the question is "does it run at all", not "is the output
-/// numerically correct" (T8 covers correctness separately).
-#[allow(clippy::too_many_arguments)]
+/// checks its shape and all finite output values. This experiment validates the
+/// selected API and launch; it has no independent attention numerical oracle.
 fn phase_b_paged_attn(dev: &Device) -> Result<()> {
     use candle_flash_attn::flash_attn_varlen_paged_windowed;
 
@@ -94,6 +97,12 @@ fn phase_b_paged_attn(dev: &Device) -> Result<()> {
     let seq_q = 16usize;
     let seq_k = 64usize; // exactly 2 pages
     let total_q = seq_q * batch_size;
+
+    // Seed the synthetic input stream for replay within the same pinned stack.
+    // A seed does not promise bitwise output identity across CUDA versions/GPUs.
+    let seed = 11u64;
+    dev.set_seed(seed)?;
+    println!("[proto][B] input seed = {seed}");
 
     // q: (total_q, num_heads, head_size) F16, rank-3 (varlen-packed).
     let q = Tensor::randn(0.0f32, 1.0, (total_q, num_heads, head_size), dev)?
@@ -124,14 +133,14 @@ fn phase_b_paged_attn(dev: &Device) -> Result<()> {
         &cu_seqlens_q,
         &cu_seqlens_k,
         &block_table,
-        None,            // mm_prefix_ranges
-        seq_q,           // max_seqlen_q
-        seq_k,           // max_seqlen_k
+        None,  // mm_prefix_ranges
+        seq_q, // max_seqlen_q
+        seq_k, // max_seqlen_k
         softmax_scale,
-        None,            // window_size_left (None = unbounded lookback)
-        Some(0),         // window_size_right (Some(0) = causal)
+        None,    // window_size_left (None = unbounded lookback)
+        Some(0), // window_size_right (Some(0) = causal)
         page_block_size,
-        None,            // softcap
+        None, // softcap
     )?;
 
     let dims = out.shape().dims();
@@ -140,23 +149,19 @@ fn phase_b_paged_attn(dev: &Device) -> Result<()> {
         dims, total_q, num_heads, head_size
     );
     let out_f32 = out.to_dtype(candle::DType::F32)?.flatten_all()?;
-    let n_elem = out_f32.elem_count();
-    let first = out_f32.get(0)?.to_vec0::<f32>()?;
-    let has_nan = (0..n_elem)
-        .step_by(n_elem / 16 + 1)
-        .map(|i| out_f32.get(i)?.to_vec0::<f32>().map(|v| v.is_nan()))
-        .try_fold(false, |a, b| Ok::<_, candle::Error>(a | b?))?;
-    println!(
-        "[proto][B] first elem = {:.6}, any_nan(sampled) = {}, n_elem = {}",
-        first, has_nan, n_elem
-    );
-
-    let shape_ok = dims == [total_q, num_heads, head_size];
-    if !shape_ok || has_nan {
-        println!("[proto][B] FAIL — shape wrong or NaN in output.");
-        std::process::exit(1);
+    // One synchronous readback checks every element, including Inf and positions
+    // the old sampling stride never visited.
+    let values = out_f32.to_vec1::<f32>()?;
+    if let Err(error) = validation::validate_output(dims, [total_q, num_heads, head_size], &values)
+    {
+        candle_core::bail!("[proto][B] FAIL — {error}");
     }
-    println!("[proto][B] PASS — paged flash-attn ran on sm_89 via the PR #3655 API.");
+    println!(
+        "[proto][B] first elem = {:.6}, all_finite = true, n_elem = {}",
+        values[0],
+        values.len()
+    );
+    println!("[proto][B] PASS — paged flash-attn ran via the PR #3655 API.");
     println!("[proto]    signature confirmed: flash_attn_varlen_paged_windowed(q[F16], k[F16], v[F16], cu_seqlens_q[u32], cu_seqlens_k[u32], block_table[u32], mm_prefix_ranges[Opt], max_sq, max_sk, scale, win_l[Opt], win_r[Opt], page_block_size, softcap[Opt])");
     println!("[proto]    NOTE: cu_seqlens (cumulative) NOT context_lens — T4 must convert.");
     Ok(())

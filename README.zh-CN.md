@@ -28,7 +28,7 @@ target/release/vllm_oxide_cli --model "$QWEN3_MODEL_DIR" \
     --max-tokens 16 "The meaning of life is"
 ```
 
-历史 CLI **没有自己的 `cuda` feature**；`vllm_oxide/cuda` 指定启用其库依赖的 CUDA 后端。模型文件、参数、Rust API 与排错方式见[版本使用指南](docs/getting-started.md)。`Cargo.toml` 声明 Rust 1.75，但该历史下限没有独立的兼容性验证保证。
+历史 CLI **没有自己的 `cuda` feature**；`vllm_oxide/cuda` 指定启用其库依赖的 CUDA 后端。模型文件、参数、Rust API 与排错方式见[版本使用指南](docs/getting-started.md)。维护后的源码固定使用 Rust 1.94.0，与本次回归检查一致；原历史工具链记录仍保留。
 
 ## 文档与开发
 

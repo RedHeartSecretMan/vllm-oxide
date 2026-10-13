@@ -86,15 +86,15 @@ class TestPromptSpec:
         assert spec.is_batch is True
         assert len(spec.sub_prompts) == 4
 
-    def test_is_batch_false_with_single_sub_prompt(self):
-        spec = PromptSpec(
-            id="test",
-            category="canonical",
-            prompt="test",
-            description="test",
-            sub_prompts=["only one"],
-        )
-        assert spec.is_batch is False
+    def test_single_sub_prompt_is_rejected_instead_of_ignoring_its_text(self):
+        with pytest.raises(ValueError, match="sub_prompts must contain 2 to 26 prompts"):
+            PromptSpec(
+                id="test",
+                category="canonical",
+                prompt="test",
+                description="test",
+                sub_prompts=["only one"],
+            )
 
     def test_sub_prompts_roundtrip_json(self):
         spec = PromptSpec(

@@ -15,14 +15,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use candle_core::{DType, Device, Tensor};
-use vllm_oxide::{Source, build_model};
+use vllm_oxide::{build_model, Source};
 
 fn parse_arg(arg: &str) -> Source {
     if let Some(rest) = arg.strip_prefix("hub:") {
         if let Some((repo, rev)) = rest.split_once('@') {
-            Source::Hub { repo: repo.to_string(), revision: Some(rev.to_string()) }
+            Source::Hub {
+                repo: repo.to_string(),
+                revision: Some(rev.to_string()),
+            }
         } else {
-            Source::Hub { repo: rest.to_string(), revision: None }
+            Source::Hub {
+                repo: rest.to_string(),
+                revision: None,
+            }
         }
     } else {
         Source::Local(PathBuf::from(arg))

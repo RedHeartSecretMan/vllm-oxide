@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
 from golden_gen.config import (
     ATTN_IMPLEMENTATION,
@@ -19,6 +20,35 @@ from golden_gen.schema import PromptSpec
 
 if TYPE_CHECKING:
     pass
+
+
+def _generated_token_logits(
+    output: object,
+    batch_index: int,
+    prompt_width: int,
+    eos_token_ids: int | list[int] | tuple[int, ...] | None,
+) -> tuple[NDArray[np.int64], NDArray[np.float32]]:
+    """Return real generated steps, including EOS and excluding subsequent padding."""
+    steps = output.logits  # type: ignore[attr-defined]
+    sequences = output.sequences  # type: ignore[attr-defined]
+    if steps is None or len(steps) == 0:
+        raise ValueError("Transformers returned no generation logits")
+    token_ids = sequences[batch_index, prompt_width:].cpu().numpy().astype(np.int64)
+    if token_ids.ndim != 1 or len(token_ids) != len(steps):
+        raise ValueError("Transformers generated tokens and logits have different step counts")
+    if eos_token_ids is None:
+        eos_ids: list[int] = []
+    elif isinstance(eos_token_ids, int):
+        eos_ids = [eos_token_ids]
+    else:
+        eos_ids = list(eos_token_ids)
+    eos_positions = np.flatnonzero(np.isin(token_ids, eos_ids))
+    length = int(eos_positions[0]) + 1 if len(eos_positions) else len(token_ids)
+    logits = np.stack(
+        [step[batch_index].cpu().numpy().astype(np.float32) for step in steps[:length]],
+        axis=0,
+    )
+    return token_ids[:length], logits
 
 
 class TransformersOracle:
@@ -85,20 +115,16 @@ class TransformersOracle:
                 output_logits=True,
             )
 
-        # out.logits is tuple of length n_generated, each [1, vocab_size] FP32
-        token_ids = out.sequences[0, n_prompt_tokens:].cpu().numpy().astype(np.int64)
-
+        token_ids, logits = _generated_token_logits(
+            out, 0, n_prompt_tokens, self.model.generation_config.eos_token_id
+        )
         if prompt.category == "canonical":
-            logits_list = [logit[0].cpu().numpy().astype(np.float32) for logit in out.logits]
-            logits = np.stack(logits_list, axis=0)  # [n, vocab_size]
             return OracleResult.for_canonical(
                 token_ids=token_ids,
                 logits_per_step=logits,
                 n_prompt_tokens=n_prompt_tokens,
             )
         else:
-            logits_list = [logit[0].cpu().numpy().astype(np.float32) for logit in out.logits]
-            logits = np.stack(logits_list, axis=0)
             topk = torch.topk(torch.from_numpy(logits), k=TOP_K_REGRESSION, dim=-1)
             return OracleResult.for_regression(
                 token_ids=token_ids,
@@ -142,18 +168,14 @@ class TransformersOracle:
                 output_logits=True,
             )
 
-        # out.logits is tuple of length max_new_tokens, each [batch, vocab] FP32
-        # out.sequences is [batch, max_prompt_len + max_new_tokens]
+        # Different members can finish before the last batch generation step.
         results: list[OracleResult] = []
         for b in range(len(sub_prompts)):
-            token_ids_b = out.sequences[b, max_prompt_len:].cpu().numpy().astype(np.int64)
+            token_ids_b, logits_b = _generated_token_logits(
+                out, b, max_prompt_len, self.model.generation_config.eos_token_id
+            )
             n_prompt_tokens_b = int(n_prompt_tokens_per_seq[b])
-
             if prompt.category == "canonical":
-                logits_list = [
-                    out.logits[t][b].cpu().numpy().astype(np.float32) for t in range(max_tokens)
-                ]
-                logits_b = np.stack(logits_list, axis=0)
                 results.append(
                     OracleResult.for_canonical(
                         token_ids=token_ids_b,
@@ -162,10 +184,6 @@ class TransformersOracle:
                     )
                 )
             else:
-                logits_list = [
-                    out.logits[t][b].cpu().numpy().astype(np.float32) for t in range(max_tokens)
-                ]
-                logits_b = np.stack(logits_list, axis=0)
                 topk = torch.topk(torch.from_numpy(logits_b), k=TOP_K_REGRESSION, dim=-1)
                 results.append(
                     OracleResult.for_regression(

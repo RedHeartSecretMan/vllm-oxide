@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 
 use crate::types::{FixtureData, ToleranceCalibration};
@@ -28,10 +28,24 @@ pub struct L1Result {
 
 #[derive(Debug)]
 pub enum L1PositionDetail {
-    Match { position: usize, token_id: i64 },
-    NearTieSkip { position: usize, token_id: i64, gap: f64 },
-    Mismatch { position: usize, expected: i64, actual: i64 },
-    RegressionSkip { position: usize, token_id: i64 },
+    Match {
+        position: usize,
+        token_id: i64,
+    },
+    NearTieSkip {
+        position: usize,
+        token_id: i64,
+        gap: f64,
+    },
+    Mismatch {
+        position: usize,
+        expected: i64,
+        actual: i64,
+    },
+    RegressionSkip {
+        position: usize,
+        token_id: i64,
+    },
 }
 
 /// Compare generated token IDs against golden token IDs with near-tie
@@ -61,7 +75,9 @@ pub fn compare_l1(
             Some(l) => l,
             None => return Ok(Some(MismatchKind::Deterministic)),
         };
-        let gap = top2_logit_gap(logits, i, expected as usize)?;
+        let expected_index = usize::try_from(expected)
+            .context("expected token ID must be a nonnegative platform index")?;
+        let gap = top2_logit_gap(logits, i, expected_index)?;
         if gap < eps {
             Ok(Some(MismatchKind::NearTie(gap)))
         } else {
@@ -71,10 +87,7 @@ pub fn compare_l1(
 }
 
 /// Run L1 comparison without logits (no near-tie detection).
-pub fn compare_l1_tokens_only(
-    fixture: &FixtureData,
-    generated_tokens: &[u32],
-) -> Result<L1Result> {
+pub fn compare_l1_tokens_only(fixture: &FixtureData, generated_tokens: &[u32]) -> Result<L1Result> {
     compare_tokens_loop(fixture, generated_tokens, 0.0, |_, expected, actual| {
         if expected == actual {
             Ok(None)
@@ -144,35 +157,49 @@ where
     let mut mismatches = 0usize;
     let mut first_mismatch: Option<usize> = None;
 
-    for i in 0..n {
+    for (i, &actual) in generated_tokens.iter().take(n).enumerate() {
         let expected = fixture.token_ids[i];
-        let actual = generated_tokens[i] as i64;
+        let actual = i64::from(actual);
 
         match classify(i, expected, actual)? {
             None => {
                 exact_matches += 1;
-                details.push(L1PositionDetail::Match { position: i, token_id: expected });
+                details.push(L1PositionDetail::Match {
+                    position: i,
+                    token_id: expected,
+                });
             }
             Some(MismatchKind::NearTie(gap)) => {
                 near_tie_skips += 1;
-                details.push(L1PositionDetail::NearTieSkip { position: i, token_id: expected, gap });
+                details.push(L1PositionDetail::NearTieSkip {
+                    position: i,
+                    token_id: expected,
+                    gap,
+                });
             }
             Some(MismatchKind::Deterministic) => {
                 mismatches += 1;
                 if first_mismatch.is_none() {
                     first_mismatch = Some(i);
                 }
-                details.push(L1PositionDetail::Mismatch { position: i, expected, actual });
+                details.push(L1PositionDetail::Mismatch {
+                    position: i,
+                    expected,
+                    actual,
+                });
             }
             Some(MismatchKind::RegressionSkip) => {
                 regression_skips += 1;
-                details.push(L1PositionDetail::RegressionSkip { position: i, token_id: expected });
+                details.push(L1PositionDetail::RegressionSkip {
+                    position: i,
+                    token_id: expected,
+                });
             }
         }
     }
 
-    mismatches += (generated_tokens.len().saturating_sub(n))
-        + (fixture.token_ids.len().saturating_sub(n));
+    mismatches +=
+        (generated_tokens.len().saturating_sub(n)) + (fixture.token_ids.len().saturating_sub(n));
 
     Ok(L1Result {
         prompt_id: fixture.prompt_id.clone(),
@@ -235,6 +262,28 @@ mod tests {
             calibration_factor: 2.0,
             method: "pairwise".into(),
         }
+    }
+
+    #[test]
+    fn negative_expected_token_rejected_before_index_conversion() {
+        let fixture = FixtureData {
+            prompt_id: "negative-token".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 1,
+            token_ids: vec![-1],
+            n_prompt_tokens: 1,
+            logits: None,
+            logits_shape: (1, 2),
+            top5_indices: None,
+            top5_logits: None,
+        };
+        let logits =
+            Tensor::from_vec(vec![0.0f32, 1.0], (1, 2), &candle_core::Device::Cpu).unwrap();
+        let error = compare_l1(&fixture, &[1], Some(&logits), &make_tolerance(), None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("expected token ID must be a nonnegative platform index"));
     }
 
     #[test]

@@ -163,7 +163,10 @@ def _run_generate(args: argparse.Namespace) -> int:
     write_manifest(manifest, manifest_path)
     print(f"Manifest written to {manifest_path}")
     if existing_tolerance is None:
-        print("NOTE: tolerance is not yet calibrated. Run `golden-gen calibrate --manifest-dir <dir>` to fill it in.")
+        print(
+            "NOTE: tolerance is not yet calibrated. "
+            "Run `golden-gen calibrate --manifest-dir <dir>` to fill it in."
+        )
 
     return 0
 

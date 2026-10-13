@@ -10,16 +10,13 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
+use vllm_oxide::{EngineOptions, Prompt, Source, LLM};
 use vllm_oxide_test::{
-    self, ComparisonReport,
-    compare_l1, compare_l1_regression, compare_l2, compare_l3,
-    download, manifest, print_report, prompts,
-};
-use vllm_oxide::{
-    EngineOptions, LLM, Prompt, Source,
+    self, compare_l1, compare_l1_regression, compare_l2, compare_l3, download, manifest,
+    print_report, prompts, ComparisonReport,
 };
 
 /// Validate the vllm-oxide Rust engine against golden fixtures.
@@ -77,8 +74,7 @@ struct Cli {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -149,10 +145,7 @@ fn main() -> Result<()> {
         let max_tokens = meta.num_tokens as usize;
 
         tracing::info!("[{}/L1+L2] loading engine", meta.prompt_id);
-        let mut llm = LLM::new(
-            Source::Local(model_path.clone()),
-            EngineOptions::default(),
-        )?;
+        let mut llm = LLM::new(Source::Local(model_path.clone()), EngineOptions::default())?;
 
         let logits = match llm.generate_logits(&prompt, max_tokens) {
             Ok(t) => t,
@@ -187,7 +180,8 @@ fn main() -> Result<()> {
             for (j, &val) in logits_vals[start..end].iter().enumerate() {
                 if val > max_val {
                     max_val = val;
-                    max_idx = j as u32;
+                    max_idx =
+                        u32::try_from(j).context("logit column exceeds u32 token ID range")?;
                 }
             }
             generated_tokens.push(max_idx);
@@ -245,10 +239,7 @@ fn main() -> Result<()> {
         let max_tokens = meta.num_tokens as usize;
 
         tracing::info!("[{}/L1] loading engine for regression", meta.prompt_id);
-        let mut llm = LLM::new(
-            Source::Local(model_path.clone()),
-            EngineOptions::default(),
-        )?;
+        let mut llm = LLM::new(Source::Local(model_path.clone()), EngineOptions::default())?;
 
         let logits = match llm.generate_logits(&prompt, max_tokens) {
             Ok(t) => t,
@@ -282,7 +273,8 @@ fn main() -> Result<()> {
             for (j, &val) in logits_vals[start..end].iter().enumerate() {
                 if val > max_val {
                     max_val = val;
-                    max_idx = j as u32;
+                    max_idx =
+                        u32::try_from(j).context("logit column exceeds u32 token ID range")?;
                 }
             }
             generated_tokens.push(max_idx);
@@ -298,7 +290,10 @@ fn main() -> Result<()> {
 
     // 3. Print report.
     if cli.json {
-        println!("{}", vllm_oxide_test::report::json_report(&report, tolerance));
+        println!(
+            "{}",
+            vllm_oxide_test::report::json_report(&report, tolerance)
+        );
     } else {
         print_report(&report, tolerance);
     }

@@ -181,8 +181,7 @@ impl Scheduler {
             let hit_eos = token_id == EOS_TOKEN_ID && !seq.ignore_eos;
 
             if hit_max_tokens || hit_eos {
-                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled)
-                    .min(seq.num_tokens);
+                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled).min(seq.num_tokens);
                 seq.num_scheduled_tokens = 0;
                 seq.status = SequenceStatus::Finished;
                 finished_indices.push(i);
@@ -194,8 +193,7 @@ impl Scheduler {
                 });
             } else {
                 kv_mgr.hash_blocks(seq);
-                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled)
-                    .min(seq.num_tokens);
+                seq.num_cached_tokens = (seq.num_cached_tokens + scheduled).min(seq.num_tokens);
                 seq.num_scheduled_tokens = 0;
             }
         }
@@ -250,7 +248,9 @@ impl Scheduler {
         }
 
         while needs_preemption && !self.running.is_empty() {
-            let mut victim = self.running.pop_back().unwrap();
+            let Some(mut victim) = self.running.pop_back() else {
+                break;
+            };
             let _ = kv_mgr.deallocate(victim.seq_mut());
             let vseq = victim.seq_mut();
             vseq.status = SequenceStatus::Waiting;
@@ -283,7 +283,9 @@ impl Scheduler {
         let mut i = 0;
         while i < self.running.len() {
             if self.running[i].seq().num_scheduled_tokens == 0 {
-                let mut victim = self.running.remove(i).unwrap();
+                let Some(mut victim) = self.running.remove(i) else {
+                    break;
+                };
                 let _ = kv_mgr.deallocate(victim.seq_mut());
                 let vseq = victim.seq_mut();
                 vseq.status = SequenceStatus::Waiting;
@@ -387,15 +389,16 @@ impl Scheduler {
         }
 
         for &(idx, n_tokens) in to_schedule.iter().rev() {
-            let mut group = self.waiting.remove(idx).unwrap();
+            let Some(mut group) = self.waiting.remove(idx) else {
+                break;
+            };
             let seq = group.seq_mut();
 
             match kv_mgr.can_allocate(seq) {
                 Some(num_cached) => {
                     let _ = kv_mgr.allocate(seq, num_cached);
                     seq.num_scheduled_tokens = n_tokens;
-                    let fully_prefilled =
-                        seq.num_cached_tokens + n_tokens >= seq.num_prompt_tokens;
+                    let fully_prefilled = seq.num_cached_tokens + n_tokens >= seq.num_prompt_tokens;
                     seq.is_prefill = !fully_prefilled;
                     seq.status = SequenceStatus::Running;
                     self.running.push_back(group);
@@ -512,17 +515,17 @@ mod tests {
         fn prefills_single_waiting_sequence() {
             let mut s = make_scheduler();
             let mut kv = make_kv_mgr(100);
-            s.add_request(
-                (0..BLOCK_SIZE as u32 + 10).collect(),
-                make_params(16),
-            );
+            s.add_request((0..BLOCK_SIZE as u32 + 10).collect(), make_params(16));
             let output = s.schedule(&mut kv);
             assert_eq!(output.mode, ScheduleMode::Prefill);
             assert_eq!(s.num_running(), 1);
             assert_eq!(s.num_waiting(), 0);
 
             let seq = s.running[0].seq();
-            assert!(!seq.is_prefill, "fully prefilled seq should have is_prefill=false");
+            assert!(
+                !seq.is_prefill,
+                "fully prefilled seq should have is_prefill=false"
+            );
             assert_eq!(seq.status, SequenceStatus::Running);
             assert_eq!(seq.num_scheduled_tokens, BLOCK_SIZE + 10);
         }

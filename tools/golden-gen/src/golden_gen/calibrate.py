@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 
 from golden_gen.config import TOLERANCE_CALIBRATION_FACTOR
 from golden_gen.io import load_fixture
-from golden_gen.manifest import read_manifest, write_manifest
+from golden_gen.manifest import read_manifest
 from golden_gen.schema import FixtureMetadata, Manifest, ToleranceCalibration
 
 

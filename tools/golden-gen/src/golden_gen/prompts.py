@@ -5,7 +5,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from golden_gen.schema import PromptSpec
+from golden_gen.schema import PromptSpec, validate_fixture_component
+
+
+def validate_prompt_inventory(prompts: list[PromptSpec]) -> None:
+    """Reject collisions after batch expansion before invoking any oracle."""
+    seen: set[str] = set()
+    for original in prompts:
+        spec = PromptSpec.model_validate(original.model_dump())
+        count = len(spec.sub_prompts or []) if spec.is_batch else 1
+        identifiers = (
+            [f"{spec.id}{chr(ord('a') + i)}" for i in range(count)] if spec.is_batch else [spec.id]
+        )
+        for identifier in identifiers:
+            validate_fixture_component(identifier)
+            key = identifier.casefold()
+            if key in seen:
+                raise ValueError(
+                    f"duplicate fixture identifier: {identifier} (after batch expansion)"
+                )
+            seen.add(key)
 
 
 def load_prompts(prompts_dir: str | Path) -> list[PromptSpec]:
@@ -28,6 +47,7 @@ def load_prompts(prompts_dir: str | Path) -> list[PromptSpec]:
     if regression_path.exists():
         prompts.extend(_load_jsonl(regression_path))
 
+    validate_prompt_inventory(prompts)
     return prompts
 
 
@@ -53,4 +73,5 @@ def _load_jsonl(path: Path) -> list[PromptSpec]:
                 continue
             data = json.loads(line)
             prompts.append(PromptSpec.model_validate(data))
+    validate_prompt_inventory(prompts)
     return prompts

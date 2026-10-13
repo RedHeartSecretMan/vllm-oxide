@@ -19,14 +19,11 @@
 /// assert_eq!(round_up(257, 256), 512);
 /// ```
 pub const fn round_up(n: usize, m: usize) -> usize {
-    // Refactored from the classic `(n + m - 1) / m * m` form. The classic
-    // form's `n + m - 1` overflows for ~m values of `n` near `usize::MAX`
-    // (e.g. m=256 → 256 overflow-triggering inputs). The division-remainder
-    // form below can only overflow at `n ∈ {usize::MAX-1, usize::MAX}` — a
-    // meaningful safety margin for the block_size=256 call sites nano-vllm
-    // uses. Truly overflow-safe round-up requires returning Option/Result,
-    // which is overkill for token-count math.
-    (n / m) * m + if n % m != 0 { m } else { 0 }
+    // Avoid the intermediate overflow in `(n + m - 1) / m * m`.
+    // The rounded result itself can still exceed usize::MAX when n lies
+    // above the largest representable multiple of m. Callers use bounded
+    // token counts; returning Option/Result would change this public helper.
+    (n / m) * m + if !n.is_multiple_of(m) { m } else { 0 }
 }
 
 /// Physical PagedKVCache buffer shape as `[2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]`.

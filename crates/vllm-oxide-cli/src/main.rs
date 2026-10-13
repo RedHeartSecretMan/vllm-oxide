@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use vllm_oxide::{LLM, Prompt, SamplingParams, Source};
+use vllm_oxide::{Prompt, SamplingParams, Source, LLM};
 
 /// Thin CLI over vllm-oxide's `LLM::generate`.
 #[derive(Parser)]
@@ -52,15 +52,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let model_path = PathBuf::from(&cli.model);
-    let source = if model_path.is_dir() {
-        Source::Local(model_path)
-    } else {
-        Source::Hub {
-            repo: cli.model,
-            revision: None,
-        }
-    };
+    let source = parse_model_arg(&cli.model);
 
     let mut llm = LLM::new(source, vllm_oxide::EngineOptions::default())
         .context("failed to initialise LLM")?;
@@ -73,16 +65,27 @@ fn main() -> Result<()> {
         ..SamplingParams::default()
     };
 
-    let outputs = llm.generate(
-        &[Prompt::Text(prompt_text)],
-        &[sampling_params],
-    ).context("LLM::generate failed")?;
+    let outputs = llm
+        .generate(&[Prompt::Text(prompt_text)], &[sampling_params])
+        .context("LLM::generate failed")?;
 
     if let Some(output) = outputs.first() {
         print!("{}", output.text);
     }
 
     Ok(())
+}
+
+fn parse_model_arg(raw: &str) -> Source {
+    let path = PathBuf::from(raw);
+    if path.is_dir() {
+        Source::Local(path)
+    } else {
+        Source::Hub {
+            repo: raw.to_string(),
+            revision: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -110,18 +113,6 @@ mod tests {
                 assert!(revision.is_none());
             }
             other => panic!("expected Source::Hub, got {other:?}"),
-        }
-    }
-
-    fn parse_model_arg(raw: &str) -> Source {
-        let path = PathBuf::from(raw);
-        if path.is_dir() {
-            Source::Local(path)
-        } else {
-            Source::Hub {
-                repo: raw.to_string(),
-                revision: None,
-            }
         }
     }
 }

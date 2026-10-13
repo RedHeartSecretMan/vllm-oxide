@@ -6,9 +6,14 @@ This directory contains the historical, standalone Candle/CUDA stack experiment.
 
 | Material | Purpose | Status |
 |---|---|---|
-| [Candle stack prototype](prototype-candle-stack/README.md) | Check Candle-to-cudarc FFI and the pinned paged FlashAttention entry point | Historical experiment, outside the workspace; CUDA required |
+| [Candle stack prototype](prototype-candle-stack/README.md) | Check Candle-to-cudarc FFI and the pinned paged FlashAttention entry point | Historical experiment, independent workspace; CUDA required |
 
-The experiment has its own Cargo manifest, build script, CUDA kernel and generated `target/` directory. Root workspace checks do not include it; the historical parent/local manifests need the [isolated run procedure](prototype-candle-stack/README.md#run) because direct invocation inside this checkout hits a workspace membership error. Its tested SM 8.9 device and experiment geometry do not establish the production engine's memory or numerical behavior.
+The experiment has its own Cargo manifest, committed lockfile, build script,
+CUDA kernel and CPU validation tests. Root workspace checks do not include it;
+use the [direct run procedure](prototype-candle-stack/README.md#prepare-and-run)
+for its independent workspace. Its seeded synthetic input, full finite-output
+check and experiment geometry establish interoperability, without describing
+production memory use or model numerical accuracy.
 
 Use [getting started](../docs/getting-started.md) for this source's engine commands and [validation](../docs/validation/README.md) for its original numerical limitations. The [golden-generation ADR](../docs/adr/0005-golden-generation-correctness-strategy.md) records a historical design decision. Current application work should use [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
 

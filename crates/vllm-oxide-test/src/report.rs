@@ -72,7 +72,11 @@ pub fn print_report(report: &ComparisonReport, tolerance: &ToleranceCalibration)
     println!("══════════════════════════════════════════════════");
     let l1_status = if report.l1_passed() { "PASS" } else { "FAIL" };
     let l2_status = if report.l2_passed() { "PASS" } else { "FAIL" };
-    let overall = if report.overall_passed() { "PASS" } else { "FAIL" };
+    let overall = if report.overall_passed() {
+        "PASS"
+    } else {
+        "FAIL"
+    };
     println!("  L1 (token match):   {}", l1_status);
     println!("  L2 (logits):        {}", l2_status);
     if !report.skipped_l2.is_empty() {
@@ -120,10 +124,7 @@ fn print_l2_section(report: &ComparisonReport) {
             r.total_elements,
         );
         if r.diff_token_steps > 0 {
-            println!(
-                "    {} steps skipped (token mismatch)",
-                r.diff_token_steps,
-            );
+            println!("    {} steps skipped (token mismatch)", r.diff_token_steps,);
         }
     }
     println!();
@@ -187,7 +188,6 @@ pub fn json_report(report: &ComparisonReport, tolerance: &ToleranceCalibration) 
             .collect(),
         overall: report.overall_passed(),
     };
-    serde_json::to_string_pretty(&data).unwrap_or_else(|e| {
-        format!("{{ \"error\": \"serialization failed: {e}\" }}")
-    })
+    serde_json::to_string_pretty(&data)
+        .unwrap_or_else(|e| format!("{{ \"error\": \"serialization failed: {e}\" }}"))
 }

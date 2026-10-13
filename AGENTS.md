@@ -27,4 +27,4 @@ Default five canonical labels — `needs-triage` / `needs-info` / `ready-for-age
 
 **Single-context** — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
-Documentation maintenance of published tags follows the user-authorized exception in `docs/version-doc-update.md`: retain the original tag/source and evidence identities, validate documentation-only descendants, and update publication refs with explicit force-with-lease checks.
+When maintaining an existing release source under explicit user authorization, follow `docs/version-doc-update.md`: preserve original source and measurement identities, validate every changed code path with version-specific regressions, and update publication refs using exact old-object force-with-lease checks.

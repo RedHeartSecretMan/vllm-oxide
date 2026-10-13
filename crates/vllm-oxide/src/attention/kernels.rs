@@ -1,3 +1,24 @@
+//! Private CUDA pointer and cache-kernel boundary.
+//!
+//! `slice_ptr` borrows CUDA storage, applies the tensor's start offset, and
+//! retains both the storage read lock and cudarc's pointer guard. Their lifetimes
+//! are extended only to package those borrows together: each `TensorGuard` stays
+//! local to the launch wrapper and must be dropped before its source tensor.
+//! Its fields deliberately drop in declaration order: `SyncOnDrop` first,
+//! while the storage lock and the CUDA allocation it borrows are still alive.
+//!
+//! CUDA launchers enqueue work on the source tensor's stream. `SyncOnDrop`
+//! records the stream event (or synchronizes for that guard variant); it does
+//! not generally wait for GPU completion. Caller-owned tensors and cudarc's
+//! allocation/event tracking retain storage for this asynchronous workload.
+//! Callers must supply compatible contiguous shapes, element types, devices,
+//! valid slot/block mappings, and the same Candle stream; these private wrappers
+//! do not validate all geometry or support concurrent writes on other streams.
+//! Readback or an explicit device synchronization is the completion boundary.
+//!
+//! Unsafe operations are confined to pointer/lifetime conversion and the FFI
+//! launches below. The local guards cover each call, including error returns.
+
 #![allow(unsafe_code)]
 
 use candle_core::backend::BackendStorage;
@@ -74,10 +95,15 @@ fn slice_ptr(tensor: &Tensor) -> Result<(u64, TensorGuard)> {
     // SAFETY: SyncOnDrop borrows from the CudaSlice, which is owned by storage.
     // We keep the RwLockReadGuard alive in TensorGuard, so the device handle and
     // memory remain valid. Caller must drop TensorGuard before the source Tensor.
-    let storage: RwLockReadGuard<'static, Storage> =
-        unsafe { std::mem::transmute(storage) };
+    let storage: RwLockReadGuard<'static, Storage> = unsafe { std::mem::transmute(storage) };
 
-    Ok((ptr, TensorGuard { _guard: guard, _storage: storage }))
+    Ok((
+        ptr,
+        TensorGuard {
+            _guard: guard,
+            _storage: storage,
+        },
+    ))
 }
 
 fn get_stream(tensor: &Tensor) -> Result<CUstream> {
@@ -146,11 +172,7 @@ pub fn reshape_and_cache(
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn copy_blocks(
-    key_cache: &Tensor,
-    value_cache: &Tensor,
-    block_mapping: &Tensor,
-) -> Result<()> {
+pub fn copy_blocks(key_cache: &Tensor, value_cache: &Tensor, block_mapping: &Tensor) -> Result<()> {
     let dtype = dtype_code(key_cache.dtype())?;
 
     let (kc_ptr, _g1) = slice_ptr(key_cache)?;

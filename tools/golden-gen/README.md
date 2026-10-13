@@ -130,3 +130,18 @@ After retaining any needed logs and results, remove only the explicit scratch di
 | [`calibrate.py`](src/golden_gen/calibrate.py) | Pairwise absolute tolerance and regression skip map |
 | [`oracles/`](src/golden_gen/oracles/) | Fake, Transformers and vLLM adapters |
 | [`tests/`](tests/) | CPU tooling tests |
+
+## Fixture output and early completion
+
+Prompt IDs use portable ASCII file identifiers. Inventory validation rejects
+path components, duplicate or case-colliding IDs and collisions introduced by
+batch expansion before invoking an oracle. Output directories and files cannot
+be symbolic links; hard-linked and non-regular targets are rejected. Fixture generation targets Linux/WSL2 with atomic no-replace rename support.
+A fresh fixture is published only after its complete contents have been written. Deterministic retries reuse identical bytes,
+while different existing contents require a fresh output directory.
+
+The Transformers oracle uses the actual generation step count. Each batch
+member retains its first EOS step and excludes later padding, including when
+padding uses the EOS token ID. An empty output or mismatched token/logit lengths
+is an error. These corrections do not alter the historical fixture assets or
+recorded validation results.

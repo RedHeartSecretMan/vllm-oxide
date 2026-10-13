@@ -6,9 +6,16 @@ import numpy as np
 from numpy.typing import NDArray
 
 from golden_gen.config import VOCAB_SIZE
-from golden_gen.io import save_fixture
+from golden_gen.io import prepare_fixture_directory, require_regular_fixture_target, save_fixture
 from golden_gen.oracles.base import Oracle, OracleResult
-from golden_gen.schema import FixtureMetadata, OracleName, PromptCategory, PromptSpec
+from golden_gen.prompts import validate_prompt_inventory
+from golden_gen.schema import (
+    FixtureMetadata,
+    OracleName,
+    PromptCategory,
+    PromptSpec,
+    validate_fixture_component,
+)
 
 
 def _save_fixture(
@@ -19,6 +26,10 @@ def _save_fixture(
     output_dir: Path,
 ) -> FixtureMetadata:
     """Save a single fixture file and return its metadata."""
+    validate_fixture_component(prompt_id)
+    validate_fixture_component(oracle_name)
+    if oracle_name not in ("transformers", "vllm", "fake"):
+        raise ValueError(f"unsupported oracle name: {oracle_name}")
     filename = f"{prompt_id}.{oracle_name}.safetensors"
     filepath = output_dir / filename
 
@@ -77,20 +88,31 @@ def run_all(
     Returns:
         List of FixtureMetadata for all generated fixtures.
     """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    fixtures: list[FixtureMetadata] = []
+    validate_prompt_inventory(prompts)
     oracle_names: list[OracleName] = []
-    for o in oracles:
-        if o.name == "transformers":
-            oracle_names.append("transformers")
-        elif o.name == "vllm":
-            oracle_names.append("vllm")
-        elif o.name == "fake":
-            oracle_names.append("fake")
-        else:
-            oracle_names.append(o.name)  # type: ignore[arg-type]
+    for oracle in oracles:
+        validate_fixture_component(oracle.name)
+        if oracle.name not in ("transformers", "vllm", "fake"):
+            raise ValueError(f"unsupported oracle name: {oracle.name}")
+        if oracle.name in oracle_names:
+            raise ValueError(f"duplicate oracle name: {oracle.name}")
+        oracle_names.append(oracle.name)  # type: ignore[arg-type]
+    output_dir = Path(output_dir)
+    prepare_fixture_directory(output_dir)
+    for prompt in prompts:
+        if only_category and prompt.category != only_category:
+            continue
+        ids = (
+            [f"{prompt.id}{chr(ord('a') + i)}" for i in range(len(prompt.sub_prompts or []))]
+            if prompt.is_batch
+            else [prompt.id]
+        )
+        for prompt_id in ids:
+            for oracle_name in oracle_names:
+                require_regular_fixture_target(
+                    output_dir / f"{prompt_id}.{oracle_name}.safetensors"
+                )
+    fixtures: list[FixtureMetadata] = []
 
     for prompt in prompts:
         if only_category and prompt.category != only_category:
@@ -98,6 +120,12 @@ def run_all(
 
         for oracle, oname in zip(oracles, oracle_names, strict=True):
             results = oracle.generate(prompt)
+            expected_results = len(prompt.sub_prompts or []) if prompt.is_batch else 1
+            if len(results) != expected_results:
+                raise ValueError(
+                    f"oracle {oname} returned {len(results)} results for {prompt.id}; "
+                    f"expected {expected_results}"
+                )
 
             if prompt.is_batch:
                 # Save one fixture per sub-prompt: canonical_05a, canonical_05b, ...

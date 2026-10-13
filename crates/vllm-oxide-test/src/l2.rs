@@ -36,9 +36,7 @@ pub fn compare_l2(
 ) -> Result<L2Result> {
     let logits_flat = match &fixture.logits {
         Some(l) => l,
-        None => anyhow::bail!(
-            "L2 comparison requires canonical fixture with logits tensor."
-        ),
+        None => anyhow::bail!("L2 comparison requires canonical fixture with logits tensor."),
     };
 
     let n_steps = fixture.num_tokens as usize;
@@ -47,15 +45,17 @@ pub fn compare_l2(
     let gen_f32 = generated_logits.to_dtype(DType::F32)?.flatten_all()?;
     let gen_vals = gen_f32.to_vec1::<f32>()?;
 
-    let min_steps = n_steps.min(generated_tokens.len()).min(fixture.token_ids.len());
+    let min_steps = n_steps
+        .min(generated_tokens.len())
+        .min(fixture.token_ids.len());
     let mut same_token_steps = 0usize;
     let mut diff_token_steps = 0usize;
     let mut total_exceeding = 0usize;
     let mut max_abs_diff = 0.0f64;
 
-    for step in 0..min_steps {
+    for (step, &actual_token) in generated_tokens.iter().take(min_steps).enumerate() {
         let expected_token = fixture.token_ids[step];
-        let actual_token = generated_tokens[step] as i64;
+        let actual_token = i64::from(actual_token);
 
         if expected_token != actual_token {
             diff_token_steps += 1;
@@ -152,7 +152,8 @@ mod tests {
         };
 
         // Second value differs by 1.0 — well beyond atol=1e-5.
-        let gen = Tensor::from_vec(vec![1.0f32, 3.1, 3.0], (1, 3), &candle_core::Device::Cpu).unwrap();
+        let gen =
+            Tensor::from_vec(vec![1.0f32, 3.1, 3.0], (1, 3), &candle_core::Device::Cpu).unwrap();
         let generated_tokens: Vec<u32> = vec![42];
         let tol = make_tolerance();
 
@@ -181,7 +182,8 @@ mod tests {
         // a diff of 0.001 exceeds atol=1e-5, so the test should NOT pass.
         // We keep it as a demonstration of atol-only strictness.
         let tol = make_tolerance();
-        let gen = Tensor::from_vec(vec![100.001f32, 50.0], (1, 2), &candle_core::Device::Cpu).unwrap();
+        let gen =
+            Tensor::from_vec(vec![100.001f32, 50.0], (1, 2), &candle_core::Device::Cpu).unwrap();
         let generated_tokens: Vec<u32> = vec![7];
         let result = compare_l2(&fixture, &gen, &generated_tokens, &tol).unwrap();
         // 0.001 > 1e-5 → does NOT pass under atol-only
@@ -206,7 +208,12 @@ mod tests {
         // Step 0: token matches (golden=1, gen=1) → compared
         // Step 1: token mismatch (golden=99, gen=2) → skipped
         // Step 2: token matches (golden=3, gen=3) → compared
-        let gen = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], (3, 3), &candle_core::Device::Cpu).unwrap();
+        let gen = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            (3, 3),
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
         let generated_tokens: Vec<u32> = vec![1, 2, 3];
         let tol = make_tolerance();
 

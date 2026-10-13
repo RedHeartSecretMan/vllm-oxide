@@ -8,7 +8,7 @@ This guide reproduces the historical single-GPU offline engine. v0.1.0 has known
 
 Inference needs Linux (including WSL2), one SM 8.9+ NVIDIA GPU, a compatible CUDA driver, CUDA Toolkit with `nvcc`, a host C/C++ compiler and enough free memory for weights, activations and KV cache. Historical measurement used Qwen3-0.6B/BF16 on RTX 4080/WSL2. No generic minimum VRAM, performance guarantee, prebuilt binary or model weights are supplied.
 
-`Cargo.toml` declares Rust 1.75, but there is no verified historical MSRV matrix in this archive. The source lockfile fixes dependency selection; Candle is pinned to `27f20fea993c81ea6d32ce44018f42b68466525e`. CPU development does not require CUDA and does not enable CPU inference.
+The maintained source requires Rust 1.94 and pins Rust 1.94.0. The original Rust 1.75 claim was not verified and is incompatible with the locked dependencies, which require at least Rust 1.88. The source lockfile fixes dependency selection; Candle is pinned to `27f20fea993c81ea6d32ce44018f42b68466525e`. CPU development does not require CUDA and does not enable CPU inference.
 
 ```bash
 git clone --branch v0.1.0 --depth 1 https://github.com/RedHeartSecretMan/vllm-oxide.git

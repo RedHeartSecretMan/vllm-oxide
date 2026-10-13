@@ -28,7 +28,7 @@ target/release/vllm_oxide_cli --model "$QWEN3_MODEL_DIR" \
     --max-tokens 16 "The meaning of life is"
 ```
 
-The historical CLI has **no `cuda` feature of its own**; the qualified `vllm_oxide/cuda` flag enables its library dependency. See the [version-specific guide](docs/getting-started.md) for model files, flags, Rust API and troubleshooting. `Cargo.toml` declares Rust 1.75; that historical minimum is not an independently verified compatibility guarantee.
+The historical CLI has **no `cuda` feature of its own**; the qualified `vllm_oxide/cuda` flag enables its library dependency. See the [version-specific guide](docs/getting-started.md) for model files, flags, Rust API and troubleshooting. The maintained source uses Rust 1.94.0, matching its regression checks; original historical toolchain claims remain part of the release record.
 
 ## Documentation and development
 

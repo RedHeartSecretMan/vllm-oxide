@@ -29,10 +29,10 @@ use std::sync::{Arc, Mutex};
 
 use candle_core::{DType, Device, Result, Tensor};
 
+use crate::attention::{build_decode_metadata, build_prefill_metadata, AttnMetadata, PagedKVCache};
+use crate::models::CausalLM;
 use crate::Sampler;
 use crate::SamplingParams;
-use crate::attention::{PagedKVCache, AttnMetadata, build_prefill_metadata, build_decode_metadata};
-use crate::models::CausalLM;
 
 pub use block_pool::BlockPoolError;
 pub use kv_cache_manager::KvCacheManager;
@@ -183,21 +183,19 @@ impl EngineCore {
             let tokens = &seq.token_ids[start..start + n];
             all_input_ids.extend_from_slice(tokens);
 
-            let pos_base = seq.num_cached_tokens.saturating_sub(n) as u32;
+            let pos_base = start;
             for k in 0..n {
-                all_positions.push(pos_base + k as u32);
+                all_positions.push(metadata_u32(pos_base + k, "prefill token position")?);
             }
 
             seq_starts.push(cumsum);
             cumsum += n;
             seq_lens.push(n);
 
-            let sm = self
-                .kv_cache_manager
-                .compute_slot_mapping(seq, start, n);
+            let sm = self.kv_cache_manager.compute_slot_mapping(seq, start, n);
             slot_mapping.extend(sm);
 
-            kv_lengths.push((seq.num_cached_tokens.saturating_sub(n) + n) as u32);
+            kv_lengths.push(metadata_u32(start + n, "prefill KV length")?);
         }
 
         let total_tokens = all_input_ids.len();
@@ -205,11 +203,16 @@ impl EngineCore {
         let input_ids = Tensor::from_vec(all_input_ids, total_tokens, &self.device)?;
         let positions = Tensor::from_vec(all_positions, total_tokens, &self.device)?;
 
-        let scheduled_tokens: Vec<u32> = seq_lens.iter().map(|&l| l as u32).collect();
+        let scheduled_tokens = seq_lens
+            .iter()
+            .map(|&len| metadata_u32(len, "scheduled token count"))
+            .collect::<Result<Vec<_>>>()?;
 
         let meta = build_prefill_metadata(&scheduled_tokens, &kv_lengths, &slot_mapping);
         {
-            let mut lock = self.attn_meta.lock().unwrap();
+            let mut lock = self.attn_meta.lock().map_err(|_| {
+                candle_core::Error::Msg("attention metadata mutex is poisoned".to_string())
+            })?;
             *lock = meta;
         }
 
@@ -246,14 +249,24 @@ impl EngineCore {
             let seq = group.seq();
 
             last_tokens.push(seq.last_token);
-            let pos = seq.num_tokens.saturating_sub(1) as u32;
+            let pos = metadata_u32(seq.num_tokens.saturating_sub(1), "decode token position")?;
             positions.push(pos);
-            context_lens.push(seq.num_tokens as u32);
+            context_lens.push(metadata_u32(seq.num_tokens, "decode context length")?);
 
-            let sm = self.kv_cache_manager.compute_slot_mapping(seq, pos as usize, 1);
+            let sm = self
+                .kv_cache_manager
+                .compute_slot_mapping(seq, pos as usize, 1);
             slot_mapping.extend(sm);
 
-            let bt: Vec<i32> = seq.block_table.iter().map(|&id| id as i32).collect();
+            let bt = seq
+                .block_table
+                .iter()
+                .map(|&id| {
+                    i32::try_from(id).map_err(|_| {
+                        candle_core::Error::Msg(format!("block ID {id} exceeds i32 metadata range"))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
             block_tables.push(bt);
         }
 
@@ -262,7 +275,9 @@ impl EngineCore {
 
         let meta = build_decode_metadata(&context_lens, &block_tables, &slot_mapping);
         {
-            let mut lock = self.attn_meta.lock().unwrap();
+            let mut lock = self.attn_meta.lock().map_err(|_| {
+                candle_core::Error::Msg("attention metadata mutex is poisoned".to_string())
+            })?;
             *lock = meta;
         }
 
@@ -271,13 +286,29 @@ impl EngineCore {
     }
 }
 
+fn metadata_u32(value: usize, field: &str) -> Result<u32> {
+    u32::try_from(value)
+        .map_err(|_| candle_core::Error::Msg(format!("{field} {value} exceeds u32 metadata range")))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use candle_core::DType;
     use crate::engine::sequence::BLOCK_SIZE;
     use crate::Sampler;
+    use candle_core::DType;
+
+    #[test]
+    fn metadata_integer_conversion_rejects_truncation() {
+        assert_eq!(metadata_u32(0, "test position").unwrap(), 0);
+        assert_eq!(
+            metadata_u32(u32::MAX as usize, "test position").unwrap(),
+            u32::MAX
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert!(metadata_u32((u32::MAX as usize) + 1, "test position").is_err());
+    }
 
     /// A mock CausalLM that always returns hidden states where token 7
     /// (not the Qwen3 EOS token 151645) has the highest logit. This lets
@@ -336,7 +367,15 @@ mod tests {
     ) -> EngineCore {
         let model = Box::new(MockModel::new(42, device.clone()));
         let sampler = Sampler::new_with_seed(0);
-        EngineCore::new(scheduler, kv_mgr, model, sampler, paged_kv, attn_meta, device.clone())
+        EngineCore::new(
+            scheduler,
+            kv_mgr,
+            model,
+            sampler,
+            paged_kv,
+            attn_meta,
+            device.clone(),
+        )
     }
 
     fn make_fake_cache() -> Arc<Mutex<PagedKVCache>> {
@@ -347,6 +386,32 @@ mod tests {
 
     fn make_fake_meta() -> Arc<Mutex<AttnMetadata>> {
         Arc::new(Mutex::new(build_prefill_metadata(&[], &[], &[])))
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn poisoned_attention_metadata_returns_error_in_both_phases() {
+        for decode in [false, true] {
+            let device = Device::Cpu;
+            let mut scheduler = Scheduler::with_defaults();
+            let paged_kv = make_fake_cache();
+            let attn_meta = make_fake_meta();
+            let kv_mgr = KvCacheManager::new(10, BLOCK_SIZE, paged_kv.clone());
+            scheduler.add_request(vec![1, 2, 3], SamplingParams::default());
+            let mut engine = make_engine(scheduler, kv_mgr, paged_kv, attn_meta.clone(), &device);
+            if decode {
+                engine.step().unwrap();
+            }
+            assert!(std::panic::catch_unwind(move || {
+                let _guard = attn_meta.lock().unwrap();
+                panic!("poison attention metadata for error propagation test");
+            })
+            .is_err());
+            let error = engine.step().unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("attention metadata mutex is poisoned"));
+        }
     }
 
     /// T8 Q8.3 invariant #6: max_tokens boundary respected.
@@ -375,7 +440,10 @@ mod tests {
         let mut engine = make_engine(scheduler, kv_mgr, paged_kv, attn_meta, &device);
 
         let outputs = engine.step().unwrap();
-        assert!(outputs.is_empty(), "prefill should not finish with max_tokens=5");
+        assert!(
+            outputs.is_empty(),
+            "prefill should not finish with max_tokens=5"
+        );
 
         let mut total_outputs = 0;
         for step_num in 1..=10 {
@@ -391,7 +459,10 @@ mod tests {
             }
         }
 
-        assert!(!engine.is_running(), "engine should stop after max_tokens reached");
+        assert!(
+            !engine.is_running(),
+            "engine should stop after max_tokens reached"
+        );
     }
 
     #[test]

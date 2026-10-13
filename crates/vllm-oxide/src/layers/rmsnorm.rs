@@ -15,7 +15,7 @@
 //! it). When `residual` is `None`, the returned residual is the input
 //! itself (the residual stream starts at the embedding output).
 
-use candle_core::{D::Minus1, DType, Result, Tensor};
+use candle_core::{DType, Result, Tensor, D::Minus1};
 use candle_nn::VarBuilder;
 
 pub struct RMSNorm {
@@ -74,13 +74,19 @@ impl RMSNorm {
         let hidden_f = hidden_size as f64;
         let var = (sum_fp32.sqr()?.sum_keepdim(Minus1)? / hidden_f)?;
         let normed_fp32 = sum_fp32.broadcast_div(&(var + self.eps)?.sqrt()?)?;
-        let normed = normed_fp32.to_dtype(orig_dtype)?.broadcast_mul(&self.weight)?;
+        let normed = normed_fp32
+            .to_dtype(orig_dtype)?
+            .broadcast_mul(&self.weight)?;
         Ok((normed, new_residual))
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
 

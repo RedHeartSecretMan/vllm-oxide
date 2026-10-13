@@ -15,7 +15,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-These are CPU checks and do not require model weights, CUDA Toolkit or a GPU. They check compilation, formatting, lints and tests; they do not validate model output. The archive declares Rust 1.75 but has no pinned toolchain or GitHub CI workflow, so passing current-version CI is not evidence that the original source passes this historical minimum or all modern lint rules. Run and report actual results when changing it.
+These are CPU checks and do not require model weights, CUDA Toolkit or a GPU. They check compilation, formatting, lints and tests; they do not validate model output. The maintained archive pins Rust 1.94.0; the original Rust 1.75 declaration did not match the lockfile dependencies. This historical archive has no GitHub CI workflow, so record its local checks separately. Run and report actual results when changing it.
 
 Enable the library CUDA backend only for GPU builds. The historical CLI needs `--features vllm_oxide/cuda`; the core and comparison packages declare `cuda` themselves. The standalone research prototype always enables CUDA and is outside workspace checks.
 

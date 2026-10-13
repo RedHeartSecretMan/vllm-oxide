@@ -3,14 +3,35 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 PromptCategory = Literal["canonical", "regression"]
 OracleName = Literal["transformers", "vllm", "fake"]
+
+
+def validate_fixture_component(value: str) -> str:
+    """Keep identifiers portable and independent of filesystem path syntax."""
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value) is None
+    ):
+        raise ValueError("fixture identifiers must be 1 to 128 ASCII letters, digits, '_' or '-'")
+    reserved = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    if value.upper() in reserved:
+        raise ValueError("fixture identifiers must not be reserved device names")
+    return value
 
 
 class PromptSpec(BaseModel):
@@ -28,6 +49,13 @@ class PromptSpec(BaseModel):
     def is_batch(self) -> bool:
         """Whether this prompt exercises the batch/continuous-batching path."""
         return self.sub_prompts is not None and len(self.sub_prompts) > 1
+
+    @model_validator(mode="after")
+    def validate_batch_shape(self) -> Self:
+        validate_fixture_component(self.id)
+        if self.sub_prompts is not None and not 2 <= len(self.sub_prompts) <= 26:
+            raise ValueError("sub_prompts must contain 2 to 26 prompts")
+        return self
 
 
 class OracleVersions(BaseModel):
