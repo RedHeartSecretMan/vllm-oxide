@@ -67,6 +67,29 @@ Markers rehash the full declared capture/receipt/guard/setup dependency graph.
 Definition-only approval changes may bridge calibration to fresh measurements;
 execution-source changes require fresh calibration. Old markers are never inputs.
 
+For a new calibration after an implementation change, `collect` and `collect-aux`
+accept `--fresh-observation`. This mode permits only the frozen calibration owner
+inventory and remains nonaccepting; it does not inherit the prior backend's
+calibration approval. The worker uses the declared checkout and the invoking
+GPU-only Python environment.
+
+After the new calibration and source bindings are approved, the
+`bounded-telemetry-fresh-v1` supervision policy produces manifest schema 3. Supply
+`--measurement-repo` during collection and `--supervision-policy` during
+assembly; no retained-owner ledger is allowed. Every owner must carry a full
+schema-2 guard and original worker metadata. Source-role CPU gates, replay,
+calibration/fault provenance and the full artifact closure remain mandatory.
+The earlier recovery policy and manifest schema 2 still require their exact
+original retained ledger. See [ADR-0021](../../docs/adr/0021-fresh-supervised-release-evidence.md).
+
+Supervised `release_cli performance` also requires `--measurement-repo` and the
+selected policy's separate `measurement_benchmark_binary` hash/build binding.
+It executes that checkout and records performance wrapper schema 2; a legacy
+wrapper cannot satisfy this gate. The native memory monitor requests 10 ms
+samples, checks each actual interval against 50 ms before truncation, and records
+the observed maximum interval rounded upward. See
+[ADR-0022](../../docs/adr/0022-bind-performance-measurement-and-monitoring.md).
+
 Fixed replay records exactly T predictions for prompt+continuation[:t], with a
 separate predicted and advance token. Recording the final advance does not claim
 another forward. Controls advance only their own raw greedy predictions. Public
@@ -91,9 +114,12 @@ after seeing acceptance outcomes.
 The new CLI deliberately exposes no tag, release, upload or publication action.
 The old shell `authoritative`/`publish` stages and direct publication preparation
 stay disabled. The schema5 release adapter below consumes complete layered evidence.
-Numerical acceptance is not publication authority: performance evidence, release
-report, bundle/clean-consumer verification, final review and explicit publication
-authorization remain separate requirements. CPU tests do not establish GPU
+Numerical acceptance still requires subsequent performance evidence, the release
+report, local bundle/clean-consumer verification and final review. For the current
+acceptance run, retain all evidence locally under
+[ADR-0028](../../docs/adr/0028-local-release-evidence.md); no GitHub evidence upload
+or archive splitting is required. Optional publication is a separate operation
+requiring explicit independent authorization. CPU tests do not establish GPU
 numerical accuracy. Dense raw inventories need substantially more disk space than
 the legacy corpus; budget storage from the frozen row inventory before collection.
 
@@ -102,7 +128,11 @@ the legacy corpus; budget storage from the frozen row inventory before collectio
 `python -m golden_gen.release_cli --help` exposes separately invocable `cpu`,
 `performance`, `bundle`, `verify`, `report` and `publish` stages. All require
 `--repo-root` and a fresh external `--marker`. Failure writes no success marker.
-These are CPU-tested implementation paths, not evidence of GPU acceptance.
+These are CPU-tested implementation paths, not evidence of GPU acceptance. The
+current release acceptance uses `cpu`, `performance`, `bundle`, `verify` and
+`report`, followed by full candidate review. It does not run `publish`; the
+complete original evidence and both bundle files must remain on durable local
+storage rather than relying only on a temporary run directory.
 
 - `cpu`: `--output` is a fresh log directory; supply the development `--python`,
   prepared `--worker-python`, CPU `--rust-binary` (the verify-bundle executable),
@@ -121,7 +151,9 @@ These are CPU-tested implementation paths, not evidence of GPU acceptance.
   `--authoritative-marker`, `--performance-evidence` and `--cpu-evidence`.
   All four evidence entrypoints must be beneath the same run root. The adapter
   snapshots every relevant source's selected Definition bytes without changing
-  their original identities, recomputes the evidence and emits the two assets.
+  their original identities, recomputes the complete evidence and emits exactly
+  local `manifest.json` and `goldens-v0.2.tar.gz`. It never splits or drops files
+  to meet a remote upload limit.
 - `verify`: use `--bundle-dir`, `--cache-dir` and CPU `--rust-binary`. It runs
   Rust and Python transport readers on the actual two files, reconstructs the
   closure in a private fresh cache, and re-evaluates raw semantics and performance
@@ -130,7 +162,8 @@ These are CPU-tested implementation paths, not evidence of GPU acceptance.
 - `report`: the same verification arguments plus a fresh external `--output`
   produce Markdown. Commit those exact bytes at `docs/releases/goldens-v0.2.md`
   in the evidence-only candidate; do not add the report to the two asset files.
-- `publish`: the verification arguments plus `--review`, `--review-base` and
+- `publish` (optional manual GitHub operation): the verification arguments plus
+  `--review`, `--review-base` and
   independent `VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2` authority are required.
   The review JSON uses protocol `layered-accuracy-v1`, schema1,
   kind `full_candidate_review`, exact `base`, `candidate: {commit,tree}` and
@@ -139,17 +172,22 @@ These are CPU-tested implementation paths, not evidence of GPU acceptance.
   review JSON and require `unresolved_findings: []`. The adapter recomputes the
   bundle and report, refuses existing/partial remote state, creates one direct
   tag and release, uploads exactly two assets and validates downloaded bytes.
-  Failed remote operations are never automatically overwritten or repaired.
+  Before any remote write it checks each actual asset is strictly smaller than
+  2 GiB. Failed remote operations are never automatically overwritten or repaired.
+  Local acceptance neither requires nor authorizes this operation.
 
-Release schema5 bounds are 16 MiB per manifest, 50,000 artifacts, 8 GiB minus
-one byte per artifact (the USTAR field limit), and 1 TiB total extracted bytes.
+Release schema5 local bounds are 16 MiB per manifest, 50,000 artifacts, 8 GiB
+minus one byte per artifact (the USTAR field limit), 1 TiB total extracted bytes
+and 2 TiB compressed archive bytes. The 2-TiB bound applies to Python packing
+and Python/Rust local installation; it preserves finite bounded reads.
 Artifact filenames are `artifact-NNNNNN.bin` in sorted ASCII logical-path order;
 identical bytes at different logical paths remain distinct records. Consumers
 enforce canonical gzip/USTAR headers, exact lengths/hashes, bounded streaming,
 complete inventories and immutable no-replace installation. Disk capacity is
-checked before packing/extraction. GitHub's per-asset limit, verified on
-2026-09-08, is strictly less than 2 GiB; equal or larger assets require a capacity
-decision, never silent splitting, evidence omission or encoding changes.
+checked before packing/extraction. GitHub's strictly-less-than-2-GiB per-asset
+limit is enforced only by optional `publish`, not `bundle`, `verify` or `report`.
+Local capacity or format-bound failures still reject the operation; no silent
+splitting, evidence omission or encoding changes are permitted.
 
 The committed registry/budgets remain authoritative. Pending budgets or any
 missing source, owner, replay, raw telemetry, CPU gate or original evidence
@@ -157,6 +195,15 @@ reject the new release path. Final candidate review and publication authorizatio
 stay outside the archive to avoid self-reference. Tests use synthetic evidence
 and injected transports; they never establish Qwen GPU correctness or publication
 permission.
+
+For the current renewal, keep calibration `2dc9445` unchanged. Measurement X
+may add only the approved policy, its supervision digest pointer, Definition index
+and approval ADR. Apply the local transport repair solely to the separately
+frozen supervisor/evaluator Y, preserving protected measurement Git objects and
+all reference/mathematical checks. Both sources need complete CPU evidence and
+review. This routing does not broaden calibration-to-measurement executable
+equivalence, reuse calibration owners for authority or approve the new 747-owner
+confirmation; see the [supervision contract](../../docs/validation/layered-supervision-contract.md).
 
 ## Legacy workflow prerequisites (historical)
 
@@ -350,26 +397,26 @@ calibration evidence; the Transformers output remains the Reference oracle targe
 
 ## Golden asset bundle contract
 
-The GitHub Release asset set is exactly the local bundle's two files. GitHub's
-automatic source archives are not API release assets for this contract, and
-individual `.safetensors` files must not be uploaded. Publication is available
-only through the separately authorized `publish` stage after the reviewed
-candidate and report are frozen:
-
-```bash
-VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2 \
-VLLM_OXIDE_GOLDEN_CANDIDATE=<reviewed-commit> \
-./tools/validate-release.sh publish \
-  /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id>
-```
+The current acceptance retains exactly local `manifest.json` and
+`goldens-v0.2.tar.gz`, preserving the complete raw evidence and source topology.
+The schema5 `bundle` / `verify` / `report` stages above implement the active
+workflow. The older shell publication example is historical and its publication
+entrypoint stays disabled.
 
 The archive is gzip-compressed USTAR. It contains every and only the declared
-fixture filename at its root, sorted by ASCII filename. Every entry is a regular
+artifact filename at its root, sorted by ASCII filename. Every entry is a regular
 file with mode `0644`, uid/gid `0`, empty owner/group names, and mtime `0`; the
 gzip header has mtime `0` and no source filename. The manifest is never inside
-the archive. A clean consumer downloads the exact two assets, verifies schema,
-versions, archive and fixture checksums, and atomically installs them under
+the archive. A fresh local consumer verifies the exact two files, schema,
+versions, archive and artifact checksums, source bindings and complete raw
+semantics, and atomically installs verified content under
 `<cache-root>/goldens-v0.2/<archive-sha256>`.
+
+If independently requested and authorized later, manual `release_cli publish`
+checks the remote per-asset capacity before publishing these same two files.
+GitHub's automatic source archives are not API release assets; individual
+`.safetensors` uploads or split archives are outside this contract. This release
+acceptance does not run golden publication.
 
 ## File Layout
 

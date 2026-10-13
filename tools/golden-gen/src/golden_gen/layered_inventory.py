@@ -91,7 +91,11 @@ def frozen_owner_inventory(registry: Registry, *, authoritative: bool) -> list[d
                     )
         public_groups.add(ids[0])
     inventory = []
-    splits = ("development", "calibration", "acceptance") if authoritative else ("calibration",)
+    splits = (
+        ("development", "calibration", "acceptance", "confirmation")
+        if authoritative
+        else ("calibration",)
+    )
     for split in splits:
         groups = [g for g in registry.numerical_cases if g.split == split]
         public = [

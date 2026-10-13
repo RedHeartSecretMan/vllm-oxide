@@ -168,7 +168,7 @@ def _run_guarded(
     ):
         raise ValueError("invalid stage deadline")
     if supervision is not None:
-        if supervision.get("role") == "measurement_owner":
+        if supervision.get("role") in ("measurement_owner", "benchmark_owner"):
             expected = {
                 "role",
                 "measurement_source",
@@ -185,6 +185,12 @@ def _run_guarded(
                 or env.get("PYTHONDONTWRITEBYTECODE") != invocation.get("pythondontwritebytecode")
             ):
                 raise ValueError("actual worker invocation differs from its supervision binding")
+            if supervision["role"] == "benchmark_owner" and (
+                timeout_seconds is None
+                or not isinstance(invocation.get("candidate_binary"), dict)
+                or command[0] != invocation["candidate_binary"].get("path")
+            ):
+                raise ValueError("benchmark requires its bound binary and independent deadline")
         elif supervision.get("role") == "auxiliary_stage":
             expected = {"role", "stage_source", "stage_invocation"}
             if timeout_seconds is None:

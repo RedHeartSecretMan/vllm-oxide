@@ -100,8 +100,8 @@ def require_available_ram() -> None:
     raise RuntimeError("MemAvailable is unavailable; refusing release work")
 
 
-def _command(*args: str) -> str:
-    result = subprocess.run(args, check=False, capture_output=True, text=True)
+def _command(*args: str, env: Mapping[str, str] | None = None) -> str:
+    result = subprocess.run(args, check=False, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         raise ValueError(f"{args[0]} preflight failed: {result.stderr.strip()}")
     return result.stdout.strip()
@@ -275,6 +275,7 @@ def collect_release_runtime(model_dir: Path, repo_root: Path) -> RuntimeInfo:
         "--python",
         sys.executable,
         "--no-python-downloads",
+        env={**os.environ, "UV_PROJECT_ENVIRONMENT": sys.prefix},
     )
     expected_hashes = {
         "config.json": MODEL_CONFIG_SHA256,

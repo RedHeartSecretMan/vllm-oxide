@@ -15,6 +15,8 @@ from golden_gen.layered_publication import GitHubTransport, publish
 from golden_gen.release_adapter import prepare_bundle, render_report, verify_bundle
 from golden_gen.release_cpu import collect_cpu
 from golden_gen.release_performance import collect_performance
+from golden_gen.release_roles import FreezeBinding
+from golden_gen.release_transport import Entrypoints
 
 
 def _write_report(path: Path, text: str) -> None:
@@ -62,6 +64,7 @@ def main() -> None:
         "target-dir",
         "model-dir",
         "benchmark-binary",
+        "measurement-repo",
         "authoritative-manifest",
         "authoritative-marker",
         "performance-evidence",
@@ -69,10 +72,12 @@ def main() -> None:
         "bundle-dir",
         "cache-dir",
         "review",
+        "source-role-freeze",
     ):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--marker", type=Path, required=True)
     parser.add_argument("--review-base")
+    parser.add_argument("--source-role-freeze-sha256")
     args = parser.parse_args()
 
     def required(*names: str) -> None:
@@ -80,6 +85,15 @@ def main() -> None:
             parser.error("missing required stage arguments: " + ", ".join(names))
 
     try:
+        if (args.source_role_freeze is None) != (args.source_role_freeze_sha256 is None):
+            raise ValueError("source-role freeze requires its independently approved expected hash")
+        freeze = (
+            FreezeBinding(args.source_role_freeze, args.source_role_freeze_sha256)
+            if args.source_role_freeze is not None
+            else None
+        )
+        if freeze is not None and args.action not in ("performance", "bundle", "verify", "report"):
+            raise ValueError("source-role routing is limited to the local release stages")
         if args.marker.exists() or args.marker.is_symlink():
             raise FileExistsError("stage completion marker must be fresh")
         if args.marker.resolve().is_relative_to(args.repo_root.resolve()):
@@ -100,12 +114,31 @@ def main() -> None:
             files = [path]
         elif args.action == "performance":
             required("output", "model_dir", "benchmark_binary", "authoritative_manifest")
+            performance_entries = None
+            if freeze is not None:
+                required("run_dir", "authoritative_marker", "cpu_evidence", "measurement_repo")
+                performance_entries = Entrypoints(
+                    authoritative_manifest=args.authoritative_manifest.relative_to(
+                        args.run_dir
+                    ).as_posix(),
+                    authoritative_marker=args.authoritative_marker.relative_to(
+                        args.run_dir
+                    ).as_posix(),
+                    performance=(args.output / "evidence.json")
+                    .relative_to(args.run_dir)
+                    .as_posix(),
+                    cpu_gates=args.cpu_evidence.relative_to(args.run_dir).as_posix(),
+                )
             path = collect_performance(
                 args.repo_root,
                 args.output,
                 args.model_dir,
                 args.benchmark_binary,
                 args.authoritative_manifest,
+                measurement_repo=args.measurement_repo,
+                freeze=freeze,
+                evidence_root=args.run_dir,
+                entrypoints=performance_entries,
             )
             result = dict(accepting=False, recorded_performance=str(path))
             files = [path]
@@ -127,13 +160,13 @@ def main() -> None:
                     "cpu_gates": "cpu_evidence",
                 }.items()
             }
-            path = prepare_bundle(args.repo_root, args.run_dir, args.output, entries)
+            path = prepare_bundle(args.repo_root, args.run_dir, args.output, entries, freeze=freeze)
             result = dict(accepting=False, bundle=str(path))
             files = [path / "manifest.json", path / "goldens-v0.2.tar.gz"]
         elif args.action in ("verify", "report"):
             required("bundle_dir", "cache_dir", "rust_binary")
             verified = verify_bundle(
-                args.repo_root, args.bundle_dir, args.cache_dir, args.rust_binary
+                args.repo_root, args.bundle_dir, args.cache_dir, args.rust_binary, freeze=freeze
             )
             files = [args.bundle_dir / "manifest.json", args.bundle_dir / "goldens-v0.2.tar.gz"]
             if args.action == "report":

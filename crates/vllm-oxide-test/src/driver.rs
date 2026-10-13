@@ -77,8 +77,8 @@ where
         }
         match compare(&case) {
             Ok(comparison) => {
-                let passed = comparison.l1.as_ref().map_or(true, |result| result.passed)
-                    && comparison.l2.as_ref().map_or(true, |result| result.passed);
+                let passed = comparison.l1.as_ref().is_none_or(|result| result.passed)
+                    && comparison.l2.as_ref().is_none_or(|result| result.passed);
                 if let Some(result) = comparison.l1 {
                     report.l1_results.push(result);
                 }

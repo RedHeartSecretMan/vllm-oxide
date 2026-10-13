@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -71,7 +72,7 @@ class AuxiliaryEntry(BaseModel):
 class LayeredManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol: Literal["layered-accuracy-v1"]
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     source: dict[str, str]
     registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     policy_sha256: str | None = None
@@ -90,18 +91,17 @@ class LayeredManifest(BaseModel):
 
     @model_validator(mode="after")
     def source_roles(self) -> Self:
-        roles = (
-            self.evaluator_source,
-            self.supervision_source,
-            self.supervision_policy,
-            self.retained_owner_ledger,
-        )
-        if self.schema_version == 2:
+        roles = (self.evaluator_source, self.supervision_source, self.supervision_policy)
+        if self.schema_version in (2, 3):
             if self.purpose != "authoritative" or any(role is None for role in roles):
                 raise ValueError("supervised manifest requires all source roles and dependencies")
             if self.evaluator_source != self.supervision_source:
                 raise ValueError("evaluator/supervisor sources differ")
-        elif any(role is not None for role in roles):
+            if self.schema_version == 2 and self.retained_owner_ledger is None:
+                raise ValueError("retained manifest requires its original ledger")
+            if self.schema_version == 3 and self.retained_owner_ledger is not None:
+                raise ValueError("fresh manifest cannot retain legacy owners")
+        elif any(role is not None for role in (*roles, self.retained_owner_ledger)):
             raise ValueError("legacy manifest cannot declare new source roles")
         return self
 
@@ -163,10 +163,17 @@ def _receipt(
             evidence.get("deterministic_algorithms") is not True
             or evidence.get("warn_only") is not False
             or evidence.get("attention_backend") != "SDPBackend.MATH"
+            or evidence.get("allow_bf16_reduced_precision_reduction") is not False
+            or evidence.get("allow_tf32") is not False
         ):
-            raise ValueError("reference lacks actual deterministic MATH backend evidence")
+            raise ValueError("reference lacks deterministic MATH and FP32-reduction evidence")
     elif engine == "baseline":
-        from golden_gen.worker_determinism import BaselineWorkerEvidence
+        from golden_gen.worker_determinism import (
+            BaselineSchedulingEvidence,
+            BaselineWorkerEvidence,
+        )
+
+        scheduling = BaselineSchedulingEvidence.model_validate(evidence.get("scheduling"))
 
         states = [
             BaselineWorkerEvidence.model_validate(record)
@@ -176,6 +183,9 @@ def _receipt(
             len(states) != 2
             or [s.phase for s in states] != ["ready", "complete"]
             or states[0].pid != states[1].pid
+            or states[0].pid != scheduling.worker_pid
+            or type(value.get("driver_pid")) is not int
+            or scheduling.driver_pid != value.get("driver_pid")
             or any(s.expected_attention_layers != 28 for s in states)
         ):
             raise ValueError("baseline worker lifecycle/backend evidence is incomplete")
@@ -222,6 +232,88 @@ def evaluate_manifest(repo: Path, manifest_path: Path, *, authoritative: bool) -
             operator_checks=[],
             numerical_checks=[],
             behavior_checks=[],
+        )
+
+
+def _supervision_digest_binding_only(repo: Path, before: str, after: str) -> bool:
+    """Allow only a verified NUM-policy pointer update, never execution settings.
+
+    Read both measured revisions from Git, not the evaluator's working policy.
+    This lets an approved measured descendant keep its policy hashes coherent
+    without reclassifying arbitrary supervision changes as calibration reuse.
+    """
+    from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
+
+    def read(revision: str, path: str) -> bytes:
+        return subprocess.check_output(["git", "-C", str(repo), "show", f"{revision}:{path}"])
+
+    remaining = []
+    modes = []
+    for revision in (before, after):
+        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            return False
+        entry = subprocess.check_output(
+            ["git", "-C", str(repo), "ls-tree", revision, "--", SUPERVISION_POLICY_PATH]
+        ).split()
+        if len(entry) != 4 or entry[0] not in (b"100644", b"100755") or entry[1] != b"blob":
+            return False
+        modes.append(entry[0])
+
+        try:
+            policy = json.loads(read(revision, SUPERVISION_POLICY_PATH))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(policy, dict):
+            return False
+        expected = hashlib.sha256(read(revision, POLICY_PATH)).hexdigest()
+        if policy.pop("numerical_policy_sha256", None) != expected:
+            return False
+        # Canonical JSON retains distinctions such as false versus 0 that
+        # Python dictionary equality would otherwise hide.
+        try:
+            remaining.append(json.dumps(policy, sort_keys=True, allow_nan=False))
+        except ValueError:
+            return False
+    return modes[0] == modes[1] and remaining[0] == remaining[1]
+
+
+def _require_calibration_definition_changes(repo: Path, before: str, after: str) -> None:
+    """Keep measured execution identical while permitting bound policy metadata."""
+    changed = (
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                before,
+                after,
+                "--",
+            ]
+        )
+        .decode()
+        .split("\0")
+    )
+    allowed = {
+        REGISTRY_PATH,
+        POLICY_PATH,
+        "CONTEXT.md",
+        ".dag/definition-index.json",
+        ".dag/definitions/v0.2.0-github.json",
+    }
+    from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
+
+    if SUPERVISION_POLICY_PATH in changed and _supervision_digest_binding_only(repo, before, after):
+        allowed.add(SUPERVISION_POLICY_PATH)
+    if any(
+        path and path not in allowed and not (path.startswith("docs/adr/") and path.endswith(".md"))
+        for path in changed
+    ):
+        raise ValueError(
+            "execution source changed since approved calibration; fresh calibration required"
         )
 
 
@@ -277,37 +369,7 @@ def _calibration_provenance(
         check=True,
         capture_output=True,
     )
-    changed = (
-        subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "diff",
-                "--name-only",
-                "-z",
-                old["commit"],
-                manifest.source["commit"],
-                "--",
-            ]
-        )
-        .decode()
-        .split("\0")
-    )
-    allowed = {
-        REGISTRY_PATH,
-        POLICY_PATH,
-        "CONTEXT.md",
-        ".dag/definition-index.json",
-        ".dag/definitions/v0.2.0-github.json",
-    }
-    if any(
-        path and path not in allowed and not (path.startswith("docs/adr/") and path.endswith(".md"))
-        for path in changed
-    ):
-        raise ValueError(
-            "execution source changed since approved calibration; fresh calibration required"
-        )
+    _require_calibration_definition_changes(repo, old["commit"], manifest.source["commit"])
     recorded = _read(root, manifest.calibration_evidence)
     if (
         recorded.get("source") != old
@@ -407,7 +469,7 @@ def _evaluate(
     from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
     from golden_gen.supervision import manifest_roles
 
-    if manifest.schema_version == 2:
+    if manifest.schema_version in (2, 3):
         if source_override is not None or not authoritative:
             raise ValueError("supervised manifests cannot override evaluator source")
         roles = manifest_roles(
@@ -415,7 +477,7 @@ def _evaluate(
         )
         source = manifest.source
     elif authoritative and source_override is None and (repo / SUPERVISION_POLICY_PATH).exists():
-        raise ValueError("current authoritative evaluation requires supervised manifest schema 2")
+        raise ValueError("current authoritative evaluation requires a supervised manifest")
     if (
         manifest.source != source
         or manifest.registry_sha256 != registry_sha
@@ -780,6 +842,7 @@ def _evaluate(
     result.update(
         source=source,
         registry_sha256=registry_sha,
+        confirmation_cohorts=[cohort.model_dump() for cohort in registry.confirmation_cohorts],
         policy_sha256=policy_sha,
         manifest_sha256=sha(manifest_path),
         coverage=coverage,

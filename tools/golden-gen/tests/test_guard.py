@@ -11,6 +11,8 @@ import pytest
 
 from golden_gen.guard import run_guarded
 
+pytestmark = pytest.mark.usefixtures("controlled_host_ram")
+
 
 def test_active_guard_stops_child_when_ram_drops_and_records_before_after(tmp_path):
     probes = iter([{"available_ram_bytes": 32 * 1024**3}, {"available_ram_bytes": 1024}])

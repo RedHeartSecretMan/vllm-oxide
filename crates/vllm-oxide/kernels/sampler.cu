@@ -109,6 +109,10 @@ __global__ void greedy_argmax_kernel(
     __shared__ float scores[kThreads];
     __shared__ uint32_t tokens[kThreads];
 
+    // One block per row. The mixed-path caller still passes a single row
+    // with an explicit output offset; plain greedy batches share one launch.
+    logits += static_cast<size_t>(blockIdx.x) * vocab_size;
+    row += blockIdx.x;
     float best_score = -CUDART_INF_F;
     uint32_t best_token = UINT32_MAX;
     for (uint32_t token = threadIdx.x; token < vocab_size; token += blockDim.x) {
@@ -363,6 +367,31 @@ extern "C" int vllm_oxide_sample_f32(
     } while (false)
 
     const uint32_t history_len = history_offsets_host[batch_size];
+    bool plain_greedy_batch = true;
+    for (uint32_t row = 0; row < batch_size; ++row) {
+        const float temperature = temperatures[row];
+        const uint32_t top_k = top_ks[row];
+        const float top_p = top_ps[row];
+        if (isnan(temperature) || temperature < 0.0f || top_k == 0 || top_k > vocab_size ||
+            !isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f) {
+            status = cudaErrorInvalidValue;
+            // Rust performs the authoritative synchronous per-row validation.
+            // This defensive guard must not claim an origin row: runtime APIs
+            // may surface an earlier asynchronous failure here.
+            goto finish;
+        }
+        plain_greedy_batch = plain_greedy_batch &&
+            (temperature == 0.0f || top_k == 1) &&
+            presence_penalties[row] == 0.0f && frequency_penalties[row] == 0.0f &&
+            repetition_penalties[row] == 0.0f;
+    }
+    if (plain_greedy_batch) {
+        greedy_argmax_kernel<<<batch_size, kThreads, 0, stream>>>(
+            logits, vocab_size, selected_tokens, 0);
+        TRY_STAGE(cudaGetLastError(), kGreedy);
+        goto finish;
+    }
+
     if (history_len > 0) {
         if (history_tokens_host == nullptr || history_counts_host == nullptr ||
             history_tokens_device == nullptr || history_counts_device == nullptr) {
@@ -392,17 +421,6 @@ extern "C" int vllm_oxide_sample_f32(
         const float temperature = temperatures[row];
         const uint32_t top_k = top_ks[row];
         const float top_p = top_ps[row];
-        if (isnan(temperature) || temperature < 0.0f || top_k == 0 || top_k > vocab_size ||
-            !isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f) {
-            status = cudaErrorInvalidValue;
-            *failed_stage = 0;
-            // Rust performs the authoritative synchronous per-row validation.
-            // This defensive CUDA-side guard must not claim an origin row:
-            // runtime APIs may surface an earlier asynchronous failure here.
-            *failed_row = -1;
-            goto finish;
-        }
-
         const float* row_logits = logits + static_cast<size_t>(row) * vocab_size;
         const uint32_t history_begin = history_offsets_host[row];
         const uint32_t row_history_len = history_offsets_host[row + 1] - history_begin;

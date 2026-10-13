@@ -1,12 +1,10 @@
-//! GPU-owning benchmark orchestration and device-wide memory monitoring.
+//! GPU-owning benchmark with a record-only direct NVML memory method.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -20,6 +18,10 @@ use super::{
 use crate::measurement::{validate_measurement_identity, validate_running_binary};
 use crate::prompts::PromptEntry;
 
+#[path = "nvml_monitor.rs"]
+mod nvml_monitor;
+use nvml_monitor::ActiveMemoryMonitor;
+
 fn ensure_no_unrelated_compute_processes() -> Result<()> {
     let output = Command::new("nvidia-smi")
         .args(["--query-compute-apps=pid", "--format=csv,noheader,nounits"])
@@ -31,97 +33,97 @@ fn ensure_no_unrelated_compute_processes() -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let pids = String::from_utf8(output.stdout)
-        .context("nvidia-smi process output is not UTF-8")?
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| *pid != std::process::id())
-        .collect::<Vec<_>>();
+    let pids = parse_compute_processes(
+        &String::from_utf8(output.stdout).context("nvidia-smi process output is not UTF-8")?,
+        std::process::id(),
+    )?;
     if !pids.is_empty() {
         bail!("unrelated CUDA compute processes are active: {pids:?}");
     }
     Ok(())
 }
 
-struct ActiveMemoryMonitor {
-    child: Child,
-    reader: Option<thread::JoinHandle<Result<Vec<MemorySample>>>>,
-}
-
-impl ActiveMemoryMonitor {
-    fn start() -> Result<Self> {
-        let mut child = Command::new("nvidia-smi")
-            .args([
-                "--query-gpu=memory.used",
-                "--format=csv,noheader,nounits",
-                "--id=0",
-                "--loop-ms=50",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("starting 50 ms GPU memory monitor")?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("GPU memory monitor stdout is unavailable"))?;
-        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-        let reader = thread::spawn(move || -> Result<Vec<MemorySample>> {
-            let mut started = None;
-            let mut samples = Vec::new();
-            for line in BufReader::new(stdout).lines() {
-                let line = line.context("reading GPU memory monitor output")?;
-                let used_mib = line
-                    .trim()
-                    .parse::<u64>()
-                    .with_context(|| format!("parsing GPU memory sample {line:?}"))?;
-                let baseline = started.get_or_insert_with(Instant::now);
-                let elapsed = u64::try_from(baseline.elapsed().as_millis())
-                    .context("GPU memory monitor duration exceeds u64")?;
-                samples.push(MemorySample {
-                    elapsed_ms: elapsed,
-                    used_mib,
-                });
-                if samples.len() == 1 {
-                    let _ = ready_sender.send(());
-                }
-            }
-            Ok(samples)
-        });
-        let monitor = Self {
-            child,
-            reader: Some(reader),
-        };
-        ready_receiver
-            .recv_timeout(Duration::from_secs(5))
-            .context("GPU memory monitor did not produce a post-initialization baseline")?;
-        Ok(monitor)
-    }
-
-    fn finish(mut self) -> Result<MemoryMonitorEvidence> {
-        if self.child.try_wait()?.is_some() {
-            bail!("GPU memory monitor exited before the final synchronization");
+fn parse_compute_processes(output: &str, own_pid: u32) -> Result<Vec<u32>> {
+    let mut others = Vec::new();
+    for line in output.lines() {
+        let pid = line
+            .trim()
+            .parse::<u32>()
+            .context("malformed CUDA compute-process identity")?;
+        if pid == 0 {
+            bail!("CUDA compute-process identity must be positive");
         }
-        self.child.kill().context("stopping GPU memory monitor")?;
-        self.child
-            .wait()
-            .context("waiting for GPU memory monitor")?;
-        let samples = self
-            .reader
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("GPU memory reader missing"))?
-            .join()
-            .map_err(|_| anyhow::anyhow!("GPU memory monitor reader panicked"))??;
-        MemoryMonitorEvidence::validate(50, false, &[], samples)
+        if pid != own_pid {
+            others.push(pid);
+        }
+    }
+    Ok(others)
+}
+
+fn observed_interval(gap: Duration) -> Result<u64> {
+    if gap.is_zero() || gap > Duration::from_millis(50) {
+        bail!("actual GPU memory sampling interval must be positive and at most 50 ms");
+    }
+    u64::try_from(gap.as_nanos().div_ceil(1_000_000)).context("GPU memory interval exceeds u64")
+}
+
+struct StageJournal {
+    path: PathBuf,
+    origin: Instant,
+    events: Vec<serde_json::Value>,
+    completed: bool,
+    saved: bool,
+}
+
+impl StageJournal {
+    fn new(directory: &Path) -> Result<Self> {
+        let path = directory.join("benchmark-stages.json");
+        if path.exists() || path.is_symlink() {
+            bail!("benchmark stage journal must be fresh");
+        }
+        Ok(Self {
+            path,
+            origin: Instant::now(),
+            events: Vec::with_capacity(64),
+            completed: false,
+            saved: false,
+        })
+    }
+
+    fn mark(&mut self, call: &str, phase: &'static str) -> Result<()> {
+        if self.events.len() == 64 {
+            bail!("bounded benchmark stage journal exhausted");
+        }
+        self.events.push(serde_json::json!({"call_id":call,"phase":phase,"elapsed_ns":self.origin.elapsed().as_nanos()}));
+        Ok(())
+    }
+
+    fn persist(&mut self) -> Result<()> {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)?;
+        serde_json::to_writer_pretty(
+            &mut output,
+            &serde_json::json!({
+                "protocol":"memory-method-stage-record-v1","schema_version":1,"method":"direct-nvml-v1","accepting":false,"record_only":true,
+                "clock":"shared Rust Instant origin with every NVML monitor trace",
+                "completed":self.completed,"events":self.events,"build_source_id":env!("VLLM_OXIDE_BUILD_SOURCE_ID")
+            }),
+        )?;
+        output.write_all(b"\n")?;
+        output.sync_all()?;
+        self.saved = true;
+        Ok(())
     }
 }
 
-impl Drop for ActiveMemoryMonitor {
+impl Drop for StageJournal {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        if !self.saved {
+            if let Err(error) = self.persist() {
+                eprintln!("NVML_MEMORY_STAGE_PRESERVATION_FAILURE {error:#}");
+            }
         }
     }
 }
@@ -187,16 +189,19 @@ pub fn run_release_benchmark(
     if output_path.exists() || output_path.is_symlink() {
         bail!("benchmark output must be a fresh non-existing path");
     }
+    let mut stages = StageJournal::new(output_dir)?;
     let mut workloads = BTreeMap::new();
     for workload in approved_workloads() {
         let workload_inputs = workload_prompts(&workload, prompts)?;
         let params = fixed_sampling_params(workload_inputs.len());
 
         ensure_no_unrelated_compute_processes()?;
+        stages.mark(workload.id, "discarded_warm_llm_new_entered")?;
         let mut throwaway = LLM::new(
             Source::Local(model_path.to_path_buf()),
             fixed_engine_options(),
         )?;
+        stages.mark(workload.id, "discarded_warm_llm_new_returned")?;
         let throwaway_outputs = throwaway.generate(&workload_inputs, &params)?;
         if throwaway_outputs
             .iter()
@@ -204,7 +209,9 @@ pub fn run_release_benchmark(
         {
             bail!("throwaway benchmark run did not produce exactly 64 tokens per request");
         }
+        stages.mark(workload.id, "discarded_warm_generate_completed")?;
         drop(throwaway);
+        stages.mark(workload.id, "discarded_warm_dropped")?;
         let discarded_warm_outputs = throwaway_outputs
             .iter()
             .map(|o| {
@@ -216,18 +223,42 @@ pub fn run_release_benchmark(
         let mut repetitions = Vec::new();
         for repetition in 1..=workload.measured_repetitions {
             ensure_no_unrelated_compute_processes()?;
+            let call_id = format!("{}-repetition-{repetition}", workload.id);
+            stages.mark(&call_id, "measured_llm_new_entered")?;
             let mut llm = LLM::new(
                 Source::Local(model_path.to_path_buf()),
                 fixed_engine_options(),
             )?;
             let destination = format!("{}-repetition-{repetition}.telemetry.json", workload.id);
-            let call_id = format!("{}-repetition-{repetition}", workload.id);
-            let monitor = ActiveMemoryMonitor::start()?;
+            stages.mark(&call_id, "measured_llm_new_returned")?;
+            let mut monitor =
+                ActiveMemoryMonitor::start(output_dir, &call_id, stages.origin, &measurement)?;
             let guard = BenchmarkEnvironmentGuard::install(output_dir, &destination, &call_id)?;
+            stages.mark(&call_id, "measured_generate_entered")?;
+            monitor.mark("generate_invoked_ns");
             let outputs = llm.generate(&workload_inputs, &params);
+            monitor.mark("generate_returned_ns");
+            stages.mark(&call_id, "measured_generate_returned")?;
+            if outputs.is_ok() {
+                // LLM::generate synchronizes every benchmark step end before returning.
+                monitor.mark("generate_succeeded_after_internal_final_step_sync_ns");
+                stages.mark(
+                    &call_id,
+                    "measured_generate_succeeded_after_internal_final_step_sync",
+                )?;
+            }
             drop(guard);
-            let memory = monitor.finish()?;
-            let outputs = outputs?;
+            let memory = monitor.finish();
+            let (outputs, memory) = match (outputs, memory) {
+                (Ok(outputs), Ok(memory)) => (outputs, memory),
+                (Err(primary), Err(secondary)) => {
+                    return Err(primary.context(format!(
+                        "generate primary failure; monitor secondary failure: {secondary:#}"
+                    )))
+                }
+                (Err(error), _) | (_, Err(error)) => return Err(error),
+            };
+            stages.mark(&call_id, "final_memory_sample_and_worker_cleanup_completed")?;
             if outputs.len() != workload_inputs.len()
                 || outputs
                     .iter()
@@ -263,6 +294,8 @@ pub fn run_release_benchmark(
             aggregate_workload(repetitions, discarded_warm_outputs)?,
         );
     }
+    stages.completed = true;
+    stages.persist()?;
     let evidence = BenchmarkRunEvidence {
         protocol: "layered-accuracy-v1",
         schema_version: 1,
@@ -282,4 +315,31 @@ pub fn run_release_benchmark(
     output.write_all(b"\n")?;
     output.sync_all()?;
     Ok(evidence)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_compute_process_output_cannot_hide_another_owner() {
+        assert!(parse_compute_processes("N/A\n", 10).is_err());
+        assert!(parse_compute_processes("10\nbad PID\n", 10).is_err());
+        assert!(parse_compute_processes("0\n", 10).is_err());
+        assert_eq!(parse_compute_processes("10\n20\n", 10).unwrap(), [20]);
+        assert!(parse_compute_processes("", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sub_millisecond_polling_overruns_are_rejected_before_rounding() {
+        assert_eq!(observed_interval(Duration::from_millis(50)).unwrap(), 50);
+        assert_eq!(
+            observed_interval(Duration::from_micros(10_434)).unwrap(),
+            11
+        );
+        assert!(observed_interval(Duration::from_micros(50_001)).is_err());
+        assert!(observed_interval(Duration::from_micros(50_429)).is_err());
+        assert!(observed_interval(Duration::ZERO).is_err());
+    }
 }

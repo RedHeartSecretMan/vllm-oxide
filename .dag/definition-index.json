@@ -7,7 +7,7 @@
     },
     {
       "path": "CONTEXT.md",
-      "blob_oid": "37a36ecebc055b5bd08e43d2527ca3800b4e2fe1"
+      "blob_oid": "cb761fc9f4efddcb6329b761ec5b15c9f07b9ba4"
     },
     {
       "path": "docs/adr/0001-parametric-parallel-layers.md",
@@ -91,31 +91,71 @@
     },
     {
       "path": "docs/validation/layered-accuracy-budgets.json",
-      "blob_oid": "046c0ce6dd73c172ac762f295f0d44ba6e6e6464"
+      "blob_oid": "5d270aa98149dfabb2d5bae0281549b0369cb597"
     },
     {
       "path": "docs/validation/layered-accuracy-cases.json",
-      "blob_oid": "17b60660e538af2a24a7461a32ea80fc32031638"
+      "blob_oid": "eb5fd882b487f6a24d50bb76fda5828b1de47941"
     },
     {
       "path": "docs/validation/layered-accuracy-contract.md",
-      "blob_oid": "0082eeb3f957ee8176615ae79987dd25366b39a2"
+      "blob_oid": "5888afb610a1ec2881359227f5563bbab9ca2224"
     },
     {
       "path": "docs/validation/layered-release-assets.md",
-      "blob_oid": "6408ca5b334b1ceeb00a4bfea4eab0fdf57dcc82"
+      "blob_oid": "a950d3efc7f33f53c32b293f4f0d5515e1713b11"
     },
     {
       "path": "docs/validation/layered-supervision-contract.md",
-      "blob_oid": "4f334cb569b25f8b56c30bf9e1352656a15ece93"
+      "blob_oid": "fd0b1d502e2a648b81b602b3048792b04160c6af"
     },
     {
       "path": "docs/validation/layered-supervision-policy.json",
-      "blob_oid": "e93eba0115e1cd47f2c485827b8ba5f06cfcf824"
+      "blob_oid": "816faa1f57fd31e852bc3e6ef97c6af4f9908b34"
     },
     {
       "path": "docs/validation/t45-mixed-phase-pressure-repair.md",
       "blob_oid": "3db53b86696888aa0db778a386864a0d2cb5994f"
+    },
+    {
+      "path": "docs/adr/0020-bounded-reference-arithmetic.md",
+      "blob_oid": "94e9e673c41486402da2c09439170e4d86cbd54a"
+    },
+    {
+      "path": "docs/adr/0021-fresh-supervised-release-evidence.md",
+      "blob_oid": "4bd4d7bc1ecaf38440f8dfe75861b6ec719fac8e"
+    },
+    {
+      "path": "docs/adr/0022-bind-performance-measurement-and-monitoring.md",
+      "blob_oid": "e4045e52a3f00b72b13ab0c4e64b29aed2d89197"
+    },
+    {
+      "path": "docs/adr/0023-proposed-explicit-gemm-reduction.md",
+      "blob_oid": "554a4a5205623cd4737c23a456899970ec5d71e4"
+    },
+    {
+      "path": "docs/adr/0024-approve-explicit-gemm-reduction.md",
+      "blob_oid": "a75e96a4016c04b460d70d3cefa70b1552984541"
+    },
+    {
+      "path": "docs/adr/0025-proposed-independent-confirmation.md",
+      "blob_oid": "8858147219803f0be58ad47209ee6d8e64a05466"
+    },
+    {
+      "path": "docs/adr/0026-approve-independent-confirmation.md",
+      "blob_oid": "f597ab69bd2abe61b017befcd4d825cdfaca5856"
+    },
+    {
+      "path": "docs/adr/0027-proposed-confirmation-renewal.md",
+      "blob_oid": "add5c661f8aa41191cd605250edff07f0ab243b4"
+    },
+    {
+      "path": "docs/adr/0028-local-release-evidence.md",
+      "blob_oid": "0652be2126d7b3ae8dc5c9248891c62f710aff87"
+    },
+    {
+      "path": "docs/validation/release-source-role-policy.json",
+      "blob_oid": "8a35e8a407a214e10b39e85d190dc1330e47f97c"
     }
   ]
 }

@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from golden_gen.assets import _rename_no_replace
 from golden_gen.layered_artifacts import (
@@ -32,6 +32,9 @@ from golden_gen.release_transport import (
     logical_path,
     read_manifest,
 )
+
+if TYPE_CHECKING:
+    from golden_gen.release_roles import FreezeBinding
 
 REPORT = "docs/releases/goldens-v0.2.md"
 
@@ -91,8 +94,10 @@ def _authoritative(repo: Path, path: Path) -> dict[str, Any]:
 
 
 def validate_evidence(
-    repo: Path, root: Path, entrypoints: Entrypoints
+    repo: Path, root: Path, entrypoints: Entrypoints, *, freeze: FreezeBinding | None = None
 ) -> tuple[dict[str, Any], list[Path]]:
+    if freeze is not None:
+        return _role_evidence(repo, root, entrypoints, freeze)
     paths = {key: root / logical_path(value) for key, value in entrypoints.model_dump().items()}
     result = _authoritative(repo, paths["authoritative_manifest"])
     source = source_identity(repo)
@@ -135,12 +140,19 @@ def validate_evidence(
         result["runtime_profile"],
         registry,
         next(iter(build_ids)),
+        supervision=(
+            dict(
+                source=manifest.supervision_source, policy_sha256=manifest.supervision_policy.sha256
+            )
+            if manifest.supervision_policy is not None
+            else None
+        ),
     )
     wrapper = json.loads(paths["performance"].read_text())
     if wrapper.get("authoritative_manifest_sha256") != sha(paths["authoritative_manifest"]):
         raise ValueError("performance predecessor differs from authoritative evidence")
     closure.extend(performance_files)
-    if manifest.schema_version == 2:
+    if manifest.schema_version in (2, 3):
         closure.extend(validate_cpu_roles(paths["cpu_gates"], manifest.source, source))
     else:
         closure.extend(validate_cpu(paths["cpu_gates"], source))
@@ -191,13 +203,106 @@ def validate_evidence(
     ), closure
 
 
-def prepare_bundle(repo: Path, root: Path, destination: Path, entrypoints: dict[str, str]) -> Path:
+def _role_definitions(repo: Path, manifest: Path, roles: Any) -> dict[str, bytes]:
+    snapshots = _definitions(repo, manifest)
+    for source in (roles.performance_producer, roles.release_evaluator):
+        snapshots.update(_source_definitions(repo, source.model_dump()))
+    return snapshots
+
+
+def _role_evidence(
+    repo: Path, root: Path, entries: Entrypoints, freeze: FreezeBinding
+) -> tuple[dict[str, Any], list[Path]]:
+    from golden_gen.release_roles import validate_release_roles
+
+    validated = validate_release_roles(repo, root, entries, freeze=freeze)
+    result, registry, roles = (validated[key] for key in ("numerical", "registry", "roles"))
+    manifest_path = root / logical_path(entries.authoritative_manifest)
+    manifest = LayeredManifest.model_validate_json(manifest_path.read_text())
+    closure = list(validated["closure"])
+    archived_freeze = root / "source-role-freeze.json"
+    if (
+        archived_freeze.is_symlink()
+        or not archived_freeze.is_file()
+        or sha(archived_freeze) != freeze.sha256
+    ):
+        raise ValueError("archived external source-role freeze differs from actual approval")
+    closure.append(archived_freeze)
+    for name, raw in _role_definitions(repo, manifest_path, roles).items():
+        path = root / name
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != raw:
+            raise ValueError("role Definition snapshot differs from actual source Git objects")
+        closure.append(path)
+    inventory = Artifact.inventory(root, list(dict.fromkeys(closure)))
+    counts = dict(
+        execution_groups=len(registry.numerical_cases),
+        numerical_cases=sum(len(c.plan.members) for c in registry.numerical_cases),
+        prediction_rows_per_engine_variant=sum(
+            len(m.continuation) for c in registry.numerical_cases for m in c.plan.members
+        ),
+        setup_calls_per_engine_variant=sum(len(c.setup_calls) for c in registry.numerical_cases),
+        setup_rows_per_engine_variant=sum(
+            len(m.continuation)
+            for c in registry.numerical_cases
+            for p in c.setup_calls
+            for m in p.members
+        ),
+        unique_owners=len(frozen_owner_inventory(registry, authoritative=True)),
+        operator_profiles=len(registry.operator_profiles),
+        behavior_cases=len(registry.behavior_cases),
+        artifacts=len(inventory),
+    )
+    metadata = dict(
+        source=manifest.source,
+        registry_sha256=manifest.registry_sha256,
+        policy_sha256=manifest.policy_sha256,
+        definition_index_blob=git(
+            repo, "rev-parse", f"{manifest.source['commit']}:.dag/definition-index.json"
+        )
+        .decode()
+        .strip(),
+        entrypoints=entries.model_dump(),
+        counts=counts,
+        artifacts=[a.model_dump() for a in inventory],
+    )
+    candidate = [
+        json.loads(bound_file(manifest_path.parent, entry.primary_receipt.model_dump()).read_text())
+        for entry in manifest.captures
+        if entry.engine == "candidate"
+    ]
+    policy_data, _ = definition_document(repo, POLICY_PATH)
+    return dict(
+        manifest=metadata,
+        result=result,
+        performance=validated["performance"],
+        policy=policy_data,
+        model=candidate[0]["model"],
+        candidate_binaries=sorted({r["binary_sha256"] for r in candidate}),
+        source_roles=roles.model_dump(),
+        source_role_policy_sha256=validated["freeze"].policy_sha256,
+    ), closure
+
+
+def prepare_bundle(
+    repo: Path,
+    root: Path,
+    destination: Path,
+    entrypoints: dict[str, str],
+    *,
+    freeze: FreezeBinding | None = None,
+) -> Path:
     entries = Entrypoints.model_validate(entrypoints)
     path = root / logical_path(entries.authoritative_manifest)
-    _authoritative(
-        repo, path
-    )  # Fail before reading sealed data or creating output when budgets are pending.
-    for name, value in _definitions(repo, path).items():
+    if freeze is None:
+        _authoritative(repo, path)
+        definitions = _definitions(repo, path)
+    else:
+        from golden_gen.release_roles import prepare_performance_binding
+
+        prepared = prepare_performance_binding(repo, root, entries, freeze=freeze)
+        definitions = _role_definitions(repo, path, prepared["roles"])
+        definitions["source-role-freeze.json"] = freeze.path.read_bytes()
+    for name, value in definitions.items():
         output = root / name
         if output.exists() or output.is_symlink():
             if output.is_symlink() or output.read_bytes() != value:
@@ -206,14 +311,14 @@ def prepare_bundle(repo: Path, root: Path, destination: Path, entrypoints: dict[
             output.parent.mkdir(parents=True, exist_ok=True)
             with output.open("xb") as stream:
                 stream.write(value)
-    evidence, _ = validate_evidence(repo, root, entries)
+    evidence, _ = validate_evidence(repo, root, entries, freeze=freeze)
     manifest = ReleaseManifest.model_validate(evidence["manifest"])
     with tempfile.TemporaryDirectory(
         prefix=".release-bundle-", dir=destination.parent
     ) as directory:
         bundle = build_bundle(root, manifest, Path(directory) / "bundle")
         # Re-read unchanged originals before exposing the semantic-stage output.
-        fresh, _ = validate_evidence(repo, root, entries)
+        fresh, _ = validate_evidence(repo, root, entries, freeze=freeze)
         if fresh != evidence:
             raise ValueError("evidence changed during bundling")
         _rename_no_replace(bundle, destination)
@@ -232,6 +337,11 @@ def measurement_checkout(repo: Path, source: dict[str, str]) -> Iterator[Path]:
     ).split(b"\0")
     if set(changed) - {b""} != {REPORT.encode()}:
         raise ValueError("post-measurement candidate changes more than the report")
+    mode, kind, _ = (
+        git(repo, "ls-tree", current["commit"], REPORT).decode().split("\t", 1)[0].split()
+    )
+    if (mode, kind) != ("100644", "blob"):
+        raise ValueError("post-measurement report must retain regular-file mode")
     with tempfile.TemporaryDirectory(prefix="layered-source-") as directory:
         checkout = Path(directory) / "repo"
         subprocess.run(
@@ -245,7 +355,21 @@ def measurement_checkout(repo: Path, source: dict[str, str]) -> Iterator[Path]:
         yield checkout
 
 
-def verify_bundle(repo: Path, bundle: Path, cache: Path, rust_binary: Path) -> dict[str, Any]:
+def verify_bundle(
+    repo: Path, bundle: Path, cache: Path, rust_binary: Path, *, freeze: FreezeBinding | None = None
+) -> dict[str, Any]:
+    if freeze is not None:
+        from golden_gen.release_roles import _approved_freeze, _load_binding
+
+        approved = _approved_freeze(freeze)
+        with measurement_checkout(repo, approved.release_source.model_dump()) as trusted:
+            _load_binding(trusted, freeze)
+        if (
+            rust_binary.is_symlink()
+            or str(rust_binary.resolve()) != approved.transport_consumer_path
+            or sha(rust_binary) != approved.transport_consumer_sha256
+        ):
+            raise ValueError("actual W transport consumer differs from freeze")
     manifest = read_manifest(bundle / "manifest.json")
     original_hashes = {p.name: sha(p) for p in bundle.iterdir()}
     with tempfile.TemporaryDirectory(prefix="layered-consumer-") as directory:
@@ -281,8 +405,16 @@ def verify_bundle(repo: Path, bundle: Path, cache: Path, rust_binary: Path) -> d
             (installed / "evidence" / manifest.entrypoints.authoritative_manifest).read_text()
         )
         evaluator = execution.evaluator_source or manifest.source.model_dump()
-        with measurement_checkout(repo, evaluator) as trusted:
-            evidence, _ = validate_evidence(trusted, installed / "evidence", manifest.entrypoints)
+        if freeze is None:
+            with measurement_checkout(repo, evaluator) as trusted:
+                evidence, _ = validate_evidence(
+                    trusted, installed / "evidence", manifest.entrypoints
+                )
+        else:
+            with measurement_checkout(repo, approved.release_source.model_dump()) as trusted:
+                evidence, _ = validate_evidence(
+                    trusted, installed / "evidence", manifest.entrypoints, freeze=freeze
+                )
         reconstructed = ReleaseManifest.model_validate(evidence["manifest"]).model_copy(
             update={"archive": manifest.archive}
         )
@@ -290,23 +422,29 @@ def verify_bundle(repo: Path, bundle: Path, cache: Path, rust_binary: Path) -> d
             raise ValueError("release inventory/counts/identities differ from recomputed evidence")
     if {p.name: sha(p) for p in bundle.iterdir()} != original_hashes:
         raise ValueError("bundle changed during clean verification")
-    installed = install_transport(bundle, cache)
-    return dict(
+    verified = dict(
         protocol="layered-accuracy-v1",
         schema_version=5,
         accepting=True,
         verdict="PASS",
-        installed=str(installed),
         manifest_sha256=original_hashes["manifest.json"],
         archive_sha256=original_hashes["goldens-v0.2.tar.gz"],
         **evidence,
     )
+    if (
+        freeze is not None
+        and source_identity(repo) != approved.release_source.model_dump()
+        and (repo / REPORT).read_bytes() != render_report(verified).encode()
+    ):
+        raise ValueError("final role candidate report differs from exact production rendering")
+    verified["installed"] = str(install_transport(bundle, cache))
+    return verified
 
 
 def render_report(verified: dict[str, Any]) -> str:
     if verified.get("accepting") is not True or verified.get("verdict") != "PASS":
         raise ValueError("report requires revalidated complete release evidence")
-    return "\n".join(
+    report = "\n".join(
         [
             "# goldens-v0.2 layered release evidence",
             "",
@@ -352,3 +490,17 @@ def render_report(verified: dict[str, Any]) -> str:
             "",
         ]
     )
+    if "source_roles" in verified:
+        report += (
+            "\n## Separate numerical and performance sources\n\n```json\n"
+            + json.dumps(
+                dict(
+                    sources=verified["source_roles"],
+                    source_role_policy_sha256=verified["source_role_policy_sha256"],
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n```\n"
+        )
+    return report

@@ -8,6 +8,7 @@
 
 use candle_core::{Device, Result, Tensor};
 
+use super::math_layout::{MathLimits, QueryWork};
 use super::AttentionEpoch;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +43,10 @@ pub(crate) struct PreparedAttention {
     cu_seqlens_k: Tensor,
     slot_mapping: Tensor,
     block_table: Option<Tensor>,
+    rectangular: bool,
+    real_rows: Option<Tensor>,
+    packed_work: Vec<QueryWork>,
+    cache_shape: Option<[usize; 4]>,
 }
 
 impl PreparedAttention {
@@ -50,7 +55,48 @@ impl PreparedAttention {
         logical: AttnMetadata,
         device: &Device,
     ) -> Result<Self> {
+        Self::prepare_with_limits(epoch, logical, device, None)
+    }
+
+    pub(crate) fn prepare_with_limits(
+        epoch: AttentionEpoch,
+        logical: AttnMetadata,
+        device: &Device,
+        limits: Option<MathLimits>,
+    ) -> Result<Self> {
         validate_logical_metadata(&logical)?;
+
+        let (rectangular, packed_work) = match limits {
+            Some(limits) => limits.plan(&logical)?,
+            None => (
+                false,
+                logical
+                    .cu_seqlens_q
+                    .windows(2)
+                    .map(|pair| QueryWork::standard((pair[1] - pair[0]) as usize))
+                    .collect(),
+            ),
+        };
+        let batch = logical.cu_seqlens_q.len() - 1;
+        let real_rows = if rectangular && batch * logical.max_seqlen_q != logical.slot_mapping.len()
+        {
+            let mut indices = Vec::with_capacity(logical.slot_mapping.len());
+            for (member, pair) in logical.cu_seqlens_q.windows(2).enumerate() {
+                let count = (pair[1] - pair[0]) as usize;
+                for row in 0..count {
+                    indices.push(
+                        u32::try_from(
+                            member * logical.max_seqlen_q + logical.max_seqlen_q - count + row,
+                        )
+                        .map_err(candle_core::Error::wrap)?,
+                    );
+                }
+            }
+            let count = indices.len();
+            Some(Tensor::from_vec(indices, count, device)?)
+        } else {
+            None
+        };
 
         let cu_seqlens_q = Tensor::from_vec(
             logical.cu_seqlens_q.clone(),
@@ -76,11 +122,76 @@ impl PreparedAttention {
             cu_seqlens_k,
             slot_mapping,
             block_table,
+            rectangular,
+            real_rows,
+            packed_work,
+            cache_shape: limits.map(|l| [l.num_blocks, l.block_size, l.kv_heads, l.head_dim]),
         })
+    }
+
+    pub(crate) fn validate_cache(&self, shape: &[usize]) -> Result<()> {
+        if shape.len() != 4 || shape.contains(&0) {
+            candle_core::bail!("invalid paged attention cache shape")
+        }
+        if let Some(expected) = self.cache_shape {
+            if shape != expected {
+                candle_core::bail!("cache differs from prepared attention geometry")
+            }
+            return Ok(());
+        }
+        for (member, blocks) in self.logical.block_table.iter().enumerate() {
+            let length = (self.logical.cu_seqlens_k[member + 1] - self.logical.cu_seqlens_k[member])
+                as usize;
+            if blocks.len() < length.div_ceil(shape[1])
+                || blocks
+                    .iter()
+                    .any(|&b| usize::try_from(b).map_or(true, |id| id >= shape[0]))
+            {
+                candle_core::bail!("paged attention block table exceeds cache bounds")
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn epoch(&self) -> AttentionEpoch {
         self.epoch
+    }
+
+    pub(crate) fn rectangular(&self) -> bool {
+        self.rectangular
+    }
+
+    pub(crate) fn query_work(&self, member: usize) -> Result<QueryWork> {
+        self.packed_work
+            .get(member)
+            .copied()
+            .ok_or_else(|| candle_core::Error::msg("no packed attention work for member"))
+    }
+
+    pub(crate) fn pad_queries(&self, input: &Tensor) -> Result<Tensor> {
+        if self.real_rows.is_none() {
+            return Ok(input.clone());
+        }
+        if input.dim(0)? != self.logical.slot_mapping.len() {
+            candle_core::bail!("query tensor does not match prepared token rows")
+        }
+        let mut parts = Vec::new();
+        for pair in self.logical.cu_seqlens_q.windows(2) {
+            let count = (pair[1] - pair[0]) as usize;
+            parts.push(input.narrow(0, pair[0] as usize, count)?.pad_with_zeros(
+                0,
+                self.logical.max_seqlen_q - count,
+                0,
+            )?);
+        }
+        Tensor::cat(&parts, 0)
+    }
+
+    pub(crate) fn unpad_queries(&self, input: &Tensor) -> Result<Tensor> {
+        match &self.real_rows {
+            Some(indices) => input.index_select(indices, 0),
+            None => Ok(input.clone()),
+        }
     }
 
     pub(crate) fn logical(&self) -> &AttnMetadata {
@@ -108,7 +219,7 @@ impl PreparedAttention {
     }
 
     pub(crate) fn device_tensor_uploads(&self) -> usize {
-        3 + usize::from(self.block_table.is_some())
+        3 + usize::from(self.block_table.is_some()) + usize::from(self.real_rows.is_some())
     }
 }
 
@@ -136,11 +247,30 @@ fn validate_logical_metadata(metadata: &AttnMetadata) -> Result<()> {
         candle_core::bail!("attention cumulative lengths must be monotonic")
     }
     let query_tokens = metadata.cu_seqlens_q.last().copied().unwrap_or(0) as usize;
+    if metadata
+        .cu_seqlens_q
+        .windows(2)
+        .any(|pair| (pair[1] - pair[0]) as usize > metadata.max_seqlen_q)
+        || metadata
+            .cu_seqlens_k
+            .windows(2)
+            .any(|pair| (pair[1] - pair[0]) as usize > metadata.max_seqlen_k)
+    {
+        candle_core::bail!("attention maximum lengths are smaller than a member length")
+    }
     if metadata.slot_mapping.len() != query_tokens {
         candle_core::bail!(
             "attention slot mapping has {} entries for {query_tokens} query tokens",
             metadata.slot_mapping.len()
         )
+    }
+    if metadata
+        .cu_seqlens_q
+        .windows(2)
+        .zip(metadata.cu_seqlens_k.windows(2))
+        .any(|(queries, keys)| queries[1] - queries[0] > keys[1] - keys[0])
+    {
+        candle_core::bail!("causal self-attention queries exceed their KV lengths")
     }
     let batch_size = metadata.cu_seqlens_q.len() - 1;
     if !metadata.block_table.is_empty() && metadata.block_table.len() != batch_size {
@@ -163,7 +293,15 @@ fn prepare_block_table(block_table: &[Vec<i32>], device: &Device) -> Result<Opti
     let batch = block_table.len();
     let mut flat = Vec::with_capacity(batch * max_blocks);
     for row in block_table {
-        flat.extend_from_slice(row);
+        if row.iter().any(|&block| block < 0) {
+            candle_core::bail!("attention block IDs must be nonnegative")
+        }
+        flat.extend(
+            row.iter()
+                .map(|&id| u32::try_from(id))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(candle_core::Error::wrap)?,
+        );
         flat.resize(flat.len() + max_blocks - row.len(), 0);
     }
     Ok(Some(Tensor::from_vec(flat, (batch, max_blocks), device)?))
@@ -417,7 +555,7 @@ mod tests {
                 [0, 3, 516]
             );
             assert_eq!(
-                prepared.block_table().unwrap().to_vec2::<i32>().unwrap(),
+                prepared.block_table().unwrap().to_vec2::<u32>().unwrap(),
                 [vec![7, 0, 0], vec![8, 9, 10]]
             );
             assert_eq!(prepared.device_tensor_uploads(), 4);
@@ -458,9 +596,55 @@ mod tests {
                 [0, 513, 516]
             );
             assert_eq!(
-                prepared.block_table().unwrap().to_vec2::<i32>().unwrap(),
+                prepared.block_table().unwrap().to_vec2::<u32>().unwrap(),
                 [vec![4, 5, 6], vec![7, 0, 0]]
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod layout_tests {
+    use super::*;
+    use candle_core::DType;
+    #[test]
+    fn padded_queries_roundtrip_and_preserve_only_real_cache_slots() {
+        let limits = MathLimits {
+            query_heads: 4,
+            kv_heads: 2,
+            head_dim: 8,
+            block_size: 4,
+            num_blocks: 2,
+            max_query_tokens: 8,
+            workspace_bytes: 1 << 20,
+        };
+        let metadata = build_prefill_metadata(&[1, 3], &[1, 3], &[0, 4, 5, 6]);
+        let prepared = PreparedAttention::prepare_with_limits(
+            AttentionEpoch::StepPlan(1),
+            metadata,
+            &Device::Cpu,
+            Some(limits),
+        )
+        .unwrap();
+        let input = Tensor::new(&[10u32, 20, 21, 22], &Device::Cpu).unwrap();
+        let padded = prepared.pad_queries(&input).unwrap();
+        assert_eq!(padded.to_vec1::<u32>().unwrap(), [0, 0, 10, 20, 21, 22]);
+        assert_eq!(
+            prepared
+                .unpad_queries(&padded)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap(),
+            [10, 20, 21, 22]
+        );
+        assert_eq!(
+            prepared.slot_mapping().to_vec1::<i64>().unwrap(),
+            [0, 4, 5, 6]
+        );
+        assert_eq!(prepared.device_tensor_uploads(), 4);
+        assert!(prepared.validate_cache(&[2, 4, 2, 8]).is_ok());
+        assert!(prepared.validate_cache(&[1, 4, 2, 8]).is_err());
+        assert_eq!(prepared.slot_mapping().dtype(), DType::I64);
     }
 }

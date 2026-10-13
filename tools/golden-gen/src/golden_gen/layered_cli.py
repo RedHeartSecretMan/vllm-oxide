@@ -33,7 +33,7 @@ def _group(repo: Path, group_id: str) -> tuple[NumericalCase, str]:
     )
     if group is None:
         raise ValueError("execution group is absent from the approved registry")
-    if group.split == "acceptance":
+    if group.split in ("acceptance", "confirmation"):
         values, _ = definition_document(repo, POLICY_PATH)
         policy = BudgetPolicy.model_validate(values)
         if (
@@ -68,7 +68,13 @@ def run_candidate_capture(command: list[str]) -> dict[str, Any]:
 
 
 def _registered_owner(
-    repo: Path, group_id: str, engine: str, variant: str, auxiliary: bool
+    repo: Path,
+    group_id: str,
+    engine: str,
+    variant: str,
+    auxiliary: bool,
+    *,
+    authoritative: bool = True,
 ) -> None:
     from golden_gen.layered_inventory import frozen_owner_inventory, owner_key
 
@@ -79,7 +85,7 @@ def _registered_owner(
         else "execution_group"
     )
     if (kind, group_id, engine, variant) not in {
-        owner_key(o) for o in frozen_owner_inventory(registry, authoritative=True)
+        owner_key(o) for o in frozen_owner_inventory(registry, authoritative=authoritative)
     }:
         raise ValueError("collector owner is absent from the frozen inventory")
 
@@ -112,7 +118,7 @@ def _auxiliary_definition(
         raise ValueError("unknown auxiliary verification")
     if case.mode != "free_generation":
         raise ValueError("execution behavior is derived from its guarded numerical groups")
-    if case.split == "acceptance":
+    if case.split in ("acceptance", "confirmation"):
         values, _ = definition_document(repo, POLICY_PATH)
         policy = BudgetPolicy.model_validate(values)
         if (
@@ -141,12 +147,23 @@ def collect_group(
     *,
     auxiliary: bool = False,
     measurement_repo: Path | None = None,
+    fresh_observation: bool = False,
 ) -> dict[str, Any]:
     from golden_gen.guard import run_guarded
     from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
     from golden_gen.supervision import measurement_context
 
-    if (repo / SUPERVISION_POLICY_PATH).exists() and measurement_repo is None:
+    if fresh_observation and measurement_repo is not None:
+        raise ValueError("fresh observation cannot reuse a supervised measurement checkout")
+    if fresh_observation:
+        # Preserve caller-relative meanings before switching the worker cwd.
+        repo, run_dir, model = repo.resolve(), run_dir.resolve(), model.resolve()
+        binary = binary.resolve() if binary is not None else None
+    if (
+        not fresh_observation
+        and (repo / SUPERVISION_POLICY_PATH).exists()
+        and measurement_repo is None
+    ):
         raise ValueError("supervised collection requires an immutable measurement checkout")
     execution_repo = measurement_repo or repo
     context = (
@@ -171,7 +188,9 @@ def collect_group(
         raise ValueError("invalid layered collector engine/variant")
     if variant == "control-replay" and engine != "candidate":
         raise ValueError("public control replay is candidate-only")
-    _registered_owner(repo, group_id, engine, variant, auxiliary)
+    _registered_owner(
+        repo, group_id, engine, variant, auxiliary, authoritative=not fresh_observation
+    )
     if (
         not group_id
         or any(
@@ -208,12 +227,19 @@ def collect_group(
     if binary is not None:
         command.extend(["--candidate-binary", str(binary)])
     guard_path = output / "guard.json"
-    if context is None:
+    if fresh_observation:
+        worker_env = dict(os.environ)
+        worker_env["PYTHONPATH"] = str(execution_repo.resolve() / "tools/golden-gen/src")
+        worker_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        worker_env["UV_PROJECT_ENVIRONMENT"] = sys.prefix
+        run_guarded(command, guard_path, cwd=execution_repo.resolve(), env=worker_env)
+    elif context is None:
         run_guarded(command, guard_path)
     else:
         worker_env = dict(os.environ)
         worker_env["PYTHONPATH"] = context["measurement_invocation"]["pythonpath"]
         worker_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        worker_env["UV_PROJECT_ENVIRONMENT"] = sys.prefix
         run_guarded(
             command, guard_path, cwd=execution_repo.resolve(), env=worker_env, supervision=context
         )
@@ -421,6 +447,7 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
                     )
                 )
                 evidence["worker_states"] = [x.model_dump() for x in oracle.protocol_evidence()]
+                evidence["scheduling"] = oracle.scheduling_evidence().model_dump()
             else:
                 import torch
 
@@ -428,6 +455,8 @@ def _worker_capture(args: argparse.Namespace, output: Path) -> None:
                     deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
                     warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
                     attention_backend="SDPBackend.MATH",
+                    allow_bf16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+                    allow_tf32=torch.backends.cuda.matmul.allow_tf32,
                 )
             atomic_json(output / "capture.json", capture)
         finally:
@@ -502,6 +531,11 @@ def main() -> None:
     parser.add_argument("--variant", choices=["primary", "replay", "control", "control-replay"])
     parser.add_argument("--candidate-binary", type=Path)
     parser.add_argument("--measurement-repo", type=Path)
+    parser.add_argument(
+        "--fresh-observation",
+        action="store_true",
+        help="collect only calibration owners from this checkout; no old approval reuse",
+    )
     parser.add_argument("--supervision-policy", type=Path)
     parser.add_argument("--retained-owner-ledger", type=Path)
     parser.add_argument("--manifest", type=Path)
@@ -514,6 +548,8 @@ def main() -> None:
     ):
         parser.add_argument("--" + name, type=Path)
     args = parser.parse_args()
+    if args.fresh_observation and args.action not in ("collect", "collect-aux"):
+        parser.error("fresh-observation is only valid for calibration collection")
     if args.action in ("collect", "worker", "collect-aux", "worker-aux") and (
         args.model_dir is None or args.group is None or args.engine is None or args.variant is None
     ):
@@ -533,6 +569,7 @@ def main() -> None:
                 args.candidate_binary,
                 auxiliary=args.action == "collect-aux",
                 measurement_repo=args.measurement_repo,
+                fresh_observation=args.fresh_observation,
             )
         elif args.action == "faults":
             from golden_gen.layered_faults import generate_fault_evidence

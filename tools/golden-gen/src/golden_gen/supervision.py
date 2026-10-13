@@ -6,21 +6,25 @@ import json
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from golden_gen.layered_artifacts import bound_file, sha, source_identity, worker_metadata
 from golden_gen.layered_inventory import owner_key
 from golden_gen.layered_release import definition_document
+
+if TYPE_CHECKING:
+    from golden_gen.release_roles import BinaryBinding, FreezeBinding, SourceRoles
 
 POLICY_PATH = "docs/validation/layered-supervision-policy.json"
 
 
 def load_policy(repo: Path) -> tuple[dict[str, Any], str]:
     data, digest = definition_document(repo, POLICY_PATH)
+    fresh = data.get("policy_id") == "bounded-telemetry-fresh-v1"
     fixed = dict(
-        protocol="layered-supervision-policy-v1",
-        schema_version=1,
-        policy_id="bounded-telemetry-recovery-v1",
+        protocol="layered-supervision-policy-v2" if fresh else "layered-supervision-policy-v1",
+        schema_version=2 if fresh else 1,
+        policy_id="bounded-telemetry-fresh-v1" if fresh else "bounded-telemetry-recovery-v1",
         ram_floor_bytes=16 * 1024**3,
         fast_poll_interval_ms=100,
         telemetry_interval_ms=1000,
@@ -33,18 +37,36 @@ def load_policy(repo: Path) -> tuple[dict[str, Any], str]:
         require_fresh_after_cleanup=True,
         require_single_flight=True,
         require_owned_and_telemetry_cleanup=True,
-        retained_index_start=0,
     )
     for key, expected in fixed.items():
         if type(data.get(key)) is not type(expected) or data[key] != expected:
             raise ValueError(f"unsupported supervision policy: {key}")
-    for key in ("registry_sha256", "numerical_policy_sha256", "retained_ledger_sha256"):
+    digest_fields: tuple[str, ...] = ("registry_sha256", "numerical_policy_sha256")
+    if not fresh:
+        digest_fields += ("retained_ledger_sha256",)
+    for key in digest_fields:
         if not isinstance(data.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", data[key]) is None:
             raise ValueError("invalid supervision policy digest")
     count = data.get("retained_owner_count")
-    if (
+    if fresh:
+        if (
+            type(count) is not int
+            or count != 0
+            or any(
+                key in data
+                for key in (
+                    "retained_ledger_sha256",
+                    "retained_index_start",
+                    "retained_index_end_inclusive",
+                )
+            )
+        ):
+            raise ValueError("fresh supervision cannot retain legacy owners or ledger authority")
+    elif (
         type(count) is not int
         or count <= 0
+        or type(data.get("retained_index_start")) is not int
+        or data["retained_index_start"] != 0
         or data.get("retained_index_end_inclusive") != count - 1
     ):
         raise ValueError("invalid retained owner policy range")
@@ -64,6 +86,8 @@ def measurement_context(
     measurement_repo: Path,
     python: str,
     binary: Path | None,
+    *,
+    binary_kind: Literal["capture", "benchmark"] = "capture",
 ) -> dict[str, Any]:
     """Bind the actual immutable checkout and binary before constructing a worker."""
     policy, digest = load_policy(repo)
@@ -74,12 +98,23 @@ def measurement_context(
         raise ValueError("measurement checkout identity mismatch")
     root = str(measurement_repo.resolve())
     candidate = None
+    binary_key = (
+        "measurement_binary" if binary_kind == "capture" else "measurement_benchmark_binary"
+    )
+    if binary_kind == "benchmark" and binary is None:
+        raise ValueError("benchmark requires its approved measurement binary")
     if binary is not None:
-        if binary.is_symlink() or sha(binary) != policy["measurement_binary"]["sha256"]:
+        expected = policy.get(binary_key)
+        if (
+            not isinstance(expected, dict)
+            or set(expected) != {"sha256", "build_source_id"}
+            or binary.is_symlink()
+            or sha(binary) != expected["sha256"]
+        ):
             raise ValueError("measurement binary identity mismatch")
-        candidate = dict(path=str(binary.resolve()), **policy["measurement_binary"])
+        candidate = dict(path=str(binary.resolve()), **expected)
     return dict(
-        role="measurement_owner",
+        role="measurement_owner" if binary_kind == "capture" else "benchmark_owner",
         measurement_source=measured,
         supervision_source=supervisor,
         supervision_policy_sha256=digest,
@@ -155,6 +190,129 @@ def validate_invocation(
             raise ValueError("measurement invocation binary mismatch")
     elif binary is not None:
         raise ValueError("unexpected measurement binary invocation")
+
+
+def validate_benchmark_invocation(
+    guard: dict[str, Any],
+    policy: dict[str, Any],
+    source: dict[str, str],
+    binary_sha256: str,
+    build_source_id: str,
+) -> None:
+    """Bind the native benchmark command to the separately approved binary."""
+    expected = policy.get("measurement_benchmark_binary")
+    if policy.get("measurement_source") != source or expected != dict(
+        sha256=binary_sha256, build_source_id=build_source_id
+    ):
+        raise ValueError("false benchmark invocation/source/binary")
+    _validate_native_benchmark_invocation(guard, source, binary_sha256, build_source_id)
+
+
+def _validate_native_benchmark_invocation(
+    guard: dict[str, Any], source: dict[str, str], binary_sha256: str, build_source_id: str
+) -> None:
+    invocation = guard.get("measurement_invocation", {})
+    root = invocation.get("repo_root")
+    binary = invocation.get("candidate_binary")
+    if (
+        guard.get("role") != "benchmark_owner"
+        or guard.get("measurement_source") != source
+        or not isinstance(root, str)
+        or not Path(root).is_absolute()
+        or invocation.get("cwd") != root
+        or invocation.get("pythonpath") != str(Path(root) / "tools/golden-gen/src")
+        or invocation.get("pythondontwritebytecode") != "1"
+        or not isinstance(binary, dict)
+        or binary.get("sha256") != binary_sha256
+        or binary.get("build_source_id") != build_source_id
+    ):
+        raise ValueError("false benchmark invocation/source/binary")
+    command = guard.get("command", [])
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(value, str) for value in command)
+        or command[0] != binary.get("path")
+        or not Path(command[0]).is_absolute()
+        or len(command[1:]) % 2
+    ):
+        raise ValueError("invalid native benchmark command")
+    pairs = list(zip(command[1::2], command[2::2], strict=True))
+    options = dict(pairs)
+    if (
+        len(pairs) != len(options)
+        or set(options)
+        != {
+            "--model-path",
+            "--prompts-dir",
+            "--output",
+            "--repo-root",
+            "--measurement-commit",
+            "--measurement-tree",
+        }
+        or options["--repo-root"] != root
+        or options["--prompts-dir"] != str(Path(root) / "tools/golden-gen/prompts")
+        or options["--measurement-commit"] != source["commit"]
+        or options["--measurement-tree"] != source["tree"]
+        or not Path(options["--output"]).is_absolute()
+        or Path(options["--output"]).name != "benchmark.json"
+    ):
+        raise ValueError("benchmark command differs from measured source")
+
+
+def validate_role_benchmark_invocation(
+    guard: dict[str, Any], roles: SourceRoles, binary: BinaryBinding, policy_sha256: str
+) -> None:
+    """New performance-only policy never rewrites or projects the old SUP."""
+    if (
+        guard.get("supervision_source") != roles.release_evaluator.model_dump()
+        or guard.get("supervision_policy_sha256") != policy_sha256
+    ):
+        raise ValueError("performance role supervisor/policy differs")
+    _validate_native_benchmark_invocation(
+        guard, roles.performance_producer.model_dump(), binary.sha256, binary.build_source_id
+    )
+
+
+def performance_role_context(
+    repo: Path,
+    performance_repo: Path,
+    python: str,
+    binary: Path,
+    *,
+    freeze: FreezeBinding | None = None,
+) -> dict[str, Any]:
+    from golden_gen.release_roles import _load_binding
+
+    approved, policy, roles = _load_binding(repo, freeze)
+    if (
+        source_identity(performance_repo) != roles.performance_producer.model_dump()
+        or str(performance_repo.resolve()) != approved.performance_repo
+    ):
+        raise ValueError("actual R performance checkout differs")
+    if (
+        binary.is_symlink()
+        or str(binary.resolve()) != approved.benchmark_path
+        or sha(binary) != policy.benchmark_binary.sha256
+    ):
+        raise ValueError("actual R benchmark binary differs")
+    root = str(performance_repo.resolve())
+    return dict(
+        role="benchmark_owner",
+        measurement_source=roles.performance_producer.model_dump(),
+        supervision_source=roles.release_evaluator.model_dump(),
+        supervision_policy_sha256=approved.policy_sha256,
+        measurement_invocation=dict(
+            cwd=root,
+            repo_root=root,
+            pythonpath=str(performance_repo.resolve() / "tools/golden-gen/src"),
+            pythondontwritebytecode="1",
+            python_executable=python,
+            candidate_binary=dict(
+                path=str(binary.resolve()), **policy.benchmark_binary.model_dump()
+            ),
+        ),
+    )
 
 
 def _git(repo: Path, *args: str) -> bytes:
@@ -302,7 +460,17 @@ def manifest_roles(
         raise ValueError("supervised manifest source/policy mismatch")
     if json.loads(bound_file(root, manifest["supervision_policy"]).read_text()) != policy:
         raise ValueError("supervision policy artifact differs from selected Definition")
-    retained = validate_retained_ledger(root, manifest["retained_owner_ledger"], policy, inventory)
+    fresh = policy["policy_id"] == "bounded-telemetry-fresh-v1"
+    if fresh:
+        if manifest.get("schema_version") != 3 or manifest.get("retained_owner_ledger") is not None:
+            raise ValueError("fresh supervision requires manifest schema 3 without retained owners")
+        retained = {}
+    else:
+        if manifest.get("schema_version") != 2:
+            raise ValueError("retained supervision requires manifest schema 2")
+        retained = validate_retained_ledger(
+            root, manifest["retained_owner_ledger"], policy, inventory
+        )
     records = {}
     for category, kind in (
         ("captures", "execution_group"),
@@ -354,4 +522,5 @@ def manifest_roles(
             "supervision_policy",
             "retained_owner_ledger",
         )
+        if name in manifest
     }

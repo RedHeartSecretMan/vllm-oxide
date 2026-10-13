@@ -9,6 +9,7 @@ from golden_gen.layered_inventory import frozen_owner_inventory, owner_key
 from golden_gen.layered_release import POLICY_PATH, REGISTRY_PATH, Registry
 from golden_gen.supervision import POLICY_PATH as SUPERVISION_POLICY_PATH
 from tests.release_evidence_fixture import complete_release_inputs
+from tests.supervision_fixture_helpers import bind_synthetic_performance
 
 
 def supervised_release_inputs(tmp_path):
@@ -98,7 +99,13 @@ def supervised_release_inputs(tmp_path):
     ledger_path = run / "retained-ledger.json"
     ledger_path.write_text(json.dumps(ledger))
     policy = json.loads((Path(__file__).resolve().parents[3] / SUPERVISION_POLICY_PATH).read_text())
+    # This fixture explicitly exercises retained owners, independently of the
+    # profile selected by the real release Definition.
     policy.update(
+        protocol="layered-supervision-policy-v1",
+        schema_version=1,
+        policy_id="bounded-telemetry-recovery-v1",
+        retained_index_start=0,
         measurement_source=measured,
         retained_ledger_sha256=sha(ledger_path),
         retained_owner_count=len(owners),
@@ -106,6 +113,7 @@ def supervised_release_inputs(tmp_path):
         registry_sha256=sha(repo / REGISTRY_PATH),
         numerical_policy_sha256=sha(repo / POLICY_PATH),
         unchanged_measurement_paths=[REGISTRY_PATH, POLICY_PATH],
+        measurement_benchmark_binary=dict(sha256="a" * 64, build_source_id="e" * 40),
     )
     (repo / SUPERVISION_POLICY_PATH).write_text(json.dumps(policy))
 
@@ -131,4 +139,5 @@ def supervised_release_inputs(tmp_path):
         retained_owner_ledger=artifact(ledger_path),
     )
     manifest_path.write_text(json.dumps(manifest))
+    bind_synthetic_performance(run, entries, policy, measured, evaluator, policy_path)
     return repo, run, measured, evaluator, entries

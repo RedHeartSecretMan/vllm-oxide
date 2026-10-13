@@ -94,22 +94,23 @@ def manifest_artifact_closure(manifest_path: Path, seen: set[Path] | None = None
     data = json.loads(manifest_path.read_text())
     if (
         data.get("protocol") != PROTOCOL
-        or data.get("schema_version") not in (1, 2)
+        or data.get("schema_version") not in (1, 2, 3)
         or data.get("purpose") not in ("observation", "authoritative")
     ):
         raise ValueError("invalid manifest in layered artifact closure")
     root = manifest_path.parent
     paths = [manifest_path]
-    if data["schema_version"] == 2:
+    if data["schema_version"] in (2, 3):
         from golden_gen.layered_manifest import LayeredManifest
 
         LayeredManifest.model_validate(data)
         paths.append(bound_file(root, data["supervision_policy"]))
-        ledger_path = bound_file(root, data["retained_owner_ledger"])
-        paths.append(ledger_path)
-        ledger = json.loads(ledger_path.read_text())
-        for owner in ledger["owners"]:
-            paths.extend(bound_file(root, item) for item in owner["files"])
+        if data["schema_version"] == 2:
+            ledger_path = bound_file(root, data["retained_owner_ledger"])
+            paths.append(ledger_path)
+            ledger = json.loads(ledger_path.read_text())
+            for owner in ledger["owners"]:
+                paths.extend(bound_file(root, item) for item in owner["files"])
     for entry in [
         *data.get("captures", []),
         *data.get("operator_checks", []),
@@ -125,7 +126,7 @@ def manifest_artifact_closure(manifest_path: Path, seen: set[Path] | None = None
             guard_path = bound_file(root, receipt["guard"])
             paths.append(guard_path)
             if (
-                data["schema_version"] == 2
+                data["schema_version"] in (2, 3)
                 and json.loads(guard_path.read_text()).get("schema_version") == 2
             ):
                 paths.append(worker_metadata(root, receipt_path, receipt))
@@ -254,7 +255,7 @@ def verify_marker(path: Path, source: dict[str, str]) -> dict[str, Any]:
         manifest_path = bound_file(root, value["outputs"][1])
         manifest = json.loads(manifest_path.read_text())
         if supervised and (
-            manifest.get("schema_version") != 2
+            manifest.get("schema_version") not in (2, 3)
             or manifest.get("source") != value["measurement_source"]
             or any(
                 manifest.get(key) != result.get(key)

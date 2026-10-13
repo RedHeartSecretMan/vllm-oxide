@@ -69,12 +69,11 @@ mod ffi {
 macro_rules! cuda_ptr {
     ($tensor:expr, $ty:ty, $label:literal, $storage:ident, $view:ident, $ptr:ident, $guard:ident) => {
         let ($storage, layout) = $tensor.storage_and_layout();
-        let cuda_storage = match &*$storage {
-            Storage::Cuda(storage) => storage,
-            _ => candle_core::bail!(concat!(
+        let Storage::Cuda(cuda_storage) = &*$storage else {
+            candle_core::bail!(concat!(
                 "sampler CUDA adapter expected CUDA storage for ",
                 $label
-            )),
+            ))
         };
         let offsets = layout.contiguous_offsets().ok_or_else(|| {
             Error::msg(concat!(
@@ -209,7 +208,7 @@ struct PreparedBatch {
 
 fn prepare_batch(
     params: &[SamplingParams],
-    token_history: &[Vec<u32>],
+    token_history: &[impl AsRef<[u32]>],
     vocab_size: usize,
 ) -> Result<PreparedBatch> {
     let vocab_u32 = u32::try_from(vocab_size).map_err(|_| {
@@ -231,6 +230,7 @@ fn prepare_batch(
     prepared.history_offsets.push(0);
 
     for (row, (params, history)) in params.iter().zip(token_history).enumerate() {
+        let history = history.as_ref();
         params.validate().map_err(|error| {
             Error::msg(format!(
                 "sampler CUDA adapter: sampling params at row {row}{error}"
@@ -303,7 +303,7 @@ fn ensure_workspace<'a>(
 pub(super) fn sample(
     logits: &Tensor,
     params: &[SamplingParams],
-    token_history: &[Vec<u32>],
+    token_history: &[impl AsRef<[u32]>],
     row_seeds: &[u64],
     workspace_slot: &mut Option<Workspace>,
 ) -> Result<Tensor> {

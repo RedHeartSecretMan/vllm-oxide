@@ -20,7 +20,7 @@ POLICY_PATH = "docs/validation/layered-accuracy-budgets.json"
 
 class NumericalCase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    split: Literal["development", "calibration", "acceptance"]
+    split: Literal["development", "calibration", "acceptance", "confirmation"]
     plan: ReplayPlan
     required_mechanisms: dict[
         Literal["reference", "baseline", "candidate"],
@@ -61,16 +61,27 @@ class BehaviorCase(BaseModel):
     mode: Literal["free_generation", "fixed_prefix_execution", "unforced_control"] = (
         "free_generation"
     )
-    split: Literal["development", "calibration", "acceptance"] = "calibration"
+    split: Literal["development", "calibration", "acceptance", "confirmation"] = "calibration"
     required_checks: list[str] = Field(min_length=1)
     scenario: dict[str, Any]
     engine_options: dict[str, Any] = Field(default_factory=dict)
 
 
+class ConfirmationCohort(BaseModel):
+    """A frozen role for complete confirmation groups, without relabeling cases."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    cohort_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    role: Literal["regression", "independent"]
+    execution_groups: list[str] = Field(default_factory=list)
+    behavior_cases: list[str] = Field(default_factory=list)
+
+
 class Registry(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     protocol: Literal["layered-accuracy-v1"]
-    schema_version: Literal[1]
+    schema_version: Literal[3]
+    confirmation_cohorts: list[ConfirmationCohort] = Field(default_factory=list)
     numerical_cases: list[NumericalCase] = Field(min_length=1)
     operator_profiles: list[OperatorProfile] = Field(min_length=1)
     behavior_cases: list[BehaviorCase] = Field(min_length=1)
@@ -108,7 +119,111 @@ class Registry(BaseModel):
                 m.case_id.startswith(("canonical_", "regression_")) for m in case.plan.members
             ):
                 raise ValueError("old 28 cases belong to development only")
+        _check_confirmation_independence(self)
         return self
+
+
+def _independent_confirmation(registry: Registry) -> tuple[set[str], set[str]]:
+    groups = {
+        group.plan.execution_group_id
+        for group in registry.numerical_cases
+        if group.split == "confirmation"
+    }
+    behaviors = {case.case_id for case in registry.behavior_cases if case.split == "confirmation"}
+    if not groups and not behaviors:
+        if registry.confirmation_cohorts:
+            raise ValueError("confirmation cohorts have no registered cases")
+        return set(), set()
+    cohorts = registry.confirmation_cohorts
+    if (
+        not cohorts
+        or len({cohort.cohort_id for cohort in cohorts}) != len(cohorts)
+        or sum(cohort.role == "independent" for cohort in cohorts) != 1
+    ):
+        raise ValueError("confirmation requires unique cohorts and exactly one independent cohort")
+    group_owners: dict[str, str] = {}
+    behavior_owners: dict[str, str] = {}
+    for cohort in cohorts:
+        if not cohort.execution_groups and not cohort.behavior_cases:
+            raise ValueError("empty confirmation cohort")
+        for names, owners in (
+            (cohort.execution_groups, group_owners),
+            (cohort.behavior_cases, behavior_owners),
+        ):
+            for name in names:
+                if name in owners:
+                    raise ValueError("duplicate confirmation cohort member")
+                owners[name] = cohort.cohort_id
+    if set(group_owners) != groups or set(behavior_owners) != behaviors:
+        raise ValueError("confirmation cohort coverage differs from registered cases")
+    for case in registry.behavior_cases:
+        if case.split != "confirmation":
+            continue
+        linked = case.scenario.get("execution_groups", [])
+        if not isinstance(linked, list) or any(
+            not isinstance(group, str) or group_owners.get(group) != behavior_owners[case.case_id]
+            for group in linked
+        ):
+            raise ValueError("confirmation behavior borrows another cohort's execution group")
+    active = next(cohort for cohort in cohorts if cohort.role == "independent")
+    return set(active.execution_groups), set(active.behavior_cases)
+
+
+def _check_confirmation_independence(registry: Registry) -> None:
+    """Reject possible reuse even when a prior unforced continuation is unknown.
+
+    For compatible prompt prefixes, reachable prediction-length intervals must
+    be disjoint. This includes every setup and successful public call, rather
+    than only checking the fixed continuation rows or changing case identifiers.
+    """
+    fresh_groups, fresh_behaviors = _independent_confirmation(registry)
+    if not fresh_groups and not fresh_behaviors:
+        return
+    from golden_gen.behavior_verification import BehaviorScenario
+
+    ranges: dict[tuple[bool, tuple[int, ...], int], str] = {}
+    for group in registry.numerical_cases:
+        for plan in [*group.setup_calls, group.plan]:
+            for member in plan.members:
+                ranges[
+                    (
+                        group.plan.execution_group_id in fresh_groups,
+                        tuple(member.prompt),
+                        len(member.continuation),
+                    )
+                ] = member.case_id
+    for case in registry.behavior_cases:
+        if case.mode not in ("free_generation", "unforced_control"):
+            continue
+        scenario = BehaviorScenario.model_validate(dict(calls=case.scenario.get("calls")))
+        for call in scenario.calls:
+            if call.expected != "success":
+                continue
+            if len(call.prompts) != len(call.params):
+                raise ValueError("successful public call has mismatched parameters")
+            for public_prompt, params in zip(call.prompts, call.params, strict=True):
+                if not public_prompt or params.max_tokens <= 0:
+                    raise ValueError("successful public call has no prediction history")
+                ranges[
+                    (case.case_id in fresh_behaviors, tuple(public_prompt), params.max_tokens)
+                ] = case.case_id
+    if not any(fresh for fresh, _, _ in ranges):
+        raise ValueError("independent confirmation has no prediction history")
+    observed = [
+        (prompt, steps, name) for (fresh, prompt, steps), name in ranges.items() if not fresh
+    ]
+    for (fresh, prompt, steps), name in ranges.items():
+        if not fresh:
+            continue
+        for prior, prior_steps, prior_name in observed:
+            overlap = max(len(prompt), len(prior)) <= min(
+                len(prompt) + steps - 1, len(prior) + prior_steps - 1
+            )
+            width = min(len(prompt), len(prior))
+            if overlap and prompt[:width] == prior[:width]:
+                raise ValueError(
+                    f"confirmation may reuse observed prediction history: {name} / {prior_name}"
+                )
 
 
 class BudgetPolicy(BaseModel):

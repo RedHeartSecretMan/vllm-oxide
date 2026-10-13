@@ -13,7 +13,7 @@ A linear projection whose weight is sharded along the input dimension (dim 1). T
 _Avoid_: input-sharded, row-shard.
 
 **Fused projection**:
-Multiple sub-projections (Q/K/V for attention, or gate/up for SwiGLU MLP) concatenated into a single weight matrix, computed in one matmul, then split by the caller. At TP=1 the layout is `[Q | K | V]` or `[gate | up]` along dim 0.
+Multiple sub-projections (Q/K/V for attention, or gate/up for SwiGLU MLP) stored together in one weight matrix. Packing describes storage; each sub-projection may execute independently. At TP=1 the layout is `[Q | K | V]` or `[gate | up]` along dim 0.
 _Avoid_: packed projection, merged matmul.
 
 **TP seam**:
@@ -21,7 +21,7 @@ The abstraction boundary where future tensor-parallelism wiring can attach witho
 _Avoid_: TP interface, parallelism hook.
 
 **Paged attention**:
-An attention computation that reads K/V from a paged block cache (fixed-size blocks, `block_size=256`) rather than contiguous per-sequence buffers. Prefill uses unpaged `flash_attn_varlen`; decode uses paged `flash_attn_varlen_paged_windowed`.
+An attention computation that reads K/V from a paged block cache rather than contiguous per-sequence buffers. Continued prefill and decode use the complete cached key/value history, while initial prefill can use its projections directly.
 _Avoid_: paged KV cache attention, block attention.
 
 **CausalLM (trait)**:
@@ -144,7 +144,7 @@ The source-bound record of one validation stage and its original evidence depend
 _Avoid_: release manifest, asset inventory.
 
 **Reference oracle**:
-The authoritative correctness target: Transformers BF16 with `output_logits=True` and `attn_implementation=sdpa`. A reference-oracle failure cannot be overridden by baseline evidence.
+The authoritative correctness target: Transformers BF16 with `output_logits=True` and `attn_implementation=sdpa`. Its approved arithmetic profile fixes intermediate precision; a different profile requires new calibration and scope approval. A reference-oracle failure cannot be overridden by baseline evidence.
 _Avoid_: ground truth, canonical engine, expected engine.
 
 **Baseline oracle**:
@@ -156,8 +156,12 @@ The approved, versioned operator and model error budgets for a fixed dtype, kern
 _Avoid_: hidden tolerance, pass-until-green threshold.
 
 **Calibration observation**:
-A non-accepting measurement of same-prefix numerical distributions and diagnostic evidence before the corresponding budgets are approved. Observation completion is not release acceptance.
+A non-accepting measurement of same-prefix numerical distributions and diagnostic evidence before the corresponding scope and budget bindings are approved. Observation completion is not release acceptance.
 _Avoid_: calibration pass, auto-tuned tolerance, baseline acceptance.
+
+**Independent confirmation**:
+A predeclared set of previously unobserved cases used after a failure has informed a repair. It supplements every observed regression obligation; repeating the failed cases does not restore their independence.
+_Avoid_: renamed holdout, optional confirmation report, repeated blind test.
 
 **Performance baseline**:
 The reproducible, evidence-only measurements for fixed single-request and batch workloads: prefill throughput, decode throughput, time to first token, inter-token latency, and peak device memory. It is not a cross-hardware latency promise.
@@ -194,6 +198,10 @@ _Avoid_: batch-average acceptance unit, token row as independent case.
 **Execution group**:
 A registered set of request members executed together in one generation call. It captures shared execution behavior without replacing the individual numerical cases.
 _Avoid_: sequential calls labeled as batch, pooled numerical verdict.
+
+**Confirmation cohort**:
+A frozen group of confirmation cases assigned a role for one Definition Checkpoint. Retained cohorts remain mandatory regressions; one independently frozen cohort supplies the new unobserved holdout. Every case keeps its original split, input and owner identity, and every cohort must pass. The independent cohort must share no reachable prediction history with any prior case or cohort.
+_Avoid_: acceptance reset, replacement prompts, renamed historical split.
 
 **Fixed-prefix replay**:
 A run whose continuation token stream is fixed independently of each implementation's predicted choices. It preserves shared histories while exercising the actual incremental engine path.

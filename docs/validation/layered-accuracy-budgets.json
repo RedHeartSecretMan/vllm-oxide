@@ -17,12 +17,12 @@
     "kv-slots": 0.0,
     "sampler-ids": 0.0
   },
-  "registry_sha256": "88f89084fe7b0c14a877c4c72f275314ad2a8e593d6fbc3ac63a194b91fb98f4",
+  "registry_sha256": "5900b5f567e578deeb26c676c62ead51337db319755f26d1a8a50512b8f13b35",
   "calibration_source": {
-    "commit": "6b7ae7d9ec5e4736a504aa1a58aa36005986bfd3",
-    "tree": "f0f931e75eefa722bad41fb9491b6cb32ce38c4d"
+    "commit": "2dc94452df5f7ed259a8607962fe98619cfd6526",
+    "tree": "40fd91747f33146a2be46cebcf51f64c3c177254"
   },
-  "calibration_evidence_sha256": "d423774300f50f4602dbbfeb23a65a4ef8d8bbd645ca27764e87072af0101faa",
-  "fault_evidence_sha256": "1bccf67c82ff8da33df3ccc3110942366ea2278c46d651d49c8eadb81e83cec8",
-  "rationale": "User-approved layered-budget-v1; see docs/adr/0018-freeze-layered-accuracy-budgets.md for scope, engineering trade-offs, calibration selection bias, independent review and content-addressed evidence. Per-case reference log-score budgets are 2/5 millinats mean/peak, paired baseline excess is 1 millinat, and G_limit=ln(1.25) requires at least 80% of the best reference-token probability. Operator limits are fixed-profile maximum absolute errors, not universal BF16 tolerances. Exact structure, raw selection and required replay remain mandatory; no legacy verdict is changed and budget approval is not release acceptance."
+  "calibration_evidence_sha256": "5f2465c8c9dacdfd2fd5e845dacec1a24cc81a5cdfbcce7af54bbd9732dd3522",
+  "fault_evidence_sha256": "8e38237591f4bdfca812c0426664b6cfd879bb3a0865cdbad6c30bd402915c54",
+  "rationale": "Bind the call-layout-v2 repair and native dependency CI integration to complete Registry 3 calibration. Preserve every ADR-0018 model/operator budget and the ADR-0024 reference precision. Retain all 617 observed/regression owner obligations and require 130 new independent confirmation2 owners, for 747 total. The original failed confirmation remains failed. Original calibration/fault artifacts retain their non-accepting verdicts; checkpoint approval is not release acceptance."
 }

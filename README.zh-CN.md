@@ -2,10 +2,9 @@
 
 [English](README.md) | **简体中文**
 
-> **v0.2.0-rc.1 是实验性源码预发布，不是已通过精度验收的正式 v0.2.0。**
-> 原始数值验收在未修改的预算下有 18/66 个 case 失败。
-> 证据身份、使用方式及剩余门禁见 [RC1 发布说明](docs/releases/v0.2.0-rc.1.md)。
-> RC1 不附带宣称通过验收的 `goldens-v0.2` bundle。
+> **v0.2.0：单 GPU Qwen3 离线推理。**
+> 支持范围与已完成的验证见 [v0.2.0 发布说明](docs/releases/v0.2.0.md)。
+> 已发布的标签与资产见 [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases)。
 
 [CI][ci-url]
 [License: Apache-2.0][license-url]
@@ -41,7 +40,7 @@
 
 ## 这是什么？
 
-vllm-oxide 将 LLM 推理带入 Rust 生态。它构建在 [candle](https://github.com/huggingface/candle)（CUDA 内核、安全张量操作）和 flash-attention（分页注意力内核）之上，提供一个同步、进程内的推理引擎，支持：
+vllm-oxide 将 LLM 推理带入 Rust 生态。它构建在 [candle](https://github.com/huggingface/candle)及项目自身的 CUDA 内核之上，提供一个同步、进程内的推理引擎，支持：
 
 - 持续批处理与前缀缓存
 - 分页 KV 缓存（`block_size = 256`）
@@ -76,7 +75,7 @@ flowchart TD
 
 关键设计决策（完整词汇表见 `CONTEXT.md`）：
 
-- **分页注意力（Paged attention）**：K/V 缓存存储在固定大小的块（`block_size = 256`）中。预填充阶段使用非分页的 `flash_attn_varlen`；解码阶段使用分页的 `flash_attn_varlen_paged_windowed`。
+- **分页注意力（Paged attention）**：K/V 缓存存储在固定大小的块（`block_size = 256`）中。预填充阶段使用非分页的 FP32 causal math（unpaged）；解码阶段使用分页的 FP32 causal math（paged）。
 - **前缀缓存（Prefix caching）**：`BlockPool` 中的链式 XXH64 哈希表对跨请求的公共提示前缀进行去重（写时复制语义）。
 - **TP 接缝（TP seam）**：内部 `ParallelStyle` trait 和 `TpConfig` 枚举保留未来可行性接缝。v0.2.0 仅支持 `TpConfig::Single`，TP/NCCL 不是运行时能力。
 - **CausalLM trait**：内部的引擎面向模型合同。inventory 注册表、loader、scheduler、cache、attention metadata 和 sampler 都隐藏在 `LLM` 后面。
@@ -89,12 +88,13 @@ flowchart TD
 - **推理 / 发布门禁**（启用 `--features cuda`）：
   - NVIDIA GPU，计算能力 **sm_89** 及以上（Ada Lovelace RTX 40 系列、Hopper H100/H200 或更新型号）。
   - 建议至少 8 GB GPU 内存用于 Qwen3-0.6B。
-  - 安装 CUDA 驱动（已在 CUDA 12.x 和 13.2 上测试）。
+  - 安装 NVIDIA CUDA 驱动；本版本使用驱动 595.71 验证。
 
 ### 工具链
 
-- **Rust**：edition 2021；RC1 请使用 Rust 1.94.0。manifest 历史声明的 1.75 下限尚未在本预发布中验证。
-- **系统**：Linux（唯一支持的 NVIDIA CUDA 平台）。Windows 和 macOS GPU 推理不在 v0.2.0 范围内。
+- **Rust**：edition 2021，MSRV 为 **1.94.0**，由 `rust-toolchain.toml` 固定；CPU CI 同时检查当前 stable 工具链。
+- **CUDA 构建**：安装包含 `nvcc` 的 CUDA Toolkit；本版本使用 Toolkit 13.2.51 验证。
+- **系统**：Linux，包括 WSL2。本次发布验证使用 WSL2；原生 Windows 和 macOS GPU 推理不在 v0.2.0 范围内。
 
 ## 快速开始
 
@@ -113,10 +113,12 @@ cargo build --features cuda --release
 精简 CLI（`crates/vllm-oxide-cli`）接受模型来源和可选提示：
 
 ```bash
-cargo run --release -p vllm_oxide_cli --features cuda -- \
-    --model Qwen/Qwen3-0.6B \
-    "The meaning of life is"
+export QWEN3_MODEL_DIR=/absolute/path/to/Qwen3-0.6B
+cargo run --locked --release -p vllm_oxide_cli --features cuda -- \
+    --model "$QWEN3_MODEL_DIR" --max-tokens 2 "The capital of France is"
 ```
+
+模型目录必须对应 `Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234`。[公开 GPU smoke 门禁](docs/validation/public-gpu-smoke.md) 校验模型文件哈希，并执行上述原样命令、真实 warmup、100 次重复调用和混合请求。CLI 的 Hub ID 形式仍可用于试用，但不固定 revision。
 
 如果命令行未提供提示，CLI 会从标准输入读取：
 
@@ -152,7 +154,7 @@ cargo run --release --example generate_qwen3 --features cuda -- hub:Qwen/Qwen3-0
 
 ```toml
 [dependencies]
-vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0-rc.1", features = ["cuda"] }
+vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0", features = ["cuda"] }
 anyhow = "1"
 ```
 
@@ -236,7 +238,7 @@ vllm-oxide 使用 `cuda` 特性门控来区分仅 CPU 开发环境和 GPU 推理
 ```toml
 [features]
 default = []        # 仅 CPU — 测试和开发迭代无需 CUDA。
-cuda = ["dep:candle-flash-attn", "candle-core/cuda"]  # 生产后端。
+cuda = ["candle-core/cuda"]  # 生产后端。
 ```
 
 来自 `Cargo.toml`：默认仅 CPU 以便 `cargo test` 在 CI 上无需 GPU 即可运行。生产调用方传入 `--features cuda`。
@@ -254,7 +256,7 @@ vllm-oxide 有两个不同的测试层级，提供不同层次的保证：
 cargo test
 ```
 
-覆盖 `EngineOptions` 默认值、`Prompt` 变体、`SamplingParams` 验证、配置解析、`Source` 分类和 CLI 参数解析。
+覆盖 `EngineOptions` 默认值、`Prompt` 变体、`SamplingParams` 验证、配置解析、`Source` 分类和 CLI 参数解析。CI 还运行 workspace/internal-golden 测试、Clippy、格式和依赖审计，以及锁定环境下完整的 Python pytest/Ruff/mypy 检查；完整矩阵见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### 第二层：发布门禁（手动，GPU）
 
@@ -268,9 +270,9 @@ cargo test
 
 参考预言机为固定 PyTorch SDPA MATH 后端的 Transformers BF16。基线预言机为 FlashAttention 后端的 vLLM BF16；其配对平均 KL 构成额外门槛，不能豁免参考失败。固定前缀回放保留所有规定的预测行，包括预测 token 分叉后的行；自由生成的分叉和一致率单独诊断，不计算不同历史之间的验收 KL。
 
-旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议，旧 authoritative/publication 入口保持禁用。[schema5 发布适配器](tools/golden-gen/README.md#schema5-release-stages) 将完整原始分层证据接入性能、固定 CPU 门槛、报告、双资产 bundle 和 Python/Rust 干净消费者验证。发布仍要求干净的 evidence-only 候选、完整新审查和独立用户授权。既有工件保留原身份和原判定。
+旧 ADR-0012 的 schema-v4 manifest、L1=token/L2=logits 编号及 `validate-release.sh` 流程均属于历史协议，旧 authoritative/publication 入口保持禁用。[schema5 发布适配器](tools/golden-gen/README.md#schema5-release-stages) 将完整原始分层证据接入性能、固定 CPU 门槛、报告、完整 manifest/压缩包组合及 Python/Rust 干净消费者验证。根据 [ADR-0028](docs/adr/0028-local-release-evidence.md)，原始证据保存在本地，无需上传 GitHub，也不采用分卷。[v0.2.0 验证摘要](docs/releases/goldens-v0.2.md)记录已批准的来源分工和实际产品验收；该摘要不声明旧组合证据包门禁已完成。既有工件保留原身份和原判定。
 
-CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最终 `goldens-v0.2` 仍按 [ADR-0010](docs/adr/0010-golden-release-asset-contract.md) 仅包含 `manifest.json` 与 `goldens-v0.2.tar.gz` 两个资产。
+CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或可选发布。本地证据包按[分层传输契约](docs/validation/layered-release-assets.md)仅包含 `manifest.json` 与 `goldens-v0.2.tar.gz` 两个文件。可选的手动 GitHub 发布还需独立用户授权，并要求每个资产严格小于 2 GiB；该上传限制不影响本地数值验收。
 
 ### CI 绿色与数值验证
 
@@ -278,7 +280,7 @@ CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最
 |---|---|---|
 | **时机** | 每次推送 | 手动，打标签前 |
 | **环境** | 仅 CPU | GPU（sm_89+） |
-| **内容** | 属性测试 | 与 transformers 预言机的黄金比较 |
+| **内容** | Rust/MSRV、Python、lint 和依赖检查 | 公开 CUDA smoke 加完整黄金比较 |
 | **证明** | 编译通过 + 类型正确 | 数值在容差范围内正确 |
 
 ## 文档
@@ -293,7 +295,7 @@ CPU 测试不意味着 GPU 数值通过，也不授权 GPU 采集或发布。最
 
 ## 最低支持的 Rust 版本 (MSRV)
 
-workspace 历史声明为 **1.75**，但 RC1 不宣称已在该工具链上构建通过。请使用记录的验证工具链 **Rust 1.94.0**。声明下限的验证仍属于未完成的正式发布门禁。
+最低支持 **Rust 1.94.0**。workspace manifest 与 `rust-toolchain.toml` 保持一致，CI 在 1.94.0 与 stable 上运行 Rust 检查。这取代未验证的历史 1.75 声明，不代表 GPU 数值验收已通过。
 
 ## 安全
 

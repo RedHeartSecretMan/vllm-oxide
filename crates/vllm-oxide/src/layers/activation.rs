@@ -18,13 +18,18 @@ use candle_core::{DType, Result, Tensor, D::Minus1};
 /// SiLU to the first half, then broadcasts-multiplies by the second half.
 pub fn silu_and_mul(x: &Tensor) -> Result<Tensor> {
     let chunks = x.chunk(2, Minus1)?;
-    let dtype = x.dtype();
+    silu_mul(&chunks[0], &chunks[1])
+}
+
+/// The same materialization rule for independently evaluated gate/up tensors.
+pub(crate) fn silu_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    let dtype = gate.dtype();
     let gate = match dtype {
-        DType::BF16 => chunks[0].to_dtype(DType::F32)?,
-        _ => chunks[0].clone(),
+        DType::BF16 => gate.to_dtype(DType::F32)?,
+        _ => gate.clone(),
     };
     let silu_gate = candle_nn::ops::silu(&gate)?.to_dtype(dtype)?;
-    silu_gate.broadcast_mul(&chunks[1])
+    silu_gate.broadcast_mul(up)
 }
 
 #[cfg(test)]

@@ -338,7 +338,8 @@ impl Sampler {
     ///
     /// `token_history` is the per-row list of token ids generated *so far*
     /// (prompt + completion); only consulted when `params[i].has_penalties()`.
-    /// Pass empty vecs when no penalties are active.
+    /// Rows may be owned buffers or borrowed slices; sampling never copies
+    /// their token storage. Pass empty rows when no penalties are active.
     ///
     /// Returns a `[batch]` tensor of `u32` token ids on the same device as
     /// `logits`. The dtype is `U32` because candle's `Tensor::argmax`
@@ -347,7 +348,7 @@ impl Sampler {
         &mut self,
         logits: &Tensor,
         params: &[SamplingParams],
-        token_history: &[Vec<u32>],
+        token_history: &[impl AsRef<[u32]>],
     ) -> Result<Tensor> {
         let rank = logits.rank();
         if rank != 2 {
@@ -382,7 +383,7 @@ impl Sampler {
         &mut self,
         logits: &Tensor,
         params: &[SamplingParams],
-        token_history: &[Vec<u32>],
+        token_history: &[impl AsRef<[u32]>],
         batch: usize,
     ) -> Result<Tensor> {
         // Consume exactly one scalar seed per row, including greedy rows. A
@@ -410,7 +411,7 @@ impl Sampler {
         &mut self,
         _logits: &Tensor,
         _params: &[SamplingParams],
-        _token_history: &[Vec<u32>],
+        _token_history: &[impl AsRef<[u32]>],
         _batch: usize,
     ) -> Result<Tensor> {
         Err(CandleError::msg(
@@ -422,7 +423,7 @@ impl Sampler {
         &mut self,
         logits: &Tensor,
         params: &[SamplingParams],
-        token_history: &[Vec<u32>],
+        token_history: &[impl AsRef<[u32]>],
         batch: usize,
         vocab: usize,
     ) -> Result<Tensor> {
@@ -436,8 +437,12 @@ impl Sampler {
         // tests pin the contract.
         for row in 0..batch {
             let row_tensor = logits.get(row)?;
-            let sampled =
-                self.sample_row_host(&row_tensor, &params[row], &token_history[row], vocab)?;
+            let sampled = self.sample_row_host(
+                &row_tensor,
+                &params[row],
+                token_history[row].as_ref(),
+                vocab,
+            )?;
             // Vocabulary size is bounded by u32::MAX in every realistic model
             // (Qwen3 vocab is ~150k); the cast preserves all valid token ids.
             #[allow(clippy::cast_possible_truncation)]
@@ -676,6 +681,30 @@ mod tests {
         use super::*;
 
         #[test]
+        fn borrowed_histories_preserve_per_row_penalties() {
+            let logits = Tensor::from_vec(
+                vec![3.0_f32, 2.0, 1.0, 3.0, 2.0, 1.0, 3.0, 2.0, 1.0],
+                (3, 3),
+                &Device::Cpu,
+            )
+            .unwrap();
+            let params = vec![
+                SamplingParams {
+                    frequency_penalty: 1.0,
+                    ..SamplingParams::default()
+                };
+                3
+            ];
+            let histories: [&[u32]; 3] = [&[0, 0], &[], &[1, 1, 1]];
+            let selected = Sampler::new_with_seed(0)
+                .forward(&logits, &params, &histories)
+                .unwrap();
+
+            // Only row 0 loses its original winner: token 0's score is 3 - 2.
+            assert_eq!(selected_token_ids_to_host(&selected).unwrap(), [1, 0, 0]);
+        }
+
+        #[test]
         fn legacy_sampler_records_one_full_vocabulary_host_transfer() {
             HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
 
@@ -764,6 +793,107 @@ mod tests {
         }
 
         #[test]
+        #[ignore = "manual CUDA sampler microbenchmark, not a release performance gate"]
+        fn benchmark_greedy_batches() {
+            const VOCAB: usize = 151_936;
+            const ITERATIONS: usize = 128;
+            let device = cuda();
+            let row = (0..VOCAB).map(|token| token as f32).collect::<Vec<_>>();
+            for batch in [1, 8, 32, 128] {
+                let logits = repeat_row(&row, batch, &device);
+                let params = vec![SamplingParams::default(); batch];
+                let histories = vec![&[] as &[u32]; batch];
+                let mut sampler = Sampler::new_with_seed(7);
+                for _ in 0..32 {
+                    let selected = sampler.forward(&logits, &params, &histories).unwrap();
+                    assert_eq!(
+                        selected_token_ids_to_host(&selected).unwrap(),
+                        vec![u32::try_from(VOCAB - 1).unwrap(); batch]
+                    );
+                }
+                let mut samples_us = Vec::new();
+                for _ in 0..7 {
+                    device.synchronize().unwrap();
+                    let started = std::time::Instant::now();
+                    for _ in 0..ITERATIONS {
+                        // The CUDA adapter synchronizes before returning.
+                        // Include Rust preparation/allocation and scratch reuse;
+                        // logits preparation and selected-token D2H stay outside.
+                        drop(sampler.forward(&logits, &params, &histories).unwrap());
+                    }
+                    device.synchronize().unwrap();
+                    samples_us.push(started.elapsed().as_secs_f64() * 1e6 / ITERATIONS as f64);
+                }
+                println!("greedy batch={batch} vocab={VOCAB} samples_us={samples_us:?}");
+            }
+        }
+
+        #[test]
+        fn greedy_batches_preserve_row_offsets_and_lowest_token_ties() {
+            let device = cuda();
+            for (batch, vocab) in [(1, 17), (33, 513), (32, 151_936)] {
+                let mut values = vec![-3.0_f32; batch * vocab];
+                let mut expected = Vec::with_capacity(batch);
+                let params = (0..batch)
+                    .map(|row| {
+                        let first = (row * 97 + vocab - 1) % vocab;
+                        let tied = (first + 256) % vocab;
+                        values[row * vocab + first] = 5.0;
+                        values[row * vocab + tied] = 5.0;
+                        expected.push(u32::try_from(first.min(tied)).unwrap());
+                        if row % 2 == 0 {
+                            SamplingParams::default()
+                        } else {
+                            SamplingParams {
+                                temperature: 0.7,
+                                top_k: Some(1),
+                                top_p: Some(0.5),
+                                ..SamplingParams::default()
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let logits = Tensor::from_vec(values, (batch, vocab), &device).unwrap();
+                // Histories are deliberately nonempty: no-op penalties must
+                // leave every row's argmax unchanged.
+                let histories = vec![&[0_u32, 0, 1][..]; batch];
+                for dtype in [DType::F32, DType::BF16] {
+                    let logits = logits.to_dtype(dtype).unwrap();
+                    let selected = Sampler::new_with_seed(17)
+                        .forward(&logits, &params, &histories)
+                        .unwrap();
+                    assert_eq!(selected_token_ids_to_host(&selected).unwrap(), expected);
+                }
+            }
+        }
+
+        #[test]
+        fn greedy_batch_with_penalties_keeps_history_effects() {
+            let device = cuda();
+            let logits = repeat_row(&[3.0, 2.0, 1.0], 4, &device);
+            let params = [
+                SamplingParams::default(),
+                SamplingParams {
+                    presence_penalty: 2.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    frequency_penalty: 1.0,
+                    ..SamplingParams::default()
+                },
+                SamplingParams {
+                    repetition_penalty: 2.0,
+                    ..SamplingParams::default()
+                },
+            ];
+            let histories: [&[u32]; 4] = [&[0], &[0], &[0, 0], &[0]];
+            let selected = Sampler::new_with_seed(17)
+                .forward(&logits, &params, &histories)
+                .unwrap();
+            assert_eq!(selected_token_ids_to_host(&selected).unwrap(), [0, 1, 1, 1]);
+        }
+
+        #[test]
         fn mixed_device_paths_are_isolated_and_transfer_only_selected_tokens() {
             HOST_TRANSFERS.with(|transfers| transfers.borrow_mut().clear());
             let device = cuda();
@@ -846,8 +976,11 @@ mod tests {
                 vec![0],
             ];
             let mut sampler = Sampler::new_with_seed(7);
+            let borrowed_histories = histories.iter().map(Vec::as_slice).collect::<Vec<_>>();
 
-            let selected = sampler.forward(&logits, &params, &histories).unwrap();
+            let selected = sampler
+                .forward(&logits, &params, &borrowed_histories)
+                .unwrap();
             assert!(
                 HOST_TRANSFERS.with(|transfers| transfers.borrow().is_empty()),
                 "device sampling must not transfer logits"

@@ -23,6 +23,9 @@ MANIFEST_LIMIT = 16 * 1024**2
 ARTIFACT_LIMIT = 50_000
 FILE_LIMIT = 8 * 1024**3 - 1
 TOTAL_LIMIT = 1024**4
+# A local compressed stream has a finite bound independent of hosting limits.
+# Twice the extracted bound leaves room for USTAR padding and gzip overhead.
+ARCHIVE_LIMIT = 2 * TOTAL_LIMIT
 # GitHub's documented per-asset limit, checked 2026-09-08: strictly under 2 GiB.
 UPLOAD_LIMIT = 2 * 1024**3
 ARCHIVE = "goldens-v0.2.tar.gz"
@@ -179,6 +182,11 @@ def check_upload_size(size: int) -> None:
         raise ValueError("capacity decision required: GitHub asset must be under 2 GiB")
 
 
+def check_archive_size(size: int) -> None:
+    if size > ARCHIVE_LIMIT:
+        raise ValueError("local archive exceeds compressed size limit")
+
+
 def _capacity(parent: Path, size: int) -> None:
     if shutil.disk_usage(parent).free < size + MANIFEST_LIMIT:
         raise ValueError("capacity decision required: insufficient disk space")
@@ -232,7 +240,7 @@ def build_bundle(root: Path, manifest: ReleaseManifest, destination: Path) -> Pa
                 compressed.write(bytes(1024))
             raw.flush()
             os.fsync(raw.fileno())
-        check_upload_size(archive.stat().st_size)
+        check_archive_size(archive.stat().st_size)
         bound = manifest.model_copy(
             update={"archive": ArchiveIdentity(filename="goldens-v0.2.tar.gz", sha256=sha(archive))}
         )
@@ -319,7 +327,7 @@ def install_transport(bundle: Path, cache: Path) -> Path:
     assert manifest.archive is not None
     archive = bundle / ARCHIVE
     regular(archive)
-    check_upload_size(archive.stat().st_size)
+    check_archive_size(archive.stat().st_size)
     if sha(archive) != manifest.archive.sha256:
         raise ValueError("archive checksum mismatch")
     parent = cache / "goldens-v0.2"

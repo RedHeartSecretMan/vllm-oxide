@@ -2,10 +2,10 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> **v0.2.0-rc.1 is an experimental source prerelease, not a numerically qualified v0.2.0 release.**
-> The recorded numerical run failed 18 of 66 cases under the unchanged budgets.
-> See the [RC1 release notes](docs/releases/v0.2.0-rc.1.md) for evidence identities,
-> supported usage and remaining release gates. No passing `goldens-v0.2` bundle is published with RC1.
+> **v0.2.0 — single-GPU Qwen3 offline inference.**
+> Supported scope and completed validation are recorded in the
+> [v0.2.0 release notes](docs/releases/v0.2.0.md). Published tags and assets are
+> listed in [Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases).
 
 [![CI][ci-badge]][ci-url]
 [![License: Apache-2.0][license-badge]][license-url]
@@ -42,7 +42,7 @@ A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending
 
 ## What is this?
 
-vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https://github.com/huggingface/candle) (CUDA kernels, safe tensor ops) and flash-attention (paged attention kernels), it provides a synchronous, in-process engine with:
+vllm-oxide brings LLM inference to the Rust ecosystem. Built on [candle](https://github.com/huggingface/candle) and project-owned CUDA kernels, it provides a synchronous, in-process engine with:
 
 - Continuous batching and prefix caching
 - Paged KV cache (`block_size = 256`)
@@ -77,7 +77,7 @@ The engine runs a synchronous `step()` loop: schedule tokens, prepare tensors, r
 
 Key design decisions (see `CONTEXT.md` for the full vocabulary):
 
-- **Paged attention**: K/V cache stored in fixed-size blocks (`block_size = 256`). Prefill uses unpaged `flash_attn_varlen`; decode uses paged `flash_attn_varlen_paged_windowed`.
+- **Paged attention**: K/V cache stored in fixed-size blocks (`block_size = 256`). Initial prefill reads projection K/V; continued prefill and decode read the paged cache. Both use bounded FP32 attention math over BF16/F16 storage ([ADR-0020](docs/adr/0020-bounded-reference-arithmetic.md)).
 - **Prefix caching**: Chained XXH64 hash table in `BlockPool` deduplicates common prompt prefixes across requests (CoW semantics).
 - **TP seam**: The internal `ParallelStyle` trait + `TpConfig` enum preserve a future feasibility seam. v0.2.0 supports `TpConfig::Single` only; TP/NCCL is not a runtime capability.
 - **CausalLM trait**: An internal engine-facing model contract. The inventory registry, loader, scheduler, cache, attention metadata, and sampler are implementation details behind `LLM`.
@@ -90,12 +90,13 @@ Key design decisions (see `CONTEXT.md` for the full vocabulary):
 - **Inference / release gate** (with `--features cuda`):
   - NVIDIA GPU with compute capability **sm_89** or higher (Ada Lovelace RTX 40-series, Hopper H100/H200, or newer).
   - At least 8 GB of GPU memory recommended for Qwen3-0.6B.
-  - CUDA driver installed (tested with CUDA 12.x and 13.2).
+  - NVIDIA CUDA driver installed; this release was validated with driver 595.71.
 
 ### Toolchain
 
-- **Rust**: edition 2021; use Rust 1.94.0 for RC1. The historical manifest minimum of 1.75 is not validated for this prerelease.
-- **System**: Linux (the only supported NVIDIA CUDA platform). Windows and macOS GPU inference are outside v0.2.0.
+- **Rust**: edition 2021, MSRV **1.94.0**, pinned by `rust-toolchain.toml`. CPU CI also tests the current stable toolchain.
+- **CUDA build**: install the CUDA Toolkit, including `nvcc`; this release was validated with Toolkit 13.2.51.
+- **System**: Linux, including WSL2. The release validation used WSL2; native Windows and macOS GPU inference are outside v0.2.0.
 
 ## Quick Start
 
@@ -114,10 +115,12 @@ cargo build --features cuda --release
 The thin CLI (`crates/vllm-oxide-cli`) accepts a model source and an optional prompt:
 
 ```bash
-cargo run --release -p vllm_oxide_cli --features cuda -- \
-    --model Qwen/Qwen3-0.6B \
-    "The meaning of life is"
+export QWEN3_MODEL_DIR=/absolute/path/to/Qwen3-0.6B
+cargo run --locked --release -p vllm_oxide_cli --features cuda -- \
+    --model "$QWEN3_MODEL_DIR" --max-tokens 2 "The capital of France is"
 ```
+
+The directory must contain `Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234`. The [public GPU smoke gate](docs/validation/public-gpu-smoke.md) verifies the model hashes and executes this exact command, real warmup, 100 repeated calls and mixed requests. Hub IDs remain convenient for exploration but do not pin a revision through the CLI.
 
 If no prompt is given on the command line, the CLI reads from stdin:
 
@@ -153,7 +156,7 @@ Add `vllm_oxide` as a dependency in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0-rc.1", features = ["cuda"] }
+vllm_oxide = { git = "https://github.com/RedHeartSecretMan/vllm-oxide.git", tag = "v0.2.0", features = ["cuda"] }
 anyhow = "1"
 ```
 
@@ -237,7 +240,7 @@ vllm-oxide uses a `cuda` feature gate to separate CPU-only development from GPU 
 ```toml
 [features]
 default = []        # CPU-only — tests and dev iteration run without CUDA.
-cuda = ["dep:candle-flash-attn", "candle-core/cuda"]  # Production backend.
+cuda = ["candle-core/cuda"]  # Production backend.
 ```
 
 Default is CPU-only so `cargo test` runs on CI without a GPU. Production callers (the CLI, the engine) pass `--features cuda`.
@@ -255,7 +258,7 @@ vllm-oxide has two distinct test tiers with different guarantees:
 cargo test
 ```
 
-Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation, config parsing, `Source` classification, and CLI argument parsing.
+Covers `EngineOptions` defaults, `Prompt` variants, `SamplingParams` validation, config parsing, `Source` classification, and CLI argument parsing. CI additionally runs workspace/internal-golden tests, Clippy, formatting, dependency auditing, and complete Python pytest/Ruff/mypy checks on their locked environments. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full matrix.
 
 ### Tier 2: Release gate (manual, GPU)
 
@@ -269,9 +272,9 @@ The current release protocol is [ADR-0015](docs/adr/0015-layered-accuracy-valida
 
 The Reference oracle is Transformers BF16 with the fixed PyTorch SDPA MATH backend. The Baseline oracle is vLLM BF16 with FlashAttention; its paired mean KL contributes an additional gate and cannot waive a reference failure. Fixed-prefix replay preserves all declared prediction rows, including after a predicted-token divergence. Free-generation divergence and agreement are separate diagnostics, never different-history KL evidence.
 
-The old ADR-0012 schema-v4 manifests, L1=token/L2=logits terminology and `validate-release.sh` workflow are historical. Their authoritative/publication entrypoints stay disabled. The [schema5 release adapter](tools/golden-gen/README.md#schema5-release-stages) connects complete raw layered evidence to performance, fixed CPU gates, the report, two-asset bundle and Python/Rust clean consumption. Publication still requires a clean evidence-only candidate, fresh full review and independent user authority. Existing artifacts retain their original identities and verdicts.
+The old ADR-0012 schema-v4 manifests, L1=token/L2=logits terminology and `validate-release.sh` workflow are historical. Their authoritative/publication entrypoints stay disabled. The [schema5 release adapter](tools/golden-gen/README.md#schema5-release-stages) connects complete raw layered evidence to performance, fixed CPU gates, the report, the complete manifest/archive pair and Python/Rust clean consumption. Under [ADR-0028](docs/adr/0028-local-release-evidence.md), raw evidence remains local; GitHub evidence uploads and split archives are unnecessary. The [v0.2.0 validation summary](docs/releases/goldens-v0.2.md) records the approved source roles and actual product acceptance. It does not claim completion of the legacy combined evidence-package gate. Existing artifacts retain their original identities and verdicts.
 
-No GPU collection or publication is implied by CPU tests. GPU stages and publication require their own authorization. The eventual `goldens-v0.2` release retains exactly `manifest.json` and `goldens-v0.2.tar.gz` under [ADR-0010](docs/adr/0010-golden-release-asset-contract.md).
+No GPU collection or publication is implied by CPU tests. GPU stages and optional publication require their own authorization. The local bundle retains exactly `manifest.json` and `goldens-v0.2.tar.gz` under the [layered transport contract](docs/validation/layered-release-assets.md). Optional manual GitHub publication additionally requires independent user authority and assets strictly smaller than 2 GiB; that upload limit does not gate local numerical acceptance.
 
 ### CI green vs numerically validated
 
@@ -279,7 +282,7 @@ No GPU collection or publication is implied by CPU tests. GPU stages and publica
 |---|---|---|
 | **When** | Every push | Manual, before tagging |
 | **Where** | CPU-only | GPU (sm_89+) |
-| **What** | Property tests | Golden comparison vs transformers oracle |
+| **What** | Rust/MSRV, Python, lint and dependency checks | Public CUDA smoke plus complete golden comparison |
 | **Proves** | Compiles + types correct | Numerically correct within tolerance |
 
 ## Documentation
@@ -294,7 +297,7 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for br
 
 ## Minimum Supported Rust Version (MSRV)
 
-The workspace historically declares **1.75**, but RC1 does not claim a successful build on that toolchain. Use **Rust 1.94.0**, the recorded validation toolchain. Verification of the declared minimum remains part of the unfinished formal release gate.
+The supported minimum is **Rust 1.94.0**. The workspace manifest and `rust-toolchain.toml` agree, and CI runs the Rust checks on both 1.94.0 and stable. This replaces the unverified historical 1.75 declaration; it does not assert numerical release acceptance.
 
 ## Security
 

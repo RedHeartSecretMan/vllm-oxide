@@ -56,9 +56,8 @@ macro_rules! extract_ptr {
 
 fn slice_ptr(tensor: &Tensor) -> Result<(u64, TensorGuard)> {
     let (storage, layout) = tensor.storage_and_layout();
-    let cuda_storage = match &*storage {
-        Storage::Cuda(s) => s,
-        _ => candle_core::bail!("expected CUDA storage"),
+    let Storage::Cuda(cuda_storage) = &*storage else {
+        candle_core::bail!("expected CUDA storage")
     };
 
     let (ptr, guard): (u64, SyncOnDrop<'static>) = match tensor.dtype() {
@@ -87,9 +86,8 @@ fn slice_ptr(tensor: &Tensor) -> Result<(u64, TensorGuard)> {
 
 fn get_stream(tensor: &Tensor) -> Result<CUstream> {
     let (storage, _) = tensor.storage_and_layout();
-    let cuda_storage = match &*storage {
-        Storage::Cuda(s) => s,
-        _ => candle_core::bail!("expected CUDA storage"),
+    let Storage::Cuda(cuda_storage) = &*storage else {
+        candle_core::bail!("expected CUDA storage")
     };
     Ok(cuda_storage.device().cuda_stream().cu_stream())
 }

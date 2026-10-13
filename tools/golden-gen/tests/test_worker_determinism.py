@@ -69,3 +69,24 @@ def test_worker_evidence_rejects_disabled_flags_wrong_backend_or_late_setup():
     wrong_attention = {**record, "attention": [{**record["attention"][0], "flash_attn_version": 3}]}
     with pytest.raises(ValidationError, match="flash_attn_version"):
         BaselineWorkerEvidence.model_validate(wrong_attention)
+
+
+def test_baseline_scheduling_evidence_requires_actual_inprocess_owner_identity():
+    from golden_gen.worker_determinism import BaselineSchedulingEvidence
+
+    evidence = dict(
+        engine_core_class="vllm.v1.engine.core_client.InprocClient",
+        multiprocessing_enabled=False,
+        driver_pid=11,
+        worker_pid=11,
+    )
+    BaselineSchedulingEvidence.model_validate(evidence)
+    for key, bad in (
+        ("engine_core_class", "vllm.v1.engine.core_client.SyncMPClient"),
+        ("multiprocessing_enabled", True),
+        ("multiprocessing_enabled", 0),
+        ("worker_pid", 12),
+        ("driver_pid", True),
+    ):
+        with pytest.raises(ValueError):
+            BaselineSchedulingEvidence.model_validate({**evidence, key: bad})

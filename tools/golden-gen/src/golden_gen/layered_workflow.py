@@ -66,26 +66,30 @@ def assemble_manifest(
 
     supervised = authoritative and (repo / SUPERVISION_POLICY_PATH).exists()
     roles: dict[str, Any] = {}
+    manifest_version = 1
     if supervised:
-        if supervision_policy is None or retained_owner_ledger is None:
-            raise ValueError(
-                "supervision assembly requires policy and retained ledger dependencies"
-            )
+        if supervision_policy is None:
+            raise ValueError("supervision assembly requires its policy dependency")
         supervision, digest = load_policy(repo)
         validate_equivalence(repo, supervision, source)
         policy_ref = artifact_reference(root, supervision_policy)
-        ledger_ref = artifact_reference(root, retained_owner_ledger)
-        if (
-            policy_ref["sha256"] != digest
-            or ledger_ref["sha256"] != supervision["retained_ledger_sha256"]
-        ):
+        if policy_ref["sha256"] != digest:
             raise ValueError("supervision assembly dependency identity mismatch")
         roles = dict(
-            evaluator_source=source,
-            supervision_source=source,
-            supervision_policy=policy_ref,
-            retained_owner_ledger=ledger_ref,
+            evaluator_source=source, supervision_source=source, supervision_policy=policy_ref
         )
+        if supervision["policy_id"] == "bounded-telemetry-fresh-v1":
+            if retained_owner_ledger is not None:
+                raise ValueError("fresh supervision assembly cannot borrow a retained ledger")
+            manifest_version = 3
+        else:
+            if retained_owner_ledger is None:
+                raise ValueError("retained supervision assembly requires its ledger dependency")
+            ledger_ref = artifact_reference(root, retained_owner_ledger)
+            if ledger_ref["sha256"] != supervision["retained_ledger_sha256"]:
+                raise ValueError("supervision assembly dependency identity mismatch")
+            roles["retained_owner_ledger"] = ledger_ref
+            manifest_version = 2
         source = supervision["measurement_source"]
     elif supervision_policy is not None or retained_owner_ledger is not None:
         raise ValueError("unexpected supervision dependencies for legacy assembly")
@@ -119,7 +123,7 @@ def assemble_manifest(
     records = assemble_entries(root, inventory)
     records.update(
         protocol="layered-accuracy-v1",
-        schema_version=2 if supervised else 1,
+        schema_version=manifest_version,
         source=source,
         registry_sha256=registry_sha,
         policy_sha256=policy_sha,

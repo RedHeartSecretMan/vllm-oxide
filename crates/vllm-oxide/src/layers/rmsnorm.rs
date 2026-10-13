@@ -19,6 +19,12 @@
 use candle_core::{DType, Result, Tensor, D::Minus1};
 use candle_nn::VarBuilder;
 
+#[cfg(feature = "cuda")]
+mod cuda;
+
+#[cfg(all(test, feature = "cuda"))]
+mod reference_case;
+
 pub struct RMSNorm {
     weight: Tensor,
     eps: f64,
@@ -70,11 +76,21 @@ impl RMSNorm {
             }
         };
 
-        let hidden_size = sum_fp32.dim(Minus1)?;
-        #[allow(clippy::cast_precision_loss)]
-        let hidden_f = hidden_size as f64;
-        let var = (sum_fp32.sqr()?.sum_keepdim(Minus1)? / hidden_f)?;
-        let normed_fp32 = sum_fp32.broadcast_div(&(var + self.eps)?.sqrt()?)?;
+        let generic_normalize = || -> Result<Tensor> {
+            let hidden_size = sum_fp32.dim(Minus1)?;
+            #[allow(clippy::cast_precision_loss)]
+            let hidden_f = hidden_size as f64;
+            let var = (sum_fp32.sqr()?.sum_keepdim(Minus1)? / hidden_f)?;
+            sum_fp32.broadcast_div(&(var + self.eps)?.sqrt()?)
+        };
+        #[cfg(feature = "cuda")]
+        let normed_fp32 = if sum_fp32.device().is_cuda() && internal_dtype == DType::F32 {
+            cuda::normalize(&sum_fp32, self.eps)?
+        } else {
+            generic_normalize()?
+        };
+        #[cfg(not(feature = "cuda"))]
+        let normed_fp32 = generic_normalize()?;
         let normed = normed_fp32
             .to_dtype(orig_dtype)?
             .broadcast_mul(&self.weight)?;
@@ -90,6 +106,54 @@ impl RMSNorm {
 )]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires CUDA; exact normalization rounding regression"]
+    fn cuda_matches_vectorized_reference_rounding() {
+        let device = candle_core::Device::new_cuda(0).unwrap();
+        let make_values = |bits: &[u16]| {
+            bits.iter()
+                .copied()
+                .map(half::bf16::from_bits)
+                .collect::<Vec<_>>()
+        };
+        let input =
+            Tensor::from_vec(make_values(&reference_case::INPUT), (1, 128), &device).unwrap();
+        let weight = Tensor::from_vec(make_values(&reference_case::WEIGHT), 128, &device).unwrap();
+        let result = RMSNorm::new(weight.clone(), reference_case::EPSILON)
+            .forward(&input, None)
+            .unwrap()
+            .0;
+        let bits = |tensor: &Tensor| {
+            tensor
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<half::bf16>()
+                .unwrap()
+                .into_iter()
+                .map(half::bf16::to_bits)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&result), reference_case::EXPECTED);
+
+        // Reproduce the old GPU operation sequence on this observed failing
+        // input, so the regression cannot silently become a vacuous fixture.
+        let values = input.to_dtype(DType::F32).unwrap();
+        let variance = (values.sqr().unwrap().sum_keepdim(Minus1).unwrap() / 128.0).unwrap();
+        let inverse_denominator = (variance + reference_case::EPSILON)
+            .unwrap()
+            .sqrt()
+            .unwrap();
+        let legacy = values
+            .broadcast_div(&inverse_denominator)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap()
+            .broadcast_mul(&weight)
+            .unwrap();
+        assert_ne!(bits(&legacy), reference_case::EXPECTED);
+    }
 
     /// Pure-FP32 reference implementation, independent of the production code
     /// path. The property test compares this against `RMSNorm::forward` run on
