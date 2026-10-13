@@ -5,7 +5,7 @@
 [![CI](https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/RedHeartSecretMan/vllm-oxide/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-vllm-oxide is a Rust engine for **single-GPU, synchronous, offline Qwen3 inference**, built on [Candle](https://github.com/huggingface/candle) and project-owned CUDA kernels. It draws on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and vLLM's architecture, with continuous batching, prefix caching, a paged KV cache, and recompute preemption. This project is maintained independently of upstream vLLM.
+vllm-oxide is a Rust engine for **single-GPU, synchronous, offline Qwen3 inference**, built on [Candle](https://github.com/huggingface/candle) and project-owned CUDA kernels. It draws on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm)'s architecture, with continuous batching, prefix caching, a paged KV cache, and recompute preemption. This project is maintained independently of upstream vLLM.
 
 **v0.2.0 is available as source.** The validated workload is **Qwen3-0.6B in BF16** on one CUDA GPU. See the [release notes](docs/releases/v0.2.0.en.md), [validation summary](docs/releases/goldens-v0.2.md), and [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
 
