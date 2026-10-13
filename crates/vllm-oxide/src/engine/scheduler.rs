@@ -919,8 +919,8 @@ impl Scheduler {
     }
 }
 
-/// Per-step return value containing the completion tokens for a finished
-/// request. Accumulated by `LLM::generate` until `is_finished()`.
+/// One public result per accepted prompt, returned by `LLM::generate` in input
+/// order. Token IDs and text contain the generated completion, not the prompt.
 ///
 /// The `text` field is populated by the composition root (`llm.rs`) during
 /// detokenization — the scheduler does not have access to a tokenizer.
@@ -928,8 +928,11 @@ impl Scheduler {
 pub struct RequestOutput {
     /// Stable public identity assigned when the prompt is accepted.
     pub request_id: usize,
+    /// Generated completion token IDs.
     pub token_ids: Vec<u32>,
+    /// Completion text decoded with the resolved tokenizer.
     pub text: String,
+    /// Whether this request reached its configured stopping condition.
     pub finished: bool,
 }
 

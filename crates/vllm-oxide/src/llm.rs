@@ -38,7 +38,7 @@ use crate::golden_capture::{BenchmarkSession, CaptureSession};
 /// Mirrors the supported single-GPU subset of nano-vllm's `Config`.
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
-    /// Maximum number of tokens processed in one prefill step.
+    /// Maximum tokens processed across prefill and decode in one scheduler step.
     pub max_num_batched_tokens: usize,
     /// Maximum number of concurrently-running sequences.
     pub max_num_seqs: usize,
@@ -96,11 +96,12 @@ impl EngineOptions {
     }
 }
 
-/// Input prompt for `LLM::generate`. Supports both natural-language text
-/// and pre-tokenized fixtures (useful for golden comparison tests).
+/// Input prompt for [`LLM::generate`]. Text and token IDs may share a batch.
 #[derive(Debug, Clone)]
 pub enum Prompt {
+    /// Plain text, encoded with the resolved model tokenizer.
     Text(String),
+    /// Pre-tokenized input. Each ID must belong to the resolved vocabulary.
     TokenIds(Vec<u32>),
 }
 
