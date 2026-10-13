@@ -10,8 +10,7 @@ This record describes the documentation operation, not new inference validation.
 | `v0.2.0.rc.1` | `21cd848fb1256dd908a29d4f3b08596fe1dd39fc` | `docs/align-v0.2.0-rc.1` |
 | `v0.2.0` | `289cb65b475bb472b5c31db2615c3a5d4cbba0db` | `docs/align-v0.2.0` |
 
-The original annotated tag objects remain under
-`archive/before-doc-refresh-2026-10-13/<version>`. Their commits, original
+The original implementation commits remain available in Git history. Original
 measurement identities, evidence assets and verdicts remain available. The
 existing version tag points to a reviewed documentation descendant so GitHub's
 generated source archives include the improved guides.
@@ -26,16 +25,16 @@ for the guarded publication process and the [version history](releases/README.md
 for the original validation state. New code behavior uses a new release version;
 this maintenance operation changes documentation only.
 
-Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.1.0](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.1.0).
+Original implementation: [`5203749`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/52037493b38c2d01c4c07a98d2d8f22ca68f2509).
 
-Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1).
+Original implementation: [`21cd848`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/21cd848fb1256dd908a29d4f3b08596fe1dd39fc).
 
-Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0).
+Original implementation: [`289cb65`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/289cb65b475bb472b5c31db2615c3a5d4cbba0db).
 
 ## Reviewed documentation commits
 
-| Version | Documentation maintenance commit | Original tag archive |
+| Version | Documentation maintenance commit | Original implementation |
 |---|---|---|
-| `v0.1.0` | [`39a6960`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/39a6960fb6acfe8d79996b33bd235b654d40e931) | [`archive/before-doc-refresh-2026-10-13/v0.1.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.1.0) |
-| `v0.2.0.rc.1` | [`9049fe7`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/9049fe7490f62fc0e2402ca7a23918dd55c680df) | [`archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0.rc.1) |
-| `v0.2.0` | [`6d2993e`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/6d2993e021d75976adbcd8734ee33d0ebb60c54e) | [`archive/before-doc-refresh-2026-10-13/v0.2.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0) |
+| `v0.1.0` | [`a1f2699`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/a1f2699c7cd4188c68c5238d1302f42b3dd34366) | [`5203749`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/52037493b38c2d01c4c07a98d2d8f22ca68f2509) |
+| `v0.2.0.rc.1` | [`8107ff4`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/8107ff4efd65d7acf0559fab9c8f50c25c736953) | [`21cd848`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/21cd848fb1256dd908a29d4f3b08596fe1dd39fc) |
+| `v0.2.0` | [`1a5e62a`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/1a5e62a50b2cc90ded24b5852415590a1c514bb6) | [`289cb65`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/289cb65b475bb472b5c31db2615c3a5d4cbba0db) |
