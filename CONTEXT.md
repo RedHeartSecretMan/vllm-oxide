@@ -1,6 +1,8 @@
 # vllm-oxide
 
-A Rust port of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) trending toward vLLM's V1 architecture: a single-GPU, Qwen3-focused, offline LLM inference engine for v0.1.
+A Rust engine for single-GPU, synchronous, offline Qwen3 inference, drawing on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm).
+
+This vocabulary describes the historical v0.1.0 source. Future work mentioned below is historical design intent, not a guarantee of v0.2.0 features. See the [architecture overview](docs/architecture.md), [validation limits](docs/validation/README.md) and [documentation maintenance record](docs/version-doc-update.md).
 
 ## Language
 
@@ -17,7 +19,7 @@ Multiple sub-projections (Q/K/V for attention, or gate/up for SwiGLU MLP) concat
 _Avoid_: packed projection, merged matmul.
 
 **TP seam**:
-The abstraction boundary where future tensor-parallelism wiring (NCCL communicator, all-reduce, all-gather) attaches without rewriting model code. In v0.1 the seam lives in the `ParallelStyle` trait + `TpConfig` enum; `TpConfig::Single` is the zero-cost identity path, `TpConfig::Sharded` is the named-but-unimplemented v0.2 contract.
+The abstraction boundary where future tensor-parallelism wiring (NCCL communicator, all-reduce, all-gather) attaches without rewriting model code. In v0.1 the seam lives in the `ParallelStyle` trait + `TpConfig` enum; `TpConfig::Single` is the zero-cost identity path, `TpConfig::Sharded` is named but unimplemented; future TP wiring was a historical proposal.
 _Avoid_: TP interface, parallelism hook.
 
 **Paged attention**:
@@ -25,7 +27,7 @@ An attention computation that reads K/V from a paged block cache (fixed-size blo
 _Avoid_: paged KV cache attention, block attention.
 
 **CausalLM (trait)**:
-The engine-facing model contract in v0.1 — `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits` + `vocab_size()` + `device()`. Returned by the registry as `Box<dyn CausalLM>`; EngineCore holds one stable type regardless of architecture. `forward` returns hidden_states (not logits) so prefill can skip lm_head projection on non-last tokens; `compute_logits` is called separately when sampling. v0.2 adds new tasks via new independent traits (`SequenceClassifier`, `Embedder`), not by overloading `CausalLM`.
+The engine-facing model contract in v0.1 — `forward(&mut self, input_ids, positions) -> hidden_states` + `compute_logits(hidden) -> logits` + `vocab_size()` + `device()`. Returned by the registry as `Box<dyn CausalLM>`; EngineCore holds one stable type regardless of architecture. `forward` returns hidden_states (not logits) so prefill can skip lm_head projection on non-last tokens; `compute_logits` is called separately when sampling. A historical proposal would add new tasks through independent traits (`SequenceClassifier`, `Embedder`), not by overloading `CausalLM`; those tasks are not implemented here.
 _Avoid_: model interface, Model trait, CausalLM struct.
 
 **Model registry (inventory)**:
@@ -55,7 +57,7 @@ Token-level scheduling with `waiting`/`running` deques. One `schedule()` step is
 _Avoid_: batch scheduler, request scheduler.
 
 **Sequence / SequenceGroup**:
-V1 data model for tracking individual requests. `SequenceStatus { Waiting, Running, Finished }`. Per-sequence: `block_table`, `num_tokens`, `num_cached_tokens`, `num_scheduled_tokens`, `is_prefill`, `last_token`, plus attached sampling scalars. `SequenceGroup` is a thin 1:1 wrapper (n>1 sampling deferred to v0.2).
+V1 data model for tracking individual requests. `SequenceStatus { Waiting, Running, Finished }`. Per-sequence: `block_table`, `num_tokens`, `num_cached_tokens`, `num_scheduled_tokens`, `is_prefill`, `last_token`, plus attached sampling scalars. `SequenceGroup` is a thin 1:1 wrapper (n>1 sampling unimplemented in this version).
 _Avoid_: request, prompt context, generation state.
 
 **PagedKVCache**:
@@ -95,7 +97,7 @@ A content-addressed `.safetensors` file produced by the Python harness (`tools/g
 _Avoid_: reference output, expected output, snapshot, oracle output.
 
 **Reference oracle**:
-The oracle used as the correctness target — `transformers` with `output_logits=True` and `attn_implementation=flash_attention_2`. vllm-oxide's L1 and L2 comparisons run against this oracle's output. It is not a "ground truth" (Qwen3-0.6B weights are BF16; BF16 computation is non-associative), but it is the single consistent reference point we measure against.
+The oracle used as the correctness target — `transformers` with `output_logits=True` and `attn_implementation=sdpa`. vllm-oxide's L1 and L2 comparisons run against this oracle's output. It is not a "ground truth" (Qwen3-0.6B weights are BF16; BF16 computation is non-associative), but it is the single consistent reference point we measure against.
 _Avoid_: ground truth, canonical engine, expected engine.
 
 **Baseline oracle**:
@@ -107,7 +109,7 @@ The process of measuring `max(|transformers_logits - vllm_logits| per-element)` 
 _Avoid_: tolerance derivation, threshold computation.
 
 **Near-tie skip (L1)**:
-When vllm-oxide's argmax token differs from the reference oracle's, the raw logits are checked: if the reference token is in the top-2 and the gap between it and the next candidate < ε (ε = atol × 2.0), the position is skipped. These are BF16 precision artifacts, not bugs. Used for canonical prompts (full logits available).
+When vllm-oxide's argmax token differs from the reference oracle's, the raw logits are checked: the intended policy was to skip a close top-2 candidate with ε = atol × 2.0. The archived helper actually recognizes only expected top-1 in the generated logits. Treat its exclusions separately from exact matches; the [validation guide](docs/validation/README.md) explains the implementation limit. Used for canonical prompts (full logits available).
 _Avoid_: epsilon skip, close-call skip.
 
 **Skip map (L1 regression)**:
@@ -115,9 +117,9 @@ For regression prompts (no full logits), positions where vLLM's token also diffe
 _Avoid_: exclusion set, known-mismatch list.
 
 **Same-prefix comparison (L2)**:
-L2 logits comparison only runs on steps where vllm-oxide's token matches the reference oracle's token. Once the token sequence diverges, subsequent steps are in different computational contexts — comparing their logits produces false positives. This replaces the old `compare_l2` which compared all steps regardless of divergence.
+The intended strategy compares logits on a common prefix to avoid different computational contexts after token divergence. The archived `compare_l2` actually filters each row by current-token equality and does not stop after earlier divergence. Later matching tokens therefore do not establish a shared prefix; see [validation](docs/validation/README.md).
 _Avoid_: prefix-aware L2, context-aware comparison.
 
 **Release gate vs CI gate**:
-CI (every push, CPU-only) runs property tests → "CI green". Release gate (pre-release, manual, GPU) runs golden comparison → "numerically validated". These are explicitly different — the repo README must document that CI green ≠ validated.
+CPU tests check project behavior without running GPU inference. The historical source archive has no GitHub CI workflow. Manual GPU fixture comparisons are a separate operation with the coverage/failure limitations documented in [validation](docs/validation/README.md). Passing CPU checks or a partial historical report does not establish complete numerical acceptance. These are explicitly different — the repo README must document that CI green ≠ validated.
 _Avoid_: CI vs release check.

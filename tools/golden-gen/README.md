@@ -1,211 +1,132 @@
-# golden-gen — Golden Fixture Generator for vllm-oxide
+# golden-gen — v0.1.0 fixture tooling
 
-> **Dev-only — NOT in CI.** This harness runs manually on a GPU machine before each
-> release to produce golden fixtures. It is NOT run in continuous integration and
-> is NOT a dependency of the vllm-oxide Rust crates. See issue #14.
+[Tools](../README.md) · [Historical validation](../../docs/validation/README.md) · [Rust comparison](../../crates/vllm-oxide-test/README.md)
 
-This harness generates **golden fixture files** for the vllm-oxide project by running
-two independent oracle LLM engines — **HuggingFace Transformers** (reference in FP32)
-and **vLLM** (BF16 baseline) — on a fixed set of prompts. Cross-validation between
-the two oracles calibrates numerical tolerances so the Rust port can verify correctness
-against known-good outputs without needing a GPU for every test.
+This developer tool generates paired fixtures from **Transformers BF16/SDPA** and **vLLM BF16**, then calibrates the historical schema-1 absolute logit tolerance. The Rust runtime does not depend on this Python package. Real oracle inference is a manual GPU operation; CPU tests and synthetic fixtures validate tooling only.
 
-## Prerequisites
+The guide describes the v0.1.0 source. For new acceptance work, use the [v0.2.0 tooling](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/tools/golden-gen/README.md). The archived generator can return success after an oracle failure and can reuse existing output/tolerance; inspect actual coverage and logs rather than treating exit code zero as acceptance.
 
-- Linux with an NVIDIA GPU (sm_89+; a single A10 is sufficient)
-- Python 3.11
-- `uv` package manager (see [docs.astral.sh/uv](https://docs.astral.sh/uv/))
-- ~6 GB free disk space for model weights and oracle caches
+## Environment and installation
 
-## Install
+The manifest and `.python-version` require **Python 3.12** (`>=3.12,<3.13`). Install [uv](https://docs.astral.sh/uv/) and use the committed `uv.lock`. Real inference needs Linux (including WSL2), a CUDA-capable NVIDIA GPU, compatible driver and enough host/device memory and disk for both oracle environments, the pinned model and full-vocabulary logits. Historical project measurement used RTX 4080/SM 8.9; no A10, minimum-VRAM or duration guarantee is claimed.
+
+Choose the needed extra, from the repository root:
 
 ```bash
 cd tools/golden-gen
-uv sync --extra gpu
+uv sync --locked --extra dev
+uv run --locked python -m golden_gen --help
 ```
 
-## Usage
-
-### 1. Generate fixtures (GPU required)
+For real oracle generation in this same directory:
 
 ```bash
-cd tools/golden-gen
-uv run python -m golden_gen generate
+uv sync --locked --extra gpu --extra dev
 ```
 
-This loads both oracles (transformers + vLLM), runs all 25 prompts, and writes
-`output/manifest.json` + `output/*.safetensors`. Expect ~5-15 minutes on an A10.
+The base package installs NumPy, safetensors, Pydantic and Hub support. `dev` adds pytest/Ruff/mypy; `gpu` adds Transformers, vLLM, Torch and xgrammar. The declared ranges are Transformers `>=4.56,<6`, vLLM `>=0.18,<0.27`, Torch `>=2.10,<2.11` and xgrammar `>=0.1.32,<0.2.4`; the lockfile selects exact packages. These ranges are not proof that every combination was GPU tested.
 
-Options:
+## CPU tests and synthetic smoke
 
-| Flag | Description |
-|------|-------------|
-| `--dry-run` | Use fake oracle (no GPU, no model download) — for smoke testing |
-| `--output-dir PATH` | Output directory (default: `./output`) |
-| `--only-category {canonical,regression}` | Run only one prompt category |
-
-### 2. Calibrate tolerance after generation
+With the `dev` environment:
 
 ```bash
-cd tools/golden-gen
-uv run python -m golden_gen calibrate --manifest-dir ./output
+uv run --locked --extra dev pytest
+uv run --locked --extra dev ruff check .
+uv run --locked --extra dev ruff format --check .
+uv run --locked --extra dev mypy src
+uv run --locked python -m golden_gen generate --dry-run --output-dir /tmp/vllm-oxide-v010-synthetic
 ```
 
-Computes `atol` / `rtol` from the oracle pair, produces the regression skip map,
-and updates `manifest.json` in place.
+The fake adapter uses deterministic synthetic data and no GPU/model download. Dry-run fixtures are saved under the oracle labels `transformers` and `vllm`; those labels do not make them measured oracle output. Keep this directory separate from real fixtures, and never publish synthetic data as release assets or use it to establish numerical correctness.
+
+Unit tests cover schema validation, prompt loading/expansion, fixture I/O/hashes, calibration arithmetic, fake adapters and CLI orchestration. GPU extras need not be installed for these CPU tests.
+
+## Real generation and calibration
+
+Install the `gpu` extra first and select a fresh output directory. Run from `tools/golden-gen/`:
 
 ```bash
-uv run python -m golden_gen --help   # full usage
+export V010_GOLDEN_OUTPUT=/tmp/vllm-oxide-v010-oracles
+uv run --locked --extra gpu python -m golden_gen generate --output-dir "$V010_GOLDEN_OUTPUT"
+uv run --locked python -m golden_gen calibrate --manifest-dir "$V010_GOLDEN_OUTPUT"
 ```
 
-### Dry-run (no GPU)
+Generation loads vLLM first, then Transformers, closing each adapter after use. It writes fixtures and `manifest.json`; uncalibrated output initially has `atol=0` with a pending method. Calibration reads paired canonical full logits, computes `atol = 2 × max(abs(transformers − vllm))` across available pairs/shared output lengths, derives regression skip positions and overwrites the manifest. It does **not** compute rtol, KL budgets, paired excess, layer metrics or a performance verdict.
 
-```bash
-cd tools/golden-gen
-uv run python -m golden_gen generate --dry-run
-```
+| Command / option | Behavior |
+|---|---|
+| `generate --dry-run` | Replace both adapters with fake data |
+| `generate --output-dir PATH` | Manifest/fixture destination; default `./output` relative to the current directory |
+| `generate --only-category canonical` | Generate only canonical prompt groups |
+| `generate --only-category regression` | Generate only regression prompt groups |
+| `calibrate --manifest-dir PATH` | Required directory containing manifest and fixtures; updates manifest in place |
 
-Produces a valid fake manifest and synthetic `.safetensors` fixtures without loading
-any model or GPU.
+There are no model/revision/seed/dtype/backend overrides on this CLI. They come from `src/golden_gen/config.py` and adapter source. `--manifest-dir` belongs to `calibrate`, while `--output-dir` belongs to `generate`.
 
-### Testing (CPU-only)
+The generator merges existing manifest entries by `(oracle, prompt_id)` and may preserve an existing positive tolerance. Exceptions during an adapter's generation are printed and caught, after which the command can write a partial manifest and return zero. Calibration skips missing pairs/full logits and can return zero tolerance if no usable pair exists. These behaviors are historical implementation limits; use complete, fresh data and inspect coverage before drawing conclusions.
 
-```bash
-cd tools/golden-gen
-uv run pytest
-```
+## Fixed model, prompts and oracle paths
 
-All unit tests run on CPU and do not require a GPU.
+| Setting | Historical value |
+|---|---|
+| Model | `Qwen/Qwen3-0.6B` |
+| Revision | `7e4ae267688d671ddfca3122e4528ee980cf3234` |
+| Architecture / vocabulary | `Qwen3ForCausalLM` / `151936` |
+| Model weights/computation | BF16 for both oracles |
+| Transport logits | FP32 |
+| Generation | Greedy; canonical max 64 tokens, regression max 32 |
+| Transformers attention | SDPA, `output_logits=True` |
+| vLLM setup | Eager mode, `logprobs_mode="raw_logits"`, `max_logprobs=-1`, GPU memory utilization `0.65` |
 
-## Manifest Schema
+Five canonical specifications expand to **eight** groups: four single prompts plus `canonical_05a`–`canonical_05d`. The batch specifies four independent `sub_prompts`. vLLM submits a batch; Transformers uses left padding with attention masks, preserving per-request outputs. It does not concatenate the four prompts into one sequence. The 20 regression specifications remain 20 groups. A complete two-oracle run therefore yields **56 fixtures**, with 16 canonical/full-logit files and 40 regression/top-5 files.
 
-`manifest.json` is the provenance record for a set of golden fixtures.
+Canonical prompts store full pre-sampling logits. The vLLM adapter requests `logprobs=-1` and rejects an incomplete vocabulary; `Logprob.logprob` carries raw logits in this mode, not normalized log probabilities. Regression output stores the top five candidates. Both adapters preserve completion tokens separately from prompt length; prompts are fixed text and any chat formatting is already in the prompt data.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `schema_version` | int | Manifest format version (currently 1) |
-| `generated_at` | ISO 8601 | UTC timestamp of generation |
-| `model.id` | str | HuggingFace model ID (`Qwen/Qwen3-0.6B`) |
-| `model.revision` | str | Git revision (commit hash) of the model weights |
-| `model.arch` | str | Model architecture (`Qwen3ForCausalLM`) |
-| `model.dtype` | str | Model dtype (`bfloat16`) |
-| `model.vocab_size` | int | Vocabulary size (151936) |
-| `oracle_versions.transformers` | str | Installed transformers version |
-| `oracle_versions.vllm` | str | Installed vllm version |
-| `generation.canonical_max_tokens` | int | Max generated tokens for canonical prompts (64) |
-| `generation.regression_max_tokens` | int | Max generated tokens for regression prompts (32) |
-| `generation.temperature` | float | Sampling temperature (0.0) |
-| `generation.attn_implementation` | str | Attention backend (`eager`) |
-| `tolerance.atol` | float | Absolute tolerance for logit comparison |
-| `tolerance.observed_max_abs_diff` | float | Maximum observed absolute difference across oracle pair |
-| `tolerance.calibration_factor` | float | Safety factor applied (2.0) |
-| `tolerance.method` | str | Description of calibration method |
-| `regression_skip_map` | dict | Prompt → list of token positions to skip during L1 regression |
-| `fixtures` | list[object] | List of `FixtureMetadata` records |
+The calibration compares independently generated trajectories on shared lengths; it does not replay a teacher-forced common prefix. Oracle divergence can therefore enlarge the global tolerance. The original release's `66.46875` tolerance and six regression cases with skipped positions remain historical facts, not a recommended new numerical budget.
 
-Each `FixtureMetadata` entry:
+## Manifest and fixture format
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `prompt_id` | str | Prompt identifier (e.g., `canonical_01`) |
-| `category` | str | `canonical` or `regression` |
-| `oracle` | str | Oracle name (`transformers` or `vllm`) |
-| `num_tokens` | int | Number of generated tokens |
-| `logits_dtype` | str | Always `float32` |
-| `logits_shape` | [int, int] | Shape of the full logits tensor, or `[0, 0]` for regression |
-| `sha256` | str | SHA-256 hex digest of the `.safetensors` file |
-| `filename` | str | Fixture filename (`{prompt_id}.{oracle}.safetensors`) |
+`manifest.json` follows [schema.py](src/golden_gen/schema.py), **schema version 1**:
 
-## Fixture File Format
+| Section | Fields and meaning |
+|---|---|
+| Top level | `schema_version`, `generated_at`, `fixtures`, `regression_skip_map` |
+| `model` | `id`, `revision`, `arch`, `dtype`, `vocab_size` |
+| `oracle_versions` | Installed Transformers/vLLM distribution versions; `unknown` if absent |
+| `generation` | `canonical_max_tokens`, `regression_max_tokens`, `temperature`, `attn_implementation` |
+| `tolerance` | `atol`, `observed_max_abs_diff`, `calibration_factor`, `method`; no `rtol` |
+| Fixture metadata | `prompt_id`, `category`, `oracle`, `num_tokens`, `logits_dtype`, `logits_shape`, `sha256`, `filename` |
 
-Each `.safetensors` file contains the following tensors:
+Fixtures are named `{prompt_id}.{oracle}.safetensors`; SHA-256 covers each file's final bytes. Canonical metadata shape is `[generated_tokens, 151936]`; regression metadata uses `[0, 0]` because full logits are absent.
 
-| Key | Dtype | Shape | Description |
-|-----|-------|-------|-------------|
-| `token_ids` | int64 | `[n]` | Generated token IDs |
-| `n_prompt_tokens` | int64 | `[]` (scalar) | Number of prompt tokens |
-| `logits` (canonical only) | float32 | `[n, 151936]` | Full pre-sampling logits per step |
-| `top5_indices` (regression only) | int64 | `[n, 5]` | Top-5 token indices per step |
-| `top5_logits` (regression only) | float32 | `[n, 5]` | Top-5 logit values per step |
+| Tensor | Dtype | Shape | Coverage |
+|---|---|---|---|
+| `token_ids` | int64 | `[n]` | Completion IDs in all fixtures |
+| `n_prompt_tokens` | int64 | Scalar | Unpadded prompt-token count |
+| `logits` | float32 | `[n, 151936]` | Canonical groups |
+| `top5_indices` | int64 | `[n, 5]` | Regression groups |
+| `top5_logits` | float32 | `[n, 5]` | Regression groups |
 
-## Known Oracle Deviations
+This schema does not contain modern layer traces, native runtime/source fingerprints, direct NVML measurements, synchronized stage timestamps or complete-case acceptance markers. Pair it only with the historical [Rust reader](../../crates/vllm-oxide-test/README.md); do not advertise it as schema-5 acceptance.
 
-### HF Transformers `output_logits=True`
+## Original assets, outputs and cleanup
 
-The `output_logits` parameter in `transformers>=4.43` returns logits as FP32 regardless
-of the model's native dtype. This is the canonical format we store.
+The [v0.1.0 release](../../docs/releases/v0.1.0.en.md) retains the original `manifest.json` and `goldens-v0.1.tar.gz`, with original hashes. The Rust downloader expects separately attached safetensors files, so for this release use the extracted archive and local `--manifest` mode. Inspect the tar listing and ensure extraction places fixture files next to the selected manifest; archive layouts should not be guessed.
 
-### vLLM `logprobs_mode="raw_logits"`
+Generated default `output/`, `.venv/`, bytecode and Python tool caches are ignored by this directory's `.gitignore`. An arbitrary custom output directory is not automatically ignored by name. Choose `/tmp` or another external location for experiments, never overwrite original retained evidence, and keep synthetic/real outputs separate.
 
-Requires `vllm>=0.10.0` where V1 engine is the default. The `raw_logits` mode returns
-the lm_head output directly (not log-softmax). When `logprobs=-1`, each step returns
-the full vocabulary. The `logprob` field on the `Logprob` object actually holds the raw
-logit value when in raw_logits mode.
+After retaining any needed logs and results, remove only the explicit scratch directory for that run. Environments and caches can be recreated, but model caches and original release evidence may belong to other work. Keep raw evidence packages local. The old [upload wrapper](../README.md#historical-release-wrapper) is historical code with remote side effects and is not part of this documentation workflow.
 
-### Prompt canonical_05 (batch)
+## Source map
 
-The single PromptSpec with `\n---\n`-separated sub-prompts is treated differently by
-each oracle:
-- **vLLM**: Natively handles 4 separate prompts in a single continuous-batching step.
-- **HF Transformers**: Processes all text as one concatenated sequence — the output is
-  one long sequence covering all 4 segments.
-
-Cross-validation on canonical_05 will show deviations between HF and vLLM. The tolerance
-calibration accounts for this.
-
-## Upload Release Asset
-
-After generating goldens on a GPU machine, upload them as a GitHub Release (do NOT commit
-to git mainline):
-
-```bash
-gh release create goldens-v0.1 \
-  --repo RedHeartSecretMan/vllm-oxide \
-  --title "Golden fixtures -- v0.1" \
-  --notes "Generated by tools/golden-gen/. See manifest.json in this release for provenance." \
-  output/manifest.json output/*.safetensors
-```
-
-The manifest.json contains SHA-256 hashes for every fixture file, so consumers can verify
-integrity after download.
-
-## File Layout
-
-```
-tools/golden-gen/
-├── README.md
-├── pyproject.toml
-├── .gitignore
-├── .python-version
-├── prompts/
-│   ├── canonical.jsonl       # 5 canonical prompts
-│   └── regression.jsonl      # 20 regression prompts
-├── src/
-│   └── golden_gen/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── cli.py            # argparse entrypoint
-│       ├── config.py         # Constants
-│       ├── schema.py         # Pydantic v2 models
-│       ├── prompts.py        # JSONL loader
-│       ├── io.py             # safetensors save/load
-│       ├── manifest.py       # manifest build/write/read
-│       ├── generate.py       # oracle × prompt orchestration
-│       ├── calibrate.py      # tolerance calibration + regression skip map
-│       └── oracles/
-│           ├── __init__.py
-│           ├── base.py       # Oracle protocol + result dataclass
-│           ├── fake.py       # Deterministic fake (--dry-run)
-│           ├── transformers_oracle.py
-│           └── vllm_oracle.py
-└── tests/
-    ├── __init__.py
-    ├── conftest.py
-    ├── test_schema.py
-    ├── test_prompts.py
-    ├── test_io.py
-    ├── test_manifest.py
-    ├── test_calibrate.py
-    ├── test_fake_oracle.py
-    └── test_cli.py
-```
+| Path | Responsibility |
+|---|---|
+| [`cli.py`](src/golden_gen/cli.py) | Argument parsing, generation orchestration and calibration updates |
+| [`config.py`](src/golden_gen/config.py), [`prompts/`](prompts/) | Fixed model/runtime configuration and prompt specifications |
+| [`generate.py`](src/golden_gen/generate.py) | Oracle/prompt traversal, batch expansion and fixture naming |
+| [`schema.py`](src/golden_gen/schema.py), [`manifest.py`](src/golden_gen/manifest.py) | Pydantic records and provenance serialization |
+| [`io.py`](src/golden_gen/io.py) | Safetensors encoding/loading and SHA-256 |
+| [`calibrate.py`](src/golden_gen/calibrate.py) | Pairwise absolute tolerance and regression skip map |
+| [`oracles/`](src/golden_gen/oracles/) | Fake, Transformers and vLLM adapters |
+| [`tests/`](tests/) | CPU tooling tests |

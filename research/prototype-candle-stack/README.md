@@ -1,26 +1,50 @@
-# ⚠️ THROWAWAY PROTOTYPE — `prototype-candle-stack`
+# Candle/CUDA stack prototype
 
-Part of vllm-oxide **T10 (#11)**. **Not** the vllm-oxide crate layout (T9 is undecided).
-Code here is throwaway from day one — it exists only to validate two risky
-assumptions in [T3 — Stack A (candle hybrid)](https://github.com/RedHeartSecretMan/vllm-oxide/issues/5):
+[Research](../README.md) · [Production architecture](../../docs/architecture.md) · [Tools](../../tools/README.md)
 
-1. **cudarc re-export seam** — unwrap a `candle::Tensor` (CUDA) to raw
-   `cudarc::driver::CudaSlice` + `CUstream` and call a hand-written
-   `extern "C"` CUDA kernel through it (the mistral.rs pattern).
-2. **`candle-flash-attn` paged kernel API** — the Rust-side entry point
-   added by [candle PR #3655](https://github.com/huggingface/candle/pull/3655).
+This historical experiment implements [T10 / #11](https://github.com/RedHeartSecretMan/vllm-oxide/issues/11), evaluating assumptions from [Stack A / #5](https://github.com/RedHeartSecretMan/vllm-oxide/issues/5). It is retained as reference material for the v0.1.0 source. It is a standalone Cargo package (`publish=false`, version `0.0.0`), outside the production workspace.
+
+## What it checks
+
+| Phase | Work performed | Meaning of success |
+|---|---|---|
+| A: Candle/cudarc/FFI | Allocate 1,024 FP32 CUDA values, extract a device pointer and stream, call `fill_const_f32_launch`, read back sum/min/max | The custom CUDA kernel wrote `42.0` through the Candle tensor's storage |
+| B: paged FlashAttention | Call `flash_attn_varlen_paged_windowed` on a small synthetic FP16 configuration | The pinned paged API launches and returns an output tensor |
+
+Phase A checks a sum of `43,008` and min/max of `42.0`, printing `[proto][A] PASS` only when those checks hold. Phase B checks the returned shape and sampled output values for NaNs, but has no independent expected-value comparison or exhaustive finite-value check. Its `[proto][B] PASS` establishes launch/API feasibility, not attention numerical correctness.
+
+The example's Phase B uses batch 1, four Q/KV heads, head size 64, query length 16, key length 64 and four cache blocks of 32 tokens. That block size is experiment-specific; the production engine's fixed block size is 256.
+
+Both Candle dependencies pin `27f20fea993c81ea6d32ce44018f42b68466525e`, which includes [Candle PR #3655](https://github.com/huggingface/candle/pull/3655). The FFI pattern was investigated against [mistral.rs](https://github.com/EricLBuehler/mistral.rs); this directory does not carry its production engine behavior.
 
 ## Run
 
+Requires a compatible NVIDIA driver, CUDA Toolkit (`nvcc` on `PATH`), host compiler/linker and an NVIDIA GPU supported by the pinned CUDA kernels. The recorded prototype environment used **RTX 4080 / SM 8.9**. No broader architecture compatibility matrix is claimed. Both dependencies enable CUDA; there is no CPU-only prototype mode.
+
+The original experiment ran with `cd research/prototype-candle-stack` followed by `cargo run --release`. In the shipped v0.1.0 checkout, the subsequently added parent workspace does not exclude this package and the prototype has no local `[workspace]` table. Cargo therefore rejects that direct command with “current package believes it's in a workspace when it's not”. This documentation refresh preserves both manifests unchanged.
+
+To reproduce the experiment without changing historical source, copy only its source inputs to an isolated temporary directory, starting at the repository root:
+
 ```bash
-cd research/prototype-candle-stack
+export V010_PROTOTYPE_DIR="$(mktemp -d /tmp/vllm-oxide-v010-prototype.XXXXXX)"
+cp -a research/prototype-candle-stack/Cargo.toml \
+    research/prototype-candle-stack/build.rs \
+    research/prototype-candle-stack/src \
+    research/prototype-candle-stack/kernels "$V010_PROTOTYPE_DIR/"
+cd "$V010_PROTOTYPE_DIR"
 cargo run --release
 ```
 
-Requires: CUDA toolkit (nvcc on PATH), an NVIDIA GPU (sm80+; tested on RTX 4080 / sm_89).
+This command operates in the isolated package, not the root workspace. Its `build.rs` compiles `kernels/fill_const.cu` into a static library under Cargo's `OUT_DIR` and links CUDA runtime. The kernel builder detects compute capability; `Device::cuda_if_available(0)` chooses device 0, and the prototype fails if tensor storage is not CUDA. No model files, tokenizer or oracle environments are used.
 
-## What this is NOT
+Do not copy the modern engine's Cargo features or golden-gen CLI flags into this command. The prototype has no `--model`, `--output-dir` or acceptance options.
 
-- Not the vllm-oxide engine.
-- Not production code — no error handling beyond runnable, no tests, no abstractions.
-- Will be deleted (or archived on a `research/*` branch) once T10 resolves.
+## Outputs and cleanup
+
+Output is printed to the terminal. The isolated build creates `target/` and may create `Cargo.lock` in the temporary directory. The original source directory's `.gitignore` covers `target/`, `Cargo.lock` and `build.log`; the isolated copy remains outside git. No fixture manifest, safetensors evidence, model cache or release artifact is generated by the program itself.
+
+After preserving any needed log, run `cargo clean` from the isolated directory to remove only its Cargo build artifacts. Do not infer a new result from this documentation refresh; rerunning the command is a new experiment and should record its actual environment and revisions.
+
+## Limits
+
+This is not the Qwen3 engine, a benchmark, a GPU memory sampler or an acceptance test. It contains no model loading or per-layer oracle comparison and has no test suite. Pointer/stream lifetime handling and kernel launch success are narrow interoperability checks. For generation use the [version guide](../../docs/getting-started.md); for model accuracy use [historical validation](../../docs/validation/README.md), or the accepted [v0.2.0 source](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).

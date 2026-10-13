@@ -1,5 +1,7 @@
 # Golden generation correctness strategy
 
+Historical v0.1.0 design record. The intended comparison strategy below is preserved; implementation and coverage gaps are explained in [historical validation](../validation/README.md). The documentation refresh does not change this decision or its measured evidence.
+
 The original oracle triangle (transformers / nano-vllm / vLLM V1) produced golden
 fixtures where all 8 canonical prompts were flagged SUSPECT — oracle-vs-oracle L2
 divergence exceeded 0.1 across the board, tolerance was calibrated at 4623.99 from
