@@ -1,0 +1,26 @@
+name: Documentation issue
+description: Report a missing, unclear or incorrect instruction or example.
+title: "[Docs] "
+labels: [documentation, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: Small corrections can also be sent directly as a pull request. No GPU validation is needed for a wording or link fix.
+  - type: input
+    id: location
+    attributes:
+      label: Page or file
+      description: Link the page and heading or give the file path. Include the release version if it is version-specific.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is unclear or incorrect?
+      description: For a failing example, include the command and relevant error. Remove sensitive information.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement

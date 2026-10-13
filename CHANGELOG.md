@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- User-oriented documentation index, pinned-model getting started guide and
+  v0.2.0 API migration guide, with matching English and Chinese README entrypoints.
+- Bug, feature and documentation issue forms, a pull request template, support
+  guidance and a current security reporting policy.
+- A dependency-free CPU workflow checking local Markdown links and heading
+  anchors, with behavior tests for the checker.
+- Maintainer release checklist, release-note template and categorized GitHub
+  release-note configuration.
+
+### Changed
+
+- Contributor commands now describe the actual locked CPU CI environments and
+  separate local GPU validation from ordinary GitHub checks.
+- Agent instructions and ignore rules keep generated golden output, retained
+  evidence and local working state outside git.
+
 ## [0.2.0] - 2026-10-13
 
 Publication status and evidence requirements follow the [release notes](docs/releases/v0.2.0.md).
@@ -55,7 +73,7 @@ Publication status and evidence requirements follow the [release notes](docs/rel
 `EngineOptions::dtype` continues to use `Option<candle_core::DType>`; these are
 transitive external signature types, not new crate-root re-exports.
 
-## [0.1.0] - 2025-07-29
+## [0.1.0] - 2026-07-26
 
 ### Added
 

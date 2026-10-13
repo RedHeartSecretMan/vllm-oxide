@@ -15,3 +15,22 @@ Thumbs.db
 
 # Agent working state (not project code)
 .sisyphus/
+/.codex/
+/.agents/
+
+# Local worktrees and retained validation evidence
+/.worktrees/
+/tools/golden-gen/output/
+
+# Python environments, caches and build artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
