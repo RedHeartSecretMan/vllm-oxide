@@ -1,5 +1,9 @@
 # Freeze the calibrated layered accuracy budgets
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 The user approved the explicit operator and model budget table after reviewing its calibration consequences and the meaning of all four model conditions. We freeze `layered-budget-v1` in the [Tolerance policy](../validation/layered-accuracy-budgets.json), under the unchanged `layered-accuracy-v1` protocol and metric algorithm. These are engineering error preferences supported by the bound observations and fault experiments, not universal tolerances, mathematical error bounds or downstream quality guarantees.
 
 **Status:** accepted numerical-budget decision. This decision supersedes only the statements that these exact budgets are still pending in ADR-0015, ADR-0017 and the [layered contract](../validation/layered-accuracy-contract.md)'s opening status, section 6 and section 15. Their initial approval history remains intact. The contract's pending/unknown-policy fail-closed rules remain applicable whenever a required value, source, approval binding or artifact is missing; its other requirements are unchanged.

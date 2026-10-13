@@ -1,11 +1,14 @@
 # Changelog
 
-All notable changes to vllm-oxide will be documented in this file.
+[Release history](docs/releases/README.md) · [GitHub Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Historical implementation entries are retained below. The source tree belongs to experimental RC1; **48/66 numerical checks passed and 18 failed**, while full performance and the declared Rust minimum remained unverified. The [RC release notes](docs/releases/v0.2.0-rc.1.en.md) retain original evidence and asset identities.
 
-## [Unreleased]
+## Documentation maintenance after v0.2.0 publication
+
+Refreshed bilingual overview, user/developer guides, research/prototype detail, tools/diagnostic instructions and release presentation. Executable implementation, locks, model inputs, budgets, measurements and original assets remain unchanged. See [the update record](docs/version-doc-update.md). The final [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) uses its own later implementation and acceptance.
+
+## v0.2.0.rc.1 — 2026-09-10
 
 - Rebuilt the `goldens-v0.2` workflow around pinned model/tokenizer/runtime and
   kernel identities, bit-identical oracle/candidate replay, a sealed four-case
@@ -39,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `EngineOptions::dtype` continues to use `Option<candle_core::DType>`; these are
 transitive external signature types, not new crate-root re-exports.
 
-## [0.1.0] - 2025-07-29
+## v0.1.0 — 2026-07-26
 
 ### Added
 
@@ -63,6 +66,3 @@ transitive external signature types, not new crate-root re-exports.
 - CONTEXT.md: domain vocabulary and ubiquitous language
 - ADR-0001 through ADR-0004: parametric parallel layers, weight loader seam, model registry + RoPE, engine dependency DAG
 - ADR-0005: golden generation correctness strategy
-
-[Unreleased]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0

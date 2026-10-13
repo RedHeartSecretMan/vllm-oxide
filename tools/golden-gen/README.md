@@ -1,14 +1,76 @@
 # golden-gen — Golden Fixture Generator for vllm-oxide
 
-> **Dev-only — NOT in CI.** This harness runs manually on a GPU machine before each
-> release to produce golden fixtures. It is NOT run in continuous integration and
-> is NOT a dependency of the vllm-oxide Rust crates. See issue #14.
+[Tools](../README.md) · [Documentation](../../docs/README.md) · [Diagnostic scripts](scripts/README.md)
+
+This is the validation package actually shipped in the historical `v0.2.0.rc.1` source. Its unit/adapter/readers are CPU-capable; real model collection and performance require CUDA. The RC's GitHub CI does not run the Python suite automatically. It is maintainer tooling, not a dependency of the public Rust inference API. **RC numerical results retain 18/66 failures and full performance remains incomplete.** See [RC provenance](../../docs/releases/v0.2.0-rc.1.en.md).
+
+Later source-role adapters, direct-NVML memory methods and `public_gpu_smoke` are not present here. New raw evidence stays local. The historical schema5 publication code below is documented for inspection; the source documentation refresh does not invoke it or upload an evidence package.
 
 This harness generates **golden fixture files** for the vllm-oxide project with
 **HuggingFace Transformers** BF16 SDPA as the authoritative Reference oracle and
 **vLLM** BF16 as the Baseline oracle. Transformers supplies expected correctness;
 vLLM supplies same-prefix calibration observations and can never override a
 reference failure or select acceptance thresholds automatically.
+
+## Development setup and CPU checks
+
+From the repository root, create separate locked development and worker environments outside the source tree. Python is restricted to 3.12 by `pyproject.toml`; `uv.lock` fixes actual versions. The worker environment contains substantial Torch/vLLM dependencies needed by CPU subprocess adapter tests. No model download or CUDA invocation is part of this setup.
+
+```bash
+export GOLDEN_DEV_ENV=/tmp/vllm-oxide-rc-golden-dev
+export GOLDEN_WORKER_ENV=/tmp/vllm-oxide-rc-golden-worker
+UV_PROJECT_ENVIRONMENT="$GOLDEN_DEV_ENV"     uv sync --project tools/golden-gen --locked --extra dev
+UV_PROJECT_ENVIRONMENT="$GOLDEN_WORKER_ENV"     uv sync --project tools/golden-gen --locked --all-extras
+cargo +1.94.0 build --locked -p vllm_oxide_test --bin vllm-oxide-verify-bundle
+export GOLDEN_WORKER_TEST_PYTHON="$GOLDEN_WORKER_ENV/bin/python"
+export GOLDEN_TRANSPORT_TEST_BINARY="$PWD/target/debug/vllm-oxide-verify-bundle"
+export PYTHONNOUSERSITE=1
+export PYTEST_ADDOPTS=""
+"$GOLDEN_DEV_ENV/bin/python" -m pytest tools/golden-gen/tests -q
+"$GOLDEN_DEV_ENV/bin/python" -m ruff check     tools/golden-gen/src tools/golden-gen/tests tools/golden-gen/scripts
+"$GOLDEN_DEV_ENV/bin/python" -m mypy     --config-file tools/golden-gen/pyproject.toml     tools/golden-gen/src tools/golden-gen/scripts
+```
+
+If `CARGO_TARGET_DIR` is configured, use its actual binary path. Both environment paths must be unused or intentionally dedicated to this checkout. A focused or skipped suite does not establish the complete nine-gate result. The historical `release_cpu.py` defines exact offline commands and checks for missing/skipped/empty results; prepare its dependency cache before invoking that producer. Installing dependencies or a green CPU suite does not mean numerical/model acceptance.
+
+Inspect the three actual CLI parsers without loading a model:
+
+```bash
+"$GOLDEN_DEV_ENV/bin/python" -m golden_gen --help
+"$GOLDEN_DEV_ENV/bin/python" -m golden_gen.layered_cli --help
+"$GOLDEN_DEV_ENV/bin/python" -m golden_gen.release_cli --help
+```
+
+A synthetic lifecycle smoke produces an external fake corpus:
+
+```bash
+"$GOLDEN_DEV_ENV/bin/python" -m golden_gen generate --dry-run     --output-dir /tmp/vllm-oxide-rc-golden-dry-run
+```
+
+That command loads no GPU/model and is not publishable evidence. Use a new path for every attempt. Generated artifacts under `output/`, local logs/environments and retained evidence do not belong in git.
+
+## Source map and inputs
+
+| Modules/data | Responsibility |
+|---|---|
+| `cli.py`, `schema.py`, `manifest.py`, `assets.py` | Earlier schema-v4 parser, fixture metadata and deterministic archive operations |
+| `layered_cli.py`, `layered_workflow.py`, `layered_inventory.py` | Explicit capture ownership, staged orchestration and coverage |
+| `fixed_prefix*`, `oracles/`, `worker_determinism.py` | Same-history oracle execution, replay and actual worker startup flags |
+| `operator_inputs.py`, `operator_verification.py`, `behavior_verification.py`, `execution_checks.py` | Numerical operators, unforced API behavior and execution-state constraints |
+| `layered_accuracy.py`, `layered_manifest.py`, `layered_faults.py` | Full-logit metrics, frozen Definition/budget bindings and isolated negative simulations |
+| `guard.py`, `supervision.py`, `telemetry.py`, `guard_evidence.py` | Resource/process guarding and source-bound lifetime records |
+| `release_cpu.py`, `release_performance.py`, `release_adapter.py`, `release_transport.py` | Fixed CPU gates, original performance producer, schema5 bundle and independent readers |
+| `prompts/`, `docs/validation/*.json` | Versioned prompts, capture cases and reviewed numerical/supervision definitions |
+| `scripts/`, `layer_diagnostic.py` | Fixed nonaccepting arithmetic and layer-localization diagnostics |
+| `tests/` | CPU fake-oracle, parser, ownership, hash, fault, process-adapter and transport regressions |
+
+`layered_cli` always requires `--repo-root` and `--run-dir`; `release_cli` always requires `--repo-root` and an external fresh `--marker`. Optional argparse fields become required for specific actions as documented below. Complete inputs contain their original model revision, source commit/tree, definition hashes, owners, replay artifacts, guard/setup records and raw telemetry. Their filenames or a supplied PASS summary are insufficient.
+
+## Preservation and historical publication
+
+The detailed contracts below preserve their original terms and constraints. The RC predates later final-release precision, independent-confirmation and monitoring repairs. Do not substitute newer bytes for a historical identity, alter budget JSON during reproduction, or overwrite existing markers. A documentation-only update changes none of those definitions and claims no new numerical measurement.
+
+The schema5 bundle/publish sections describe source functionality at its checkpoint. Current repository policy keeps evidence packages local; no upload/tag command is part of this guide's recommended workflow. The older shell `authoritative` and `publish` actions are explicitly disabled even though their historical interface remains described below.
 
 ## Layered accuracy protocol (new workflow)
 
@@ -171,7 +233,11 @@ permission.
 
 ## Legacy same-prefix release workflow
 
-`tools/validate-release.sh` exposes separately invocable, content-marked stages:
+The retained shell exposes the supported diagnostic/preparation stages below.
+Its `authoritative` and `publish` actions are unconditionally disabled in this
+snapshot, even with the old approval/environment variables set. The historical
+acceptance/publication contract is recorded for context, not a runnable release
+path:
 
 - `env` installs registry dependencies from locked wheels only, then validates
   exact model/tokenizer hashes and runtime identities. It retains actual installer
@@ -182,20 +248,22 @@ permission.
 - `observe` opens only `canonical_01`, `canonical_02`, `canonical_03`, and
   `canonical_05a`; it keeps the other four full-logit cases sealed and always
   exits non-zero (`3`) after writing the normalized observation.
-- `authoritative` is unavailable until that observation is added through a
-  reviewed Definition checkpoint. It then runs and replays all 28 candidate cases.
+- The former `authoritative` action was intended to run/replay 28 candidate
+  cases after a reviewed observation. This snapshot rejects the action outright;
+  its old conditions do not enable it.
 - `benchmark`, `report`, and `bundle` produce the fixed performance evidence,
   evidence-only report, and exact two-asset bundle.
 - `verify-local` exercises the production Rust downloader against that exact pair
   in a new cache before any publication operation is available.
-- `publish` and `verify` are separate. `publish` is inert unless the user supplies
-  the explicit publication guard and frozen candidate identity.
+- `publish` is disabled. Old publication guard variables do not enable it.
+  `verify` retains its own historical download/inspection behavior and does not
+  publish or establish current acceptance.
 
 Start each release attempt with a fresh run root:
 
 ```bash
 ./tools/validate-release.sh env \
-  /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id> \
+  /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/example-run \
   /path/to/Qwen3-0.6B
 ```
 
@@ -245,7 +313,7 @@ uv run pytest
 All unit tests run on CPU and do not require a GPU. The plain `generate` command
 is dry-run only; there is no direct real-generation or arbitrary-tolerance bypass.
 
-## Manifest Schema
+## Legacy manifest schema
 
 `manifest.json` is the provenance record for a set of golden fixtures.
 
@@ -316,7 +384,7 @@ Each `FixtureMetadata` entry:
 | `sha256` | str | SHA-256 hex digest of the `.safetensors` file |
 | `filename` | str | Fixture filename (`{prompt_id}.{oracle}.safetensors`) |
 
-## Fixture File Format
+## Legacy fixture file format
 
 Each `.safetensors` file contains the following tensors:
 
@@ -348,20 +416,14 @@ Batch prompt specifications are expanded into concrete fixture cases and run thr
 both oracle adapters. Any vLLM deviation is retained only as Baseline oracle
 calibration evidence; the Transformers output remains the Reference oracle target.
 
-## Golden asset bundle contract
+## Historical golden asset bundle contract
 
 The GitHub Release asset set is exactly the local bundle's two files. GitHub's
 automatic source archives are not API release assets for this contract, and
-individual `.safetensors` files must not be uploaded. Publication is available
-only through the separately authorized `publish` stage after the reviewed
-candidate and report are frozen:
-
-```bash
-VLLM_OXIDE_ALLOW_GOLDEN_PUBLISH=goldens-v0.2 \
-VLLM_OXIDE_GOLDEN_CANDIDATE=<reviewed-commit> \
-./tools/validate-release.sh publish \
-  /tmp/vllm-oxide-dag-v0.2.0/t45-artifacts/<run-id>
-```
+individual `.safetensors` files must not be uploaded. The former design separated publication from collection and bound it to a
+reviewed candidate. That publication path is disabled in this RC: the shell
+rejects `publish` regardless of guard variables. No publication command is
+recommended here, and this documentation maintenance uploads no evidence.
 
 The archive is gzip-compressed USTAR. It contains every and only the declared
 fixture filename at its root, sorted by ASCII filename. Every entry is a regular
@@ -371,7 +433,7 @@ the archive. A clean consumer downloads the exact two assets, verifies schema,
 versions, archive and fixture checksums, and atomically installs them under
 `<cache-root>/goldens-v0.2/<archive-sha256>`.
 
-## File Layout
+## Earlier schema-v4 file layout
 
 ```
 tools/golden-gen/

@@ -1,5 +1,9 @@
 # Weight loader seam
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 The boundary between model-specific configuration and model-agnostic layers is
 `LinearSpec` — a neutral geometry struct (`{ in_features, out_features_per_shard,
 bias }`) that model code produces and `Linear<P>` consumes.

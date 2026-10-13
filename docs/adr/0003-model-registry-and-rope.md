@@ -1,5 +1,9 @@
 # Model registry and RoPE
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 Two decisions governing the `models/` module.
 
 ## Registry: additive-only architecture registration

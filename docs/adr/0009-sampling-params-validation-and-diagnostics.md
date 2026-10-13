@@ -1,5 +1,9 @@
 # Validate SamplingParams before atomic request admission
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 Ticket #36 completes a public input contract whose accepted v0.1 sampling pipeline did not define validation or diagnostic boundaries. `LLM::generate` validates the complete `SamplingParams` batch before tokenizing or admitting any request; a sampling-parameter validation failure leaves scheduler and cache state unchanged. Atomicity after prompt tokenization begins is not added to the #36 contract.
 
 The accepted validation contract is exact:

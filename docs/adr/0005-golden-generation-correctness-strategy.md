@@ -1,5 +1,9 @@
 # Golden generation correctness strategy
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 The original oracle triangle (transformers / nano-vllm / vLLM V1) produced golden
 fixtures where all 8 canonical prompts were flagged SUSPECT — oracle-vs-oracle L2
 divergence exceeded 0.1 across the board, tolerance was calibrated at 4623.99 from

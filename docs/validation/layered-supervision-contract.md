@@ -1,5 +1,9 @@
 # Bounded resource supervision and truthful measurement provenance
 
+[Validation index](README.md) · [RC release result](../releases/v0.2.0-rc.1.en.md)
+
+> Original RC protocol/diagnosis record. This documentation refresh preserves all raw source identities, numerical limits and verdicts; no new GPU measurement or evidence upload is implied.
+
 This contract is adopted by [ADR-0019](../adr/0019-bounded-resource-supervision.md). The [supervision policy](layered-supervision-policy.json) supplies the exact configuration and compatibility-ledger identity. It does not modify the [accuracy budgets](layered-accuracy-budgets.json), case registry, model, sampling rules or numerical algorithms. All numerical cases retain the same four approved conditions.
 
 ## 1. Separate real sources, not relabeled evidence

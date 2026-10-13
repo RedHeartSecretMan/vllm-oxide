@@ -1,5 +1,9 @@
 # Approve the measured goldens-v0.2 tolerance policy
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 Historical empirical policy: [ADR-0015](0015-layered-accuracy-validation.md) replaces the numerical contract for new validation. This approval remains bound only to its original observation and protocol; it does not approve the new L0/L1/L2 budgets or reclassify any earlier result.
 
 The complete fresh, non-accepting observation required by ADR-0012/0013 proposes `l2_atol=1.0` and `l1_near_tie_max_abs_logit_gap=0.125`. We approve exactly that smallest-covering pair for the fixed BF16 reference-versus-candidate kernel scope, with all observation data retained. This approves a numerical policy for subsequent authoritative comparison, not any fixture, Ticket #45, or release result.

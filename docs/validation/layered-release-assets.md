@@ -1,5 +1,9 @@
 # Layered golden release asset contract
 
+[Validation index](README.md) · [RC release result](../releases/v0.2.0-rc.1.en.md)
+
+> Original RC protocol/diagnosis record. This documentation refresh preserves all raw source identities, numerical limits and verdicts; no new GPU measurement or evidence upload is implied.
+
 This is the normative transport decision adopted by [ADR-0016](../adr/0016-layered-golden-release-assets.md). It does not change the [layered accuracy contract](layered-accuracy-contract.md), frozen cases, pending budgets, model scope or independent publication authority. It replaces incompatible schema4 transport rules, not their safeguards.
 
 ## 1. One release manifest and two assets

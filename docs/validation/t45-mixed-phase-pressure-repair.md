@@ -1,5 +1,9 @@
 # #45：混合阶段 KV 压力恢复的最小修复范围
 
+[Validation index](README.md) · [RC release result](../releases/v0.2.0-rc.1.en.md)
+
+> Original RC protocol/diagnosis record. This documentation refresh preserves all raw source identities, numerical limits and verdicts; no new GPU measurement or evidence upload is implied.
+
 ## 归属与边界
 
 在不拆分原 19 个 Ticket、不改变 31 条原生依赖的前提下，#45 承担分层验证发现的混合 chunked-prefill/decode 压力恢复缺陷的最小修复，并交付对应回归证据。

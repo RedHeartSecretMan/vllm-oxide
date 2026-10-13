@@ -1,5 +1,9 @@
 # Resolved model identity construction seam
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 Model construction previously followed the same `Source` independently for
 configuration, tokenizer, and weights, so a moving Hub revision could produce
 one `LLM` from inconsistent artifacts. Issue #30 requires one immutable

@@ -1,5 +1,9 @@
 # Parametric parallel layers
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 `Linear<P: ParallelStyle>` uses a type-level style tag to encode which
 projection a weight tensor IS, without runtime branching. Three v0.1 tags:
 `QkvMerged` (3 shards, concat dim 0), `GateUpMerged` (2 shards, concat dim 0),

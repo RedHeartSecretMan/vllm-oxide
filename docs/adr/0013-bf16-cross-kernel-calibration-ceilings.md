@@ -1,5 +1,9 @@
 # Bound recalibration for the fixed BF16 kernel comparison
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 Historical calibration decision: [ADR-0015](0015-layered-accuracy-validation.md) defines the subsequent layered protocol. These ceilings and observations remain historical evidence, not budgets or approval for that new protocol.
 
 After three BF16 materialization repairs and guarded numerical investigations, the four readable calibration cases still exceeded ADR-0012's initial ceilings. The user authorized a formal tolerance-protocol revision while retaining independent holdout validation. We retain the fixed BF16 reference and candidate kernels and revise only the admissible calibration envelope: L2 at most `1.0`, and L1 near-tie gap at most `0.125`; neither number is an approved acceptance tolerance.

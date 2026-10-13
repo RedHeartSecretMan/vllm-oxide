@@ -1,5 +1,9 @@
 # Public request identity and output order
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 The v0.1 `RequestOutput.seq_id` field exposed scheduler identity and was also
 treated as a call-local batch index. After one `LLM::generate` call, monotonic
 sequence identifiers no longer started at zero, causing later outputs to be

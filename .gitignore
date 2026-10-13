@@ -15,3 +15,11 @@ Thumbs.db
 
 # Agent working state (not project code)
 .sisyphus/
+
+# Local Python/tooling and evidence state
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.worktrees/

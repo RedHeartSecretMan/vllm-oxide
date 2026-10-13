@@ -1,5 +1,9 @@
 # Recover bounded telemetry faults without relabeling measurements
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 The user requested optimization of repeated resource-monitor timeouts and continuation of the remaining evidence. We adopt the [bounded supervision contract](../validation/layered-supervision-contract.md) and its [versioned policy](../validation/layered-supervision-policy.json): independent fast RAM/process protection, lower-rate single-flight GPU telemetry, and at most one fully recorded timeout recovery within a finite window. Persistent monitoring failure, real resource violations, failed workers and missing final cleanup evidence still stop the stage. This is resilience to an observed query failure, not a claim that its NVML/driver root cause has been fixed.
 
 We keep actual numerical workers and the Rust binary at the immutable, already verified `8f21331` measurement source, while explicitly binding the new supervisor/evaluator implementation separately. Exactly 445 source- and hash-bound successful old owners are eligible for strict legacy-guard compatibility; 42 remaining owners use the new guard. Failed and diagnostic records remain immutable and excluded. No numerical input, model, kernel scope, budget, comparison formula or per-case rule changes; the original `6b7ae7d` calibration approval keeps its own identity and verification path.

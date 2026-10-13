@@ -1,5 +1,9 @@
 # Version operator, logit and token acceptance separately
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 The user approved a redesigned accuracy contract and explicitly chose L0 for operators, L1 for model logits/distributions, and L2 for final token choices and engine behavior. We adopt the complete [layered accuracy contract](../validation/layered-accuracy-contract.md), keeping a fixed Transformers BF16 SDPA MATH reference and making paired vLLM comparison an additional numerical gate. No extra backend-isolation experiment is required.
 
 This is a design-and-implementation approval, not empirical approval of any operator or model budget. All unset budgets remain pending, and new authoritative validation must fail closed until the corpus, budget provenance and independent evidence have been frozen. Historical failures, observations and reports retain their original identities and verdicts.

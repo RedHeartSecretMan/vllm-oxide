@@ -1,5 +1,9 @@
 # Account for reserved blocks in the pressure baseline
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 The pinned vLLM 0.18.1 BlockPool reserves one null block, so the former pressure setting of 48 total 16-token blocks leaves only 47 usable. The two disjoint prompts require `ceil(512/16) + ceil(255/16) = 32 + 16 = 48` blocks even at initial prefill. We choose `baseline_blocks=51` for calibration-pressure and acceptance-pressure, including their public-pressure configuration mirrors, to provide 50 usable blocks for the full computed histories: `ceil((512+4-1)/16) + ceil((255+5-1)/16) = 33 + 17`.
 
 This explicitly replaces the 48-block baseline setting in the case registry and layered contract section 16. The field remains an exact total `num_gpu_blocks_override`, not a count of usable blocks. The baseline must still demonstrate prefill, decode and batch; it does not acquire a recompute requirement or a new prohibition on preemption. Rust retains its three 256-token blocks and required recomputation of previously executed history after an advance. Prompt/continuation tokens, completion budgets 4/5, per-step token budget 768, context limit 768, max sequences 2, other engine settings, mechanism obligations, corpus counts and numerical budgets are unchanged.

@@ -1,5 +1,9 @@
 # v0.2.0 分层精度验收协议
 
+[Validation index](README.md) · [RC release result](../releases/v0.2.0-rc.1.en.md)
+
+> Original RC protocol/diagnosis record. This documentation refresh preserves all raw source identities, numerical limits and verdicts; no new GPU measurement or evidence upload is implied.
+
 日期：2026-09-06。
 
 **状态：用户已批准设计与实现，数值预算和独立验收语料须后续冻结。** 本文件随 ADR-0015 的 Definition Checkpoint 生效。它不批准任何新数值阈值，不改判旧测量；预算、case 清单或必要证据未冻结时，不得输出发布验收 PASS。

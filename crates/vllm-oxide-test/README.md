@@ -38,8 +38,8 @@ vLLM artifacts count only after the manifest records successful calibration.
 
 ### Prerequisites
 
-- Linux with NVIDIA GPU (sm_89+, e.g., RTX 40-series, A10, H100)
-- Rust toolchain (1.75+)
+- Linux or WSL2 with the recorded RTX 4080 / SM 8.9 reproduction profile; source-bound validation uses its exact pinned environment.
+- Recorded Rust toolchain 1.94.0. The historical manifest declares 1.75, but that minimum was not validated.
 - Model weights for Qwen3-0.6B (local directory or HF Hub)
 - Golden fixtures (local directory or GitHub Release)
 

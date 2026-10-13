@@ -1,5 +1,9 @@
 # Contract v0.2.0 around LLM::generate
 
+[ADR index](README.md) · [RC validation](../validation/README.md)
+
+> Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
+
 v0.1 exposed engine, sequence, cache, attention, loader, registry, model, sampler, and utility types from the crate root even though the supported product is offline generation. v0.2.0 is a deliberate pre-1.0 breaking contraction: the default crate-root exports are exactly `LLM`, `EngineOptions`, `Prompt`, `SamplingParams`, `RequestOutput`, and `Source`; the supported `LLM` operations are construction through `LLM::new` and generation through `LLM::generate`.
 
 No compatibility aliases or root re-exports remain for `Sampler`, utility helpers, attention metadata or cache types, engine and scheduler types, loader helpers or resolved identities, `CausalLM`, registry types, `BuiltModel`, or `build_model`. Workspace consumers and the CLI use the same six-type surface. The private prepared-attention state moves into the now-internal `AttentionContext`, so Ticket #42's temporary public-field, direct-forward, and `PagedKVCache` sidecar compatibility bridge is removed without changing one-prepare-per-step behavior.
