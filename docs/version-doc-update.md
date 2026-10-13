@@ -4,11 +4,11 @@ The published source archives are being refreshed with version-specific user,
 developer, research and validation-tool documentation at the user's request.
 This record describes the documentation operation, not new inference validation.
 
-| Version | Original implementation | Maintained source branch |
+| Version | Original implementation | Release tag |
 |---|---|---|
-| `v0.1.0` | `52037493b38c2d01c4c07a98d2d8f22ca68f2509` | `docs/align-v0.1.0` |
-| `v0.2.0.rc.1` | `21cd848fb1256dd908a29d4f3b08596fe1dd39fc` | `docs/align-v0.2.0-rc.1` |
-| `v0.2.0` | `289cb65b475bb472b5c31db2615c3a5d4cbba0db` | `docs/align-v0.2.0` |
+| `v0.1.0` | `52037493b38c2d01c4c07a98d2d8f22ca68f2509` | [`v0.1.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/v0.1.0) |
+| `v0.2.0.rc.1` | `21cd848fb1256dd908a29d4f3b08596fe1dd39fc` | [`v0.2.0.rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/v0.2.0.rc.1) |
+| `v0.2.0` | `289cb65b475bb472b5c31db2615c3a5d4cbba0db` | [`v0.2.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/v0.2.0) |
 
 The original implementation commits remain available in Git history. Original
 measurement identities, evidence assets and verdicts remain available. The
