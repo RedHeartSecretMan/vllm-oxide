@@ -81,9 +81,9 @@ For this operation:
    recorded numerical results unchanged. Documentation must describe that
    version's actual commands and implementation.
 2. Review and validate each version's guides, local links, shell examples and
-   complete source-file diff. Store the original annotated tag object under an
-   `archive/before-doc-refresh-2026-10-13/<version>` tag so it remains available
-   for exact provenance and rollback.
+   complete source-file diff. Record the original implementation commit and
+   annotated tag object locally for provenance and rollback; do not publish
+   additional backup tags.
 3. Publish the reviewed maintenance commits on named branches. Update existing
    release tags only under the user's explicit authority, with a force-with-lease
    check against each original remote tag object. A changed remote ref stops the
@@ -94,8 +94,8 @@ For this operation:
    status and attached evidence assets.
 5. Download the refreshed GitHub source archive for each tag. Verify its new
    documentation and that all non-documentation runtime files are byte-identical
-   to the original implementation. Verify archived tag objects still resolve to
-   the original sources.
+   to the original implementation. Verify the original implementation commits
+   remain available in Git history.
 
 Each source archive includes `docs/version-doc-update.md` to explain the
 maintenance revision. It does not claim new GPU measurements or change a

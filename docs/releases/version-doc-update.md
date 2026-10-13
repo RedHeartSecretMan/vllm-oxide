@@ -37,4 +37,4 @@ historical meaning.
 标签及源码归档包含本次文档修订。精度、功能和性能结果始终对应原始测量来源，
 没有将文档检查描述为重新执行 GPU 验收。
 
-Original tag archive: [archive/before-doc-refresh-2026-10-13/v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/tree/archive/before-doc-refresh-2026-10-13/v0.2.0).
+Original implementation: [`289cb65`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/289cb65b475bb472b5c31db2615c3a5d4cbba0db).
