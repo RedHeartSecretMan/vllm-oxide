@@ -47,10 +47,100 @@ pub struct Qwen3Config {
 }
 
 impl Qwen3Config {
-    fn head_dim(&self) -> usize {
-        self.head_dim
-            .unwrap_or(self.hidden_size / self.num_attention_heads)
+    fn head_dim(&self) -> Result<usize> {
+        if self.num_attention_heads == 0 {
+            anyhow::bail!("Qwen3Config: num_attention_heads must be greater than zero");
+        }
+        let head_dim = if let Some(head_dim) = self.head_dim {
+            head_dim
+        } else {
+            if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
+                anyhow::bail!(
+                    "Qwen3Config: hidden_size must be divisible by num_attention_heads when head_dim is absent"
+                );
+            }
+            self.hidden_size / self.num_attention_heads
+        };
+        if head_dim == 0 || !head_dim.is_multiple_of(2) {
+            anyhow::bail!(
+                "Qwen3Config: head_dim must be positive and even for full rotary embedding"
+            );
+        }
+        Ok(head_dim)
     }
+
+    fn validate(&self, dtype: candle_core::DType) -> Result<()> {
+        for (name, value) in [
+            ("hidden_size", self.hidden_size),
+            ("num_hidden_layers", self.num_hidden_layers),
+            ("num_attention_heads", self.num_attention_heads),
+            ("num_key_value_heads", self.num_key_value_heads),
+            ("intermediate_size", self.intermediate_size),
+            ("vocab_size", self.vocab_size),
+            ("max_position_embeddings", self.max_position_embeddings),
+        ] {
+            if value == 0 {
+                anyhow::bail!("Qwen3Config: {name} must be greater than zero");
+            }
+        }
+        if !self
+            .num_attention_heads
+            .is_multiple_of(self.num_key_value_heads)
+        {
+            anyhow::bail!(
+                "Qwen3Config: num_attention_heads must be divisible by num_key_value_heads"
+            );
+        }
+        let head_dim = self.head_dim()?;
+        self.num_key_value_heads
+            .checked_mul(2)
+            .and_then(|kv_heads| self.num_attention_heads.checked_add(kv_heads))
+            .and_then(|heads| heads.checked_mul(head_dim))
+            .ok_or_else(|| anyhow!("Qwen3Config: fused QKV geometry overflows usize"))?;
+        self.intermediate_size
+            .checked_mul(2)
+            .ok_or_else(|| anyhow!("Qwen3Config: fused gate/up geometry overflows usize"))?;
+        self.validate_cache_geometry(dtype, 1)?;
+        if !self.rope_theta.is_finite() || self.rope_theta <= 0.0 {
+            anyhow::bail!("Qwen3Config: rope_theta must be finite and greater than zero");
+        }
+        if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
+            anyhow::bail!("Qwen3Config: rms_norm_eps must be finite and greater than zero");
+        }
+        Ok(())
+    }
+    fn validate_cache_geometry(&self, dtype: candle_core::DType, num_blocks: usize) -> Result<()> {
+        let elements = [
+            2,
+            self.num_hidden_layers,
+            num_blocks,
+            256,
+            self.num_key_value_heads,
+            self.head_dim()?,
+        ]
+        .into_iter()
+        .try_fold(1usize, usize::checked_mul)
+        .ok_or_else(|| {
+            anyhow!(
+            "Qwen3Config: KV cache geometry including num_hidden_layers overflows usize elements"
+        )
+        })?;
+        std::ffi::c_long::try_from(elements).map_err(|_| anyhow!(
+            "Qwen3Config: KV cache geometry including num_hidden_layers exceeds the signed cache-index ABI"
+        ))?;
+        let bytes = elements.checked_mul(dtype.size_in_bytes()).ok_or_else(|| {
+            anyhow!(
+                "Qwen3Config: KV cache geometry including num_hidden_layers overflows usize bytes"
+            )
+        })?;
+        // Rust allocations/pointer offsets and the signed cache-index ABI
+        // cannot address a buffer larger than isize::MAX bytes.
+        isize::try_from(bytes).map_err(|_| anyhow!(
+            "Qwen3Config: KV cache geometry including num_hidden_layers exceeds signed index/byte bounds"
+        ))?;
+        Ok(())
+    }
+
     fn has_qkv_bias(&self) -> bool {
         self.attention_bias.unwrap_or(true)
     }
@@ -111,7 +201,9 @@ impl Qwen3Attention {
         attn_ctx: AttentionContext,
         layer_id: usize,
     ) -> CandleResult<Self> {
-        let hd = config.head_dim();
+        let hd = config
+            .head_dim()
+            .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
         let nh = config.num_attention_heads;
         let nkv = config.num_key_value_heads;
         let bias = config.has_qkv_bias();
@@ -381,7 +473,12 @@ impl Qwen3Model {
             .pp("embed_tokens")
             .get((config.vocab_size, config.hidden_size), "weight")?;
         let embed_tokens = candle_nn::Embedding::new(ew, config.hidden_size);
-        let mut layers = Vec::with_capacity(config.num_hidden_layers);
+        let mut layers = Vec::new();
+        layers
+            .try_reserve_exact(config.num_hidden_layers)
+            .map_err(|error| {
+                candle_core::Error::Msg(format!("Qwen3 layer storage allocation failed: {error}"))
+            })?;
         for i in 0..config.num_hidden_layers {
             layers.push(Qwen3DecoderLayer::from_vb(
                 vb.pp("layers").pp(i),
@@ -425,6 +522,11 @@ impl Qwen3Model {
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
         }
         let mut residual: Option<Tensor> = None;
+        // Layer indices are consumed only by the optional golden trace below.
+        #[cfg_attr(
+            not(feature = "internal-golden"),
+            allow(clippy::unused_enumerate_index)
+        )]
         for (_layer_index, layer) in self.layers.iter().enumerate() {
             let (out, res) = layer.forward(
                 &padded_positions,
@@ -505,9 +607,9 @@ impl Qwen3ForCausalLM {
     ) -> Result<BuiltModel> {
         let config_json = resolved.config_json();
         let dtype = resolved.dtype();
-        let vb = load_resolved_weights_vb(resolved, device)?;
         let config: Qwen3Config =
             serde_json::from_slice(config_json).map_err(|e| anyhow!("Qwen3Config: {e}"))?;
+        config.validate(dtype)?;
         if max_model_len > config.max_position_embeddings {
             anyhow::bail!(
                 "max_model_len ({max_model_len}) exceeds the model's max_position_embeddings ({}) — \
@@ -515,11 +617,12 @@ impl Qwen3ForCausalLM {
                 config.max_position_embeddings
             );
         }
+        let vb = load_resolved_weights_vb(resolved, device)?;
         let paged_kv = Arc::new(Mutex::new(PagedKVCache::deferred(PagedKVCacheGeometry {
             num_layers: config.num_hidden_layers,
             block_size: 256,
             num_kv_heads: config.num_key_value_heads,
-            head_dim: config.head_dim(),
+            head_dim: config.head_dim()?,
             dtype,
         })));
         let attn_ctx = AttentionContext::new_with_query_heads(paged_kv, config.num_attention_heads);
@@ -562,35 +665,68 @@ mod tests {
     use super::*;
 
     fn write_minimal_weights(path: &std::path::Path) {
-        let embedding_bytes: Vec<u8> = [0.0_f32; 10]
+        let specifications = [
+            ("model.embed_tokens.weight", vec![5, 2], 0.0_f32),
+            ("model.norm.weight", vec![2], 1.0_f32),
+            ("model.layers.0.input_layernorm.weight", vec![2], 1.0_f32),
+            (
+                "model.layers.0.post_attention_layernorm.weight",
+                vec![2],
+                1.0_f32,
+            ),
+            ("model.layers.0.self_attn.q_norm.weight", vec![2], 1.0_f32),
+            ("model.layers.0.self_attn.k_norm.weight", vec![2], 1.0_f32),
+            (
+                "model.layers.0.self_attn.q_proj.weight",
+                vec![2, 2],
+                0.0_f32,
+            ),
+            (
+                "model.layers.0.self_attn.k_proj.weight",
+                vec![2, 2],
+                0.0_f32,
+            ),
+            (
+                "model.layers.0.self_attn.v_proj.weight",
+                vec![2, 2],
+                0.0_f32,
+            ),
+            (
+                "model.layers.0.self_attn.o_proj.weight",
+                vec![2, 2],
+                0.0_f32,
+            ),
+            ("model.layers.0.mlp.gate_proj.weight", vec![2, 2], 0.0_f32),
+            ("model.layers.0.mlp.up_proj.weight", vec![2, 2], 0.0_f32),
+            ("model.layers.0.mlp.down_proj.weight", vec![2, 2], 0.0_f32),
+        ];
+        let bytes: Vec<Vec<u8>> = specifications
             .iter()
-            .flat_map(|value| value.to_ne_bytes())
+            .map(|(_, shape, value)| {
+                (0..shape.iter().product::<usize>())
+                    .flat_map(|_| value.to_le_bytes())
+                    .collect()
+            })
             .collect();
-        let norm_bytes: Vec<u8> = [1.0_f32; 2]
+        let tensors: Vec<_> = specifications
             .iter()
-            .flat_map(|value| value.to_ne_bytes())
+            .zip(&bytes)
+            .map(|((name, shape, _), data)| {
+                (
+                    *name,
+                    safetensors::tensor::TensorView::new(
+                        safetensors::Dtype::F32,
+                        shape.clone(),
+                        data,
+                    )
+                    .unwrap(),
+                )
+            })
             .collect();
-        let embedding = safetensors::tensor::TensorView::new(
-            safetensors::Dtype::F32,
-            vec![5, 2],
-            &embedding_bytes,
-        )
-        .unwrap();
-        let norm =
-            safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![2], &norm_bytes)
-                .unwrap();
-        safetensors::tensor::serialize_to_file(
-            [
-                ("model.embed_tokens.weight", embedding),
-                ("model.norm.weight", norm),
-            ],
-            &None,
-            path,
-        )
-        .unwrap();
+        safetensors::tensor::serialize_to_file(tensors, &None, path).unwrap();
     }
 
-    fn build_zero_layer_model() -> BuiltModel {
+    fn build_one_layer_model() -> BuiltModel {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("config.json"),
@@ -599,7 +735,8 @@ mod tests {
                 "torch_dtype":"bfloat16",
                 "eos_token_id":2,
                 "hidden_size":2,
-                "num_hidden_layers":0,
+                "num_hidden_layers":1,
+                "attention_bias":false,
                 "num_attention_heads":1,
                 "num_key_value_heads":1,
                 "intermediate_size":2,
@@ -621,6 +758,172 @@ mod tests {
         Qwen3ForCausalLM::build(&resolved, &Device::Cpu, 8).unwrap()
     }
 
+    fn valid_small_config() -> Qwen3Config {
+        serde_json::from_str(
+            r#"{"hidden_size":64,"num_hidden_layers":1,"num_attention_heads":4,
+                "num_key_value_heads":2,"intermediate_size":128,"vocab_size":100,
+                "rms_norm_eps":1e-6,"max_position_embeddings":128,"hidden_act":"silu"}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn validates_head_geometry_without_assuming_hidden_equals_attention_width() {
+        let mut config = valid_small_config();
+        config.hidden_size = 65;
+        assert!(config
+            .validate(candle_core::DType::BF16)
+            .unwrap_err()
+            .to_string()
+            .contains("head_dim is absent"));
+        // Explicit head_dim defines projection width independently of hidden_size.
+        config.head_dim = Some(32);
+        config.validate(candle_core::DType::BF16).unwrap();
+        assert_eq!(config.head_dim().unwrap(), 32);
+        config.num_attention_heads = 0;
+        assert!(config
+            .head_dim()
+            .unwrap_err()
+            .to_string()
+            .contains("num_attention_heads"));
+        assert!(config
+            .validate(candle_core::DType::BF16)
+            .unwrap_err()
+            .to_string()
+            .contains("num_attention_heads"));
+        config.num_attention_heads = 4;
+        for head_dim in [0, 3] {
+            config.head_dim = Some(head_dim);
+            assert!(config
+                .validate(candle_core::DType::BF16)
+                .unwrap_err()
+                .to_string()
+                .contains("head_dim"));
+        }
+        config.head_dim = Some(32);
+        config.num_key_value_heads = 3;
+        assert!(config
+            .validate(candle_core::DType::BF16)
+            .unwrap_err()
+            .to_string()
+            .contains("num_key_value_heads"));
+        config.num_key_value_heads = 8;
+        assert!(config
+            .validate(candle_core::DType::BF16)
+            .unwrap_err()
+            .to_string()
+            .contains("num_key_value_heads"));
+    }
+
+    #[test]
+    fn rejects_invalid_qwen3_scalars_and_projection_overflow() {
+        let mut config = valid_small_config();
+        for value in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            config.rope_theta = value;
+            assert!(config
+                .validate(candle_core::DType::BF16)
+                .unwrap_err()
+                .to_string()
+                .contains("rope_theta"));
+        }
+        config.rope_theta = 1_000_000.0;
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            config.rms_norm_eps = value;
+            assert!(config
+                .validate(candle_core::DType::BF16)
+                .unwrap_err()
+                .to_string()
+                .contains("rms_norm_eps"));
+        }
+        config.rms_norm_eps = 1e-6;
+        config.head_dim = Some(usize::MAX - 1);
+        assert!(config
+            .validate(candle_core::DType::BF16)
+            .unwrap_err()
+            .to_string()
+            .contains("QKV geometry overflows"));
+        config.head_dim = Some(16);
+        config.intermediate_size = usize::MAX;
+        assert!(config
+            .validate(candle_core::DType::BF16)
+            .unwrap_err()
+            .to_string()
+            .contains("gate/up geometry overflows"));
+    }
+
+    #[test]
+    fn rejects_unaddressable_kv_cache_geometry_without_a_fixed_layer_limit() {
+        let mut config = valid_small_config();
+        let bytes_per_layer_block = 2 * 256 * 2 * 16 * 2;
+        for layers in [
+            usize::MAX,
+            usize::MAX / (bytes_per_layer_block / 2) + 1,
+            usize::MAX / bytes_per_layer_block + 1,
+            usize::try_from(isize::MAX).unwrap() / bytes_per_layer_block + 1,
+        ] {
+            config.num_hidden_layers = layers;
+            let error = config
+                .validate(candle_core::DType::BF16)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Qwen3Config: KV cache geometry"), "{error}");
+            assert!(error.contains("num_hidden_layers"), "{error}");
+        }
+        // Validity follows representable geometry, not an arbitrary model-size cap.
+        config.num_hidden_layers = 1_000;
+        config.validate(candle_core::DType::BF16).unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_geometry_before_loading_weights() {
+        let base = serde_json::json!({
+            "architectures": ["Qwen3ForCausalLM"], "torch_dtype": "bfloat16",
+            "eos_token_id": 2, "hidden_size": 64, "num_hidden_layers": 1,
+            "num_attention_heads": 4, "num_key_value_heads": 2,
+            "intermediate_size": 128, "vocab_size": 100,
+            "rms_norm_eps": 1e-6, "max_position_embeddings": 128,
+            "head_dim": 16, "hidden_act": "silu"
+        });
+        let mut cases: Vec<(&str, serde_json::Value)> = [
+            "hidden_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "intermediate_size",
+            "vocab_size",
+            "max_position_embeddings",
+            "head_dim",
+        ]
+        .into_iter()
+        .map(|field| (field, serde_json::json!(0)))
+        .collect();
+        cases.push(("num_hidden_layers", serde_json::json!(usize::MAX)));
+        cases.push((
+            "num_hidden_layers",
+            serde_json::json!(usize::try_from(isize::MAX).unwrap() / (2 * 256 * 2 * 16 * 2) + 1),
+        ));
+        for (field, value) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = base.clone();
+            config[field] = value;
+            let config_json = serde_json::to_vec(&config).unwrap();
+            std::fs::write(tmp.path().join("config.json"), &config_json).unwrap();
+            std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
+            // Resolution may inspect the file's name; the model builder must
+            // reject config before mapping or parsing this invalid weight file.
+            std::fs::write(tmp.path().join("model.safetensors"), b"not weights").unwrap();
+            let resolved = ResolvedModel::resolve(
+                crate::config::Source::Local(tmp.path().to_path_buf()),
+                None,
+            )
+            .unwrap();
+            let result = Qwen3ForCausalLM::build(&resolved, &Device::Cpu, 8);
+            let error = result.err().unwrap().to_string();
+            assert!(error.contains("Qwen3Config"), "{field}: {error}");
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
     #[test]
     fn deserialises_qwen3_06b_config() {
         let json = r#"{"architectures":["Qwen3ForCausalLM"],"attention_bias":false,"head_dim":128,
@@ -628,8 +931,9 @@ mod tests {
             "num_attention_heads":16,"num_hidden_layers":28,"num_key_value_heads":8,
             "rms_norm_eps":1e-06,"rope_theta":1000000,"tie_word_embeddings":true,"vocab_size":151936}"#;
         let cfg: Qwen3Config = serde_json::from_str(json).unwrap();
+        cfg.validate(candle_core::DType::BF16).unwrap();
         assert_eq!(cfg.hidden_size, 1024);
-        assert_eq!(cfg.head_dim(), 128);
+        assert_eq!(cfg.head_dim().unwrap(), 128);
         assert!(!cfg.has_qkv_bias());
         assert!(cfg.tie_word_embeddings());
     }
@@ -638,7 +942,7 @@ mod tests {
         let json = r#"{"hidden_size":1024,"num_hidden_layers":2,"num_attention_heads":16,"num_key_value_heads":8,
             "intermediate_size":3072,"vocab_size":100,"rms_norm_eps":1e-6,"max_position_embeddings":4096,"hidden_act":"silu"}"#;
         let cfg: Qwen3Config = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.head_dim(), 64);
+        assert_eq!(cfg.head_dim().unwrap(), 64);
     }
     #[test]
     fn accepts_unknown_fields() {
@@ -654,7 +958,7 @@ mod tests {
 
     #[test]
     fn resolved_dtype_reaches_model_without_allocating_a_cache_buffer() {
-        let built = build_zero_layer_model();
+        let built = build_one_layer_model();
         let cache = built.attn_ctx.paged_kv.lock().unwrap();
 
         assert_eq!(cache.dtype(), candle_core::DType::F16);

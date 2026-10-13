@@ -516,9 +516,17 @@ fn read_named_tensor_as_i64(tensors: &SafeTensors, name: &str) -> Result<Vec<i64
         .with_context(|| format!("tensor '{}' not found in safetensors", name))?;
     match view.dtype() {
         safetensors::Dtype::I64 => {
-            let len = view.data().len() / 8;
-            let data: &[i64] = bytemuck::cast_slice(view.data());
-            Ok(data[..len].to_vec())
+            // Safetensors stores little-endian bytes and does not require each
+            // tensor's payload address to be aligned for a typed slice.
+            Ok(view
+                .data()
+                .chunks_exact(8)
+                .map(|chunk| {
+                    let mut bytes = [0; 8];
+                    bytes.copy_from_slice(chunk);
+                    i64::from_le_bytes(bytes)
+                })
+                .collect())
         }
         other => anyhow::bail!("tensor '{}' has dtype {:?}, expected I64", name, other),
     }
@@ -537,9 +545,17 @@ fn read_named_tensor_as_f32(tensors: &SafeTensors, name: &str) -> Result<Vec<f32
         .with_context(|| format!("tensor '{}' not found in safetensors", name))?;
     match view.dtype() {
         safetensors::Dtype::F32 => {
-            let len = view.data().len() / 4;
-            let data: &[f32] = bytemuck::cast_slice(view.data());
-            Ok(data[..len].to_vec())
+            // Safetensors stores little-endian bytes and does not require each
+            // tensor's payload address to be aligned for a typed slice.
+            Ok(view
+                .data()
+                .chunks_exact(4)
+                .map(|chunk| {
+                    let mut bytes = [0; 4];
+                    bytes.copy_from_slice(chunk);
+                    f32::from_le_bytes(bytes)
+                })
+                .collect())
         }
         other => anyhow::bail!("tensor '{}' has dtype {:?}, expected F32", name, other),
     }
@@ -1086,5 +1102,257 @@ mod tests {
         let error = load_fixture(&path, &metadata).unwrap_err().to_string();
 
         assert!(error.contains("unsupported logits shape"), "{error}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod fixture_reader_tests {
+    use safetensors::SafeTensors;
+    use serde_json::json;
+
+    use super::{load_fixture, read_named_tensor_as_f32, read_named_tensor_as_i64};
+    use crate::types::{FixtureMetadata, LogitsDtype, OracleName, PromptCategory};
+
+    struct WireTensor {
+        name: &'static str,
+        dtype: &'static str,
+        shape: Vec<usize>,
+        data: Vec<u8>,
+    }
+
+    // The safetensors format allows contiguous payloads in any order. The normal
+    // serializer sorts by dtype size, so write the header explicitly to cover
+    // files whose integer tensors follow floating-point or byte tensors.
+    fn wire_fixture(tensors: &[WireTensor]) -> Vec<u8> {
+        let mut header = serde_json::Map::new();
+        let mut payload = Vec::new();
+        for tensor in tensors {
+            let start = payload.len();
+            payload.extend_from_slice(&tensor.data);
+            header.insert(
+                tensor.name.to_string(),
+                json!({
+                    "dtype": tensor.dtype,
+                    "shape": tensor.shape,
+                    "data_offsets": [start, payload.len()],
+                }),
+            );
+        }
+        let mut header = serde_json::to_vec(&header).unwrap();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut bytes = u64::try_from(header.len()).unwrap().to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&payload);
+        bytes
+    }
+
+    fn regression_tensors() -> Vec<WireTensor> {
+        vec![
+            WireTensor {
+                name: "top5_logits",
+                dtype: "F32",
+                shape: vec![1, 5],
+                data: [1.25_f32, -2.5, 0.0, 8.0, 0.125]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            },
+            WireTensor {
+                name: "token_ids",
+                dtype: "I64",
+                shape: vec![1],
+                data: 42_i64.to_le_bytes().to_vec(),
+            },
+            WireTensor {
+                name: "n_prompt_tokens",
+                dtype: "I64",
+                shape: vec![],
+                data: 3_i64.to_le_bytes().to_vec(),
+            },
+            WireTensor {
+                name: "top5_indices",
+                dtype: "I64",
+                shape: vec![1, 5],
+                data: [42_i64, 17, 0, 9, 8]
+                    .into_iter()
+                    .flat_map(i64::to_le_bytes)
+                    .collect(),
+            },
+        ]
+    }
+
+    fn metadata(category: PromptCategory) -> FixtureMetadata {
+        let logits_shape = match category {
+            PromptCategory::Canonical => (1, 5),
+            PromptCategory::Regression => (0, 0),
+        };
+        FixtureMetadata {
+            prompt_id: "wire_order".to_string(),
+            category,
+            oracle: OracleName::Transformers,
+            num_tokens: 1,
+            logits_dtype: LogitsDtype::Float32,
+            logits_shape,
+            sha256: "unused".to_string(),
+            filename: "wire_order.transformers.safetensors".to_string(),
+        }
+    }
+
+    #[test]
+    fn loads_regression_with_float_payload_before_unaligned_integers() {
+        let bytes = wire_fixture(&regression_tensors());
+        let tensors = SafeTensors::deserialize(&bytes).unwrap();
+        let token_view = tensors.tensor("token_ids").unwrap();
+        assert_ne!(token_view.data().as_ptr().align_offset(8), 0);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("regression.safetensors");
+        std::fs::write(&path, bytes).unwrap();
+
+        let fixture = load_fixture(&path, &metadata(PromptCategory::Regression)).unwrap();
+
+        assert_eq!(fixture.token_ids, [42]);
+        assert_eq!(fixture.n_prompt_tokens, 3);
+        assert_eq!(fixture.top5_indices.unwrap(), [42, 17, 0, 9, 8]);
+        assert_eq!(fixture.top5_logits.unwrap(), [1.25, -2.5, 0.0, 8.0, 0.125]);
+        assert!(fixture.logits.is_none());
+    }
+
+    #[test]
+    fn reads_unaligned_little_endian_float_and_signed_integer_values() {
+        // Explicit wire bytes include signed extremes and negative zero. This
+        // checks the file's little-endian representation, not native endianness.
+        let bytes = wire_fixture(&[
+            WireTensor {
+                name: "prefix",
+                dtype: "U8",
+                shape: vec![1],
+                data: vec![0xaa],
+            },
+            WireTensor {
+                name: "integers",
+                dtype: "I64",
+                shape: vec![4],
+                data: vec![
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0x80,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f, 4, 3, 2, 1, 0, 0, 0, 0,
+                ],
+            },
+            WireTensor {
+                name: "floats",
+                dtype: "F32",
+                shape: vec![4],
+                data: vec![
+                    0, 0, 0, 0x80, 0, 0, 0xa0, 0x3f, 0, 0, 0x20, 0xc0, 0, 0, 0x80, 0x7f,
+                ],
+            },
+        ]);
+        let tensors = SafeTensors::deserialize(&bytes).unwrap();
+        assert_ne!(
+            tensors
+                .tensor("integers")
+                .unwrap()
+                .data()
+                .as_ptr()
+                .align_offset(8),
+            0
+        );
+        assert_ne!(
+            tensors
+                .tensor("floats")
+                .unwrap()
+                .data()
+                .as_ptr()
+                .align_offset(4),
+            0
+        );
+
+        assert_eq!(
+            read_named_tensor_as_i64(&tensors, "integers").unwrap(),
+            [-1, i64::MIN, i64::MAX, 16_909_060]
+        );
+        let float_bits: Vec<u32> = read_named_tensor_as_f32(&tensors, "floats")
+            .unwrap()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect();
+        assert_eq!(
+            float_bits,
+            [0x8000_0000, 0x3fa0_0000, 0xc020_0000, 0x7f80_0000]
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_wire_dtypes_without_reinterpreting_values() {
+        let bytes = wire_fixture(&[
+            WireTensor {
+                name: "integers",
+                dtype: "U64",
+                shape: vec![1],
+                data: u64::MAX.to_le_bytes().to_vec(),
+            },
+            WireTensor {
+                name: "floats",
+                dtype: "F64",
+                shape: vec![1],
+                data: 1.25_f64.to_le_bytes().to_vec(),
+            },
+        ]);
+        let tensors = SafeTensors::deserialize(&bytes).unwrap();
+        assert!(read_named_tensor_as_i64(&tensors, "integers")
+            .unwrap_err()
+            .to_string()
+            .contains("expected I64"));
+        assert!(read_named_tensor_as_f32(&tensors, "floats")
+            .unwrap_err()
+            .to_string()
+            .contains("expected F32"));
+    }
+
+    #[test]
+    fn rejects_regression_shapes_inconsistent_with_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wrong_shape.safetensors");
+        for (name, wrong_shape) in [
+            ("token_ids", vec![1, 1]),
+            ("n_prompt_tokens", vec![1]),
+            ("top5_indices", vec![5]),
+            ("top5_logits", vec![5]),
+        ] {
+            let mut tensors = regression_tensors();
+            tensors
+                .iter_mut()
+                .find(|tensor| tensor.name == name)
+                .unwrap()
+                .shape = wrong_shape;
+            std::fs::write(&path, wire_fixture(&tensors)).unwrap();
+            let error = load_fixture(&path, &metadata(PromptCategory::Regression))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(name) && error.contains("shape"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_canonical_logits_shape_inconsistent_with_metadata() {
+        let mut tensors = regression_tensors();
+        tensors[0].name = "logits";
+        tensors[0].shape = vec![5];
+        tensors.pop();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wrong_logits_shape.safetensors");
+        std::fs::write(&path, wire_fixture(&tensors)).unwrap();
+        let error = load_fixture(&path, &metadata(PromptCategory::Canonical))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("logits") && error.contains("shape"),
+            "{error}"
+        );
     }
 }

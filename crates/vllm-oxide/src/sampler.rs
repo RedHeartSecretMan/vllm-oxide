@@ -475,6 +475,10 @@ impl Sampler {
         let logits_f32 = logits_1d.to_dtype(DType::F32)?;
         let mut buf = full_logits_to_host(&logits_f32)?;
 
+        if requires_wide_sampling(&buf, params, history) {
+            return Ok(self.sample_row_wide(&buf, params, history));
+        }
+
         // Step 2: apply penalties (additive presence/frequency, multiplicative
         // repetition) BEFORE temperature scaling — issue #17 acceptance
         // criterion: "Penalties applied before temperature scaling".
@@ -519,6 +523,52 @@ impl Sampler {
         Ok(self.gumbel_argmax_buf(&buf))
     }
 
+    fn sample_row_wide(
+        &mut self,
+        logits: &[f32],
+        params: &SamplingParams,
+        history: &[u32],
+    ) -> usize {
+        let wide = wide_sampling_scores(logits, params, history);
+        let mut best = (
+            WideScore {
+                base: f64::NEG_INFINITY,
+                count: 0,
+            },
+            0_usize,
+        );
+        for (index, &value) in wide.iter().enumerate() {
+            if value.difference(best.0, params) > 0.0 {
+                best = (value, index);
+            }
+        }
+        if params.is_greedy() {
+            return best.1;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let mut normalized = wide
+            .iter()
+            .map(|&value| {
+                if params.temperature.is_infinite() {
+                    0.0
+                } else {
+                    (value.difference(best.0, params) / f64::from(params.temperature)) as f32
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some(k) = params.top_k {
+            if k >= 1 && k < normalized.len() {
+                mask_top_k(&mut normalized, k);
+            }
+        }
+        if let Some(p) = params.top_p {
+            if p > 0.0 && p < 1.0 {
+                mask_top_p(&mut normalized, p);
+            }
+        }
+        self.gumbel_argmax_buf(&normalized)
+    }
+
     /// Gumbel-max draw over a host-side logit buffer. Same RNG call order
     /// as a multinomial — stable across runs given the same seed.
     fn gumbel_argmax_buf(&mut self, logits: &[f32]) -> usize {
@@ -544,6 +594,116 @@ impl Sampler {
         }
         best.1
     }
+}
+
+/// Reserve wider arithmetic only when an accepted finite F32 row can overflow
+/// during penalties or temperature scaling. The bound may be conservative,
+/// but the ordinary F32 pipeline and its seeded draws remain unchanged.
+fn requires_wide_sampling(buf: &[f32], params: &SamplingParams, history: &[u32]) -> bool {
+    let penalized = params.has_penalties() && !history.is_empty();
+    if params.is_greedy() && !penalized {
+        return false;
+    }
+    // Preserve the existing handling of genuinely non-finite model logits;
+    // this fallback repairs arithmetic overflow of finite model outputs.
+    if buf.iter().any(|value| !value.is_finite()) {
+        return false;
+    }
+    let mut bound = buf
+        .iter()
+        .fold(0.0_f64, |bound, value| bound.max(f64::from(*value).abs()));
+    if penalized {
+        if params.repetition_penalty > 0.0 {
+            bound = bound.max(bound / f64::from(params.repetition_penalty));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let count_bound = history.len() as f64;
+        bound += f64::from(params.presence_penalty).abs()
+            + f64::from(params.frequency_penalty).abs() * count_bound;
+    }
+    if bound > f64::from(f32::MAX) {
+        return true;
+    }
+    if params.is_greedy() || params.temperature.is_infinite() {
+        return false;
+    }
+    let inv_t = 1.0_f32 / params.temperature;
+    !inv_t.is_finite() || bound * f64::from(inv_t) > f64::from(f32::MAX)
+}
+
+/// Preserve the original count instead of merging additive penalties into an
+/// absolute score. Common presence terms and common counts cancel before a
+/// tiny frequency penalty is multiplied or added to a much larger quantity.
+#[derive(Clone, Copy)]
+struct WideScore {
+    base: f64,
+    count: usize,
+}
+
+impl WideScore {
+    fn difference(self, other: Self, params: &SamplingParams) -> f64 {
+        let primary = self.base - other.base;
+        // The argmax search starts at a -inf sentinel. All real finite F32
+        // model scores and positive F32 repetition divisors fit in F64.
+        if !primary.is_finite() {
+            return primary;
+        }
+        let presence = if (self.count > 0) == (other.count > 0) {
+            0.0
+        } else if self.count > 0 {
+            -f64::from(params.presence_penalty)
+        } else {
+            f64::from(params.presence_penalty)
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let count_difference = if self.count >= other.count {
+            (self.count - other.count) as f64
+        } else {
+            -((other.count - self.count) as f64)
+        };
+        let frequency = -f64::from(params.frequency_penalty) * count_difference;
+        // Error-free addition retains a small residual when a primary gap
+        // cancels a presence/frequency term. Combining penalties first would
+        // discard that residual before temperature magnifies it.
+        let (sum, error) = two_sum(primary, frequency);
+        let (sum, next_error) = two_sum(sum, presence);
+        sum + (error + next_error)
+    }
+}
+
+fn two_sum(left: f64, right: f64) -> (f64, f64) {
+    let sum = left + right;
+    let right_part = sum - left;
+    let error = (left - (sum - right_part)) + (right - right_part);
+    (sum, error)
+}
+
+/// Store the stable equivalent of the accepted repetition/presence/frequency
+/// formula. The ordinary sampler still performs its existing F32 operations.
+fn wide_sampling_scores(buf: &[f32], params: &SamplingParams, history: &[u32]) -> Vec<WideScore> {
+    let mut wide = buf
+        .iter()
+        .map(|&value| WideScore {
+            base: f64::from(value),
+            count: 0,
+        })
+        .collect::<Vec<_>>();
+    if params.has_penalties() && !history.is_empty() {
+        let mut counts = std::collections::HashMap::<u32, usize>::new();
+        for &token in history {
+            if (token as usize) < wide.len() {
+                *counts.entry(token).or_insert(0) += 1;
+            }
+        }
+        for (token, count) in counts {
+            let value = &mut wide[token as usize];
+            if params.repetition_penalty != 0.0 {
+                value.base /= f64::from(params.repetition_penalty);
+            }
+            value.count = count;
+        }
+    }
+    wide
 }
 
 /// Argmax of a host-side logit buffer. Ties pick the lowest index — matches
@@ -677,6 +837,215 @@ mod tests {
     use super::*;
     use candle_core::Device;
 
+    mod numerical_boundaries {
+        use super::*;
+
+        fn sample_many(row: &[f32], params: &SamplingParams, history: &[u32]) -> Vec<u32> {
+            let logits = Tensor::from_vec(row.to_vec(), (1, row.len()), &Device::Cpu).unwrap();
+            let mut sampler = Sampler::new_with_seed(19);
+            (0..64)
+                .map(|_| {
+                    sampler
+                        .forward(&logits, std::slice::from_ref(params), &[history.to_vec()])
+                        .unwrap()
+                        .to_vec1::<u32>()
+                        .unwrap()[0]
+                })
+                .collect()
+        }
+
+        #[test]
+        fn ordinary_parameters_preserve_seeded_choices() {
+            let params = SamplingParams {
+                temperature: 0.8,
+                top_k: Some(3),
+                top_p: Some(0.9),
+                presence_penalty: 0.2,
+                frequency_penalty: 0.1,
+                repetition_penalty: 1.2,
+                ..SamplingParams::default()
+            };
+            // Captured from the pre-fix production sampler at seed 19.
+            assert_eq!(
+                sample_many(&[0.5, 0.7, -1.0, 0.0, 0.2], &params, &[0, 0, 4]),
+                [
+                    0, 1, 3, 0, 1, 3, 1, 1, 1, 1, 0, 0, 3, 3, 1, 1, 0, 0, 3, 3, 1, 0, 1, 1, 1, 1,
+                    0, 1, 0, 1, 1, 0, 0, 0, 1, 3, 1, 1, 3, 3, 1, 1, 0, 1, 1, 3, 3, 1, 0, 1, 3, 1,
+                    1, 1, 3, 0, 1, 0, 1, 1, 0, 3, 1, 0
+                ]
+            );
+        }
+
+        #[test]
+        fn tiny_temperature_preserves_finite_logit_order() {
+            for temperature in [f32::from_bits(1), 1e-39, 1e-38, f32::MIN_POSITIVE] {
+                for (row, expected) in [
+                    (&[10.0, 20.0][..], 1),
+                    (&[-20.0, -10.0][..], 1),
+                    (&[-2.0, 0.0, 2.0][..], 2),
+                ] {
+                    for (top_k, top_p) in [(None, None), (Some(2), None), (None, Some(0.9))] {
+                        let params = SamplingParams {
+                            temperature,
+                            top_k,
+                            top_p,
+                            ..SamplingParams::default()
+                        };
+                        assert_eq!(sample_many(row, &params, &[]), vec![expected; 64],
+                            "temperature={temperature:?} row={row:?} top_k={top_k:?} top_p={top_p:?}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn tiny_repetition_penalty_preserves_finite_logit_order() {
+            for repetition_penalty in [f32::from_bits(1), 1e-39, 1e-38, f32::MIN_POSITIVE] {
+                for (row, expected) in [
+                    (&[10.0, 20.0][..], 1),
+                    (&[-20.0, -10.0][..], 1),
+                    (&[-2.0, 0.0, 2.0][..], 2),
+                ] {
+                    let history = (0..row.len()).map(|token| token as u32).collect::<Vec<_>>();
+                    for (temperature, top_k, top_p) in [
+                        (0.0, None, None),
+                        (1.0, None, None),
+                        (1.0, Some(2), Some(0.9)),
+                    ] {
+                        let params = SamplingParams {
+                            repetition_penalty,
+                            temperature,
+                            top_k,
+                            top_p,
+                            ..SamplingParams::default()
+                        };
+                        assert_eq!(
+                            sample_many(row, &params, &history),
+                            vec![expected; 64],
+                            "repetition_penalty={repetition_penalty:?} row={row:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wide_penalty_components_keep_small_frequency_difference() {
+            for repeated_logit in [1.0, -1.0] {
+                for (temperature, top_p) in [(0.0, None), (1e-20, Some(0.6))] {
+                    for (frequency_penalty, expected) in [(1e-20, 1), (-1e-20, 0)] {
+                        let params = SamplingParams {
+                            temperature,
+                            top_p,
+                            repetition_penalty: f32::from_bits(1),
+                            presence_penalty: 0.5,
+                            frequency_penalty,
+                            ..SamplingParams::default()
+                        };
+                        assert_eq!(
+                            sample_many(&[repeated_logit, repeated_logit], &params, &[0, 0, 1]),
+                            vec![expected; 64]
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wide_penalty_components_keep_cancellation_residual() {
+            for (presence_penalty, frequency_penalty) in [(1.0, 1e-20), (1e-20, 1.0)] {
+                let params = SamplingParams {
+                    temperature: f32::from_bits(1),
+                    top_p: Some(0.6),
+                    presence_penalty,
+                    frequency_penalty,
+                    ..SamplingParams::default()
+                };
+                // The large repeated logit gap is cancelled by additive
+                // penalties. A small remaining penalty still selects token 1.
+                assert_eq!(sample_many(&[2.0, 1.0], &params, &[0]), vec![1; 64]);
+            }
+        }
+
+        #[test]
+        fn wide_repetition_preserves_small_additive_penalty_differences() {
+            for repeated_logit in [1.0, -1.0] {
+                for (temperature, top_p) in [(0.0, None), (1.0, Some(0.6))] {
+                    for (frequency_penalty, expected) in [(1.0, 1), (-1.0, 0)] {
+                        let params = SamplingParams {
+                            temperature,
+                            top_p,
+                            repetition_penalty: f32::from_bits(1),
+                            presence_penalty: 0.5,
+                            frequency_penalty,
+                            ..SamplingParams::default()
+                        };
+                        // Equal huge repeated logits differ by exactly one
+                        // frequency penalty, which must survive normalization.
+                        assert_eq!(
+                            sample_many(&[repeated_logit, repeated_logit], &params, &[0, 0, 1]),
+                            vec![expected; 64]
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn wide_rows_keep_scaled_probabilities_and_uniform_infinity() {
+            let params = SamplingParams {
+                temperature: f32::from_bits(1),
+                ..SamplingParams::default()
+            };
+            let selected = sample_many(&[f32::from_bits(1), f32::from_bits(2)], &params, &[]);
+            assert!(selected.contains(&0) && selected.contains(&1));
+            let params = SamplingParams {
+                temperature: f32::INFINITY,
+                repetition_penalty: f32::from_bits(1),
+                ..SamplingParams::default()
+            };
+            let selected = sample_many(&[10.0, 20.0, 30.0], &params, &[0, 1, 2]);
+            assert!(selected.contains(&0) && selected.contains(&1) && selected.contains(&2));
+            let params = SamplingParams {
+                temperature: 1.0,
+                repetition_penalty: f32::from_bits(1),
+                top_p: Some(0.9),
+                ..SamplingParams::default()
+            };
+            assert_eq!(
+                sample_many(&[1.0, 2.0, 3.0], &params, &[0, 1, 1, 99]),
+                vec![1; 64]
+            );
+            for row in [
+                &[0.75 * f32::MAX, f32::MAX][..],
+                &[-f32::MAX, -0.75 * f32::MAX][..],
+            ] {
+                let params = SamplingParams {
+                    temperature: 0.5,
+                    top_p: Some(0.9),
+                    ..SamplingParams::default()
+                };
+                assert_eq!(sample_many(row, &params, &[]), vec![1; 64]);
+            }
+        }
+
+        #[test]
+        fn tiny_temperature_keeps_tied_maxima_stochastic() {
+            let params = SamplingParams {
+                temperature: f32::from_bits(1),
+                top_k: Some(2),
+                top_p: Some(0.9),
+                ..SamplingParams::default()
+            };
+            let selected = sample_many(&[10.0, 20.0, 20.0], &params, &[]);
+            assert!(selected.iter().all(|&token| token == 1 || token == 2));
+            assert!(selected.contains(&1) && selected.contains(&2));
+            let selected = sample_many(&[0.0, 0.0, 0.0], &params, &[]);
+            assert!(selected.iter().all(|&token| token < 3));
+            assert!(selected.contains(&0) && selected.contains(&1) && selected.contains(&2));
+        }
+    }
+
     mod host_transfer_seam {
         use super::*;
 
@@ -775,6 +1144,199 @@ mod tests {
                 .flat_map(|_| row.iter().copied())
                 .collect::<Vec<_>>();
             Tensor::from_vec(values, (draws, row.len()), device).unwrap()
+        }
+
+        fn boundary_draws(
+            row: &[f32],
+            params: &SamplingParams,
+            history: &[u32],
+            device: &Device,
+        ) -> Vec<u32> {
+            const DRAWS: usize = 32;
+            let logits = repeat_row(row, DRAWS, device);
+            let histories = vec![history.to_vec(); DRAWS];
+            let selected = Sampler::new_with_seed(19)
+                .forward(&logits, &vec![params.clone(); DRAWS], &histories)
+                .unwrap();
+            selected_token_ids_to_host(&selected).unwrap()
+        }
+
+        #[test]
+        fn numeric_boundaries_preserve_finite_logit_order_on_cuda() {
+            let device = cuda();
+            for divisor in [f32::from_bits(1), 1e-39, 1e-38, f32::MIN_POSITIVE] {
+                for (row, expected) in [
+                    (&[10.0, 20.0][..], 1),
+                    (&[-20.0, -10.0][..], 1),
+                    (&[-2.0, 0.0, 2.0][..], 2),
+                ] {
+                    let history = (0..row.len()).map(|token| token as u32).collect::<Vec<_>>();
+                    for (top_k, top_p) in [(None, None), (Some(2), None), (None, Some(0.9))] {
+                        let params = SamplingParams {
+                            temperature: divisor,
+                            top_k,
+                            top_p,
+                            ..SamplingParams::default()
+                        };
+                        assert_eq!(
+                            boundary_draws(row, &params, &[], &device),
+                            vec![expected; 32]
+                        );
+                        let params = SamplingParams {
+                            temperature: 1.0,
+                            repetition_penalty: divisor,
+                            ..params
+                        };
+                        assert_eq!(
+                            boundary_draws(row, &params, &history, &device),
+                            vec![expected; 32]
+                        );
+                        let params = SamplingParams {
+                            temperature: 0.0,
+                            ..params
+                        };
+                        assert_eq!(
+                            boundary_draws(row, &params, &history, &device),
+                            vec![expected; 32]
+                        );
+                    }
+                }
+            }
+            for row in [
+                &[0.75 * f32::MAX, f32::MAX][..],
+                &[-f32::MAX, -0.75 * f32::MAX][..],
+            ] {
+                let params = SamplingParams {
+                    temperature: 0.5,
+                    top_p: Some(0.9),
+                    ..SamplingParams::default()
+                };
+                assert_eq!(boundary_draws(row, &params, &[], &device), vec![1; 32]);
+            }
+        }
+
+        #[test]
+        fn numeric_boundaries_keep_penalty_components_separate_on_cuda() {
+            let device = cuda();
+            for repeated_logit in [1.0, -1.0] {
+                for (temperature, top_p) in [(0.0, None), (1e-20, Some(0.6))] {
+                    for (frequency_penalty, expected) in [(1e-20, 1), (-1e-20, 0)] {
+                        let params = SamplingParams {
+                            temperature,
+                            top_p,
+                            repetition_penalty: f32::from_bits(1),
+                            presence_penalty: 0.5,
+                            frequency_penalty,
+                            ..SamplingParams::default()
+                        };
+                        assert_eq!(
+                            boundary_draws(
+                                &[repeated_logit, repeated_logit],
+                                &params,
+                                &[0, 0, 1],
+                                &device
+                            ),
+                            vec![expected; 32]
+                        );
+                    }
+                }
+            }
+            for (presence_penalty, frequency_penalty) in [(1.0, 1e-20), (1e-20, 1.0)] {
+                let params = SamplingParams {
+                    temperature: f32::from_bits(1),
+                    top_p: Some(0.6),
+                    presence_penalty,
+                    frequency_penalty,
+                    ..SamplingParams::default()
+                };
+                assert_eq!(
+                    boundary_draws(&[2.0, 1.0], &params, &[0], &device),
+                    vec![1; 32]
+                );
+            }
+        }
+
+        #[test]
+        fn numeric_boundaries_preserve_small_additive_penalties_on_cuda() {
+            let device = cuda();
+            for repeated_logit in [1.0, -1.0] {
+                for (temperature, top_p) in [(0.0, None), (1.0, Some(0.6))] {
+                    for (frequency_penalty, expected) in [(1.0, 1), (-1.0, 0)] {
+                        let params = SamplingParams {
+                            temperature,
+                            top_p,
+                            repetition_penalty: f32::from_bits(1),
+                            presence_penalty: 0.5,
+                            frequency_penalty,
+                            ..SamplingParams::default()
+                        };
+                        assert_eq!(
+                            boundary_draws(
+                                &[repeated_logit, repeated_logit],
+                                &params,
+                                &[0, 0, 1],
+                                &device
+                            ),
+                            vec![expected; 32]
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn numeric_boundaries_keep_non_greedy_distributions_on_cuda() {
+            let device = cuda();
+            let params = SamplingParams {
+                temperature: f32::from_bits(1),
+                top_k: Some(1),
+                frequency_penalty: f32::from_bits(1),
+                ..SamplingParams::default()
+            };
+            // top_k=1 ignores temperature; it must retain the ordinary F32
+            // greedy tie instead of needlessly enabling the wider fallback.
+            assert_eq!(
+                boundary_draws(&[1.0, 1.0], &params, &[0, 0, 1], &device),
+                vec![0; 32]
+            );
+            let params = SamplingParams {
+                temperature: f32::from_bits(1),
+                top_k: Some(2),
+                top_p: Some(0.9),
+                ..SamplingParams::default()
+            };
+            let selected = boundary_draws(&[10.0, 20.0, 20.0], &params, &[], &device);
+            assert!(selected.iter().all(|&token| token == 1 || token == 2));
+            assert!(selected.contains(&1) && selected.contains(&2));
+            let selected = boundary_draws(&[0.0, 0.0, 0.0], &params, &[], &device);
+            assert!(selected.contains(&0) && selected.contains(&1) && selected.contains(&2));
+            // The logits are subnormal too: the exact temperature-scaled gap
+            // is one, so replacing this accepted configuration with greedy
+            // would be observably wrong.
+            let selected = boundary_draws(
+                &[f32::from_bits(1), f32::from_bits(2)],
+                &params,
+                &[],
+                &device,
+            );
+            assert!(selected.contains(&0) && selected.contains(&1));
+            let params = SamplingParams {
+                temperature: f32::INFINITY,
+                repetition_penalty: f32::from_bits(1),
+                ..SamplingParams::default()
+            };
+            let selected = boundary_draws(&[10.0, 20.0, 30.0], &params, &[0, 1, 2], &device);
+            assert!(selected.contains(&0) && selected.contains(&1) && selected.contains(&2));
+            let params = SamplingParams {
+                temperature: 1.0,
+                repetition_penalty: f32::from_bits(1),
+                top_p: Some(0.9),
+                ..SamplingParams::default()
+            };
+            assert_eq!(
+                boundary_draws(&[1.0, 2.0, 3.0], &params, &[0, 1, 1, 99], &device),
+                vec![1; 32]
+            );
         }
 
         fn sample_repeated(

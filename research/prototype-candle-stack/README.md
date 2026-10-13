@@ -1,103 +1,100 @@
 # Candle/CUDA interoperability prototype
 
-[Research index](../README.md) · [Current architecture](../../docs/architecture.md) · [Development guide](../../docs/development.md)
+[Research index](../README.md) · [Engine architecture](../../docs/architecture.md) · [Development guide](../../docs/development.md)
 
 This retained [T10 / issue #11](https://github.com/RedHeartSecretMan/vllm-oxide/issues/11)
-experiment exercises two early stack decisions from
-[Stack A / issue #5](https://github.com/RedHeartSecretMan/vllm-oxide/issues/5): calling a project CUDA kernel
-through Candle's tensor storage, and invoking Candle's paged FlashAttention
-entrypoint introduced by [Candle PR #3655](https://github.com/huggingface/candle/pull/3655).
-It uses synthetic tensors only: **no Qwen3 checkpoint, tokenizer,
-prompt, or generation API is loaded**. The current engine is in
-[`crates/vllm-oxide`](../../crates/vllm-oxide/).
+experiment checks two early [Stack A / issue #5](https://github.com/RedHeartSecretMan/vllm-oxide/issues/5)
+decisions: passing Candle tensor storage to a project CUDA kernel, and calling
+the paged FlashAttention entrypoint from [Candle PR #3655](https://github.com/huggingface/candle/pull/3655).
+It uses synthetic tensors. It loads no checkpoint, tokenizer, prompt or
+generation API; the engine lives in [`crates/vllm-oxide`](../../crates/vllm-oxide/).
 
 ## What the executable checks
 
-| Phase | Inputs and operation | Success condition in the source |
+| Phase | Inputs and operation | Success condition |
 |---|---|---|
-| A: Candle → cudarc → CUDA | Allocate 1,024 F32 zeros on device 0; obtain the storage slice, apply the tensor's start offset, retain the device-pointer guard, and pass the pointer and CUDA stream to `fill_const_f32_launch` | Read back a sum of 43,008, minimum 42 and maximum 42; absolute error below `1e-3` for the sum and `1e-6` for each extremum |
-| B: paged attention | Random F16 Q `[16, 4, 64]`; K/V `[4, 32, 4, 64]`; one request with 16 query and 64 key tokens; U32 cumulative lengths and a physical block table | Output shape `[16, 4, 64]` and no NaN among the sampled elements |
+| A: Candle → cudarc → CUDA | Allocate 1,024 F32 zeros on device 0; retain storage and pointer guards, launch a 256-thread fill kernel on the tensor's stream, synchronize and read back | Sum 43,008, minimum 42, maximum 42; errors below `1e-3` for sum and `1e-6` for each extremum |
+| B: paged attention | Seed 11; F16 Q `[16, 4, 64]`, K/V `[4, 32, 4, 64]`; one request with 16 query and 64 key tokens | Shape `[16, 4, 64]`, exactly 4,096 output values, all finite |
 
-Phase B calls `flash_attn_varlen_paged_windowed` with scale `1/sqrt(64)`, an
-unbounded left window and right window 0. Its page size is 32 tokens. The
-`cu_seqlens_q` and `cu_seqlens_k` arguments are **cumulative lengths**, rather
-than the per-request `context_lens` used by other paged-attention APIs. The
-experiment checks that this concrete call executes; it does not compare the
-attention output with a numerical oracle.
+Phase B uses 32-token pages, four Q/KV heads, scale `1/sqrt(64)`, an unbounded
+left window and causal right window 0. U32 `cu_seqlens_q` `[0, 16]` and
+`cu_seqlens_k` `[0, 64]` are cumulative lengths, rather than per-sequence context
+lengths. The physical block table has shape `[1, 4]` and indices 0 through 3.
+The output has no independent numerical oracle. A fixed input seed helps replay
+within the same stack; it does not promise bitwise identity across GPUs or CUDA
+versions. The experiment's 32-token pages are separate from the engine's geometry.
 
-## Source and dependency map
+## Source and dependencies
 
-| File or dependency | Role |
+| File or dependency | Responsibility |
 |---|---|
-| [`src/main.rs`](src/main.rs) | Both phases, tensor/stream extraction, readback checks and terminal PASS/FAIL messages |
-| [`kernels/fill_const.cu`](kernels/fill_const.cu) | `extern "C"` launcher and a 256-thread fill kernel |
-| [`build.rs`](build.rs) | Compile `kernels/*.cu` into `libfillconst.a`; link the static kernel library and CUDA runtime `cudart` |
-| [`Cargo.toml`](Cargo.toml) | Private package `prototype-candle-stack` 0.0.0, Rust edition 2021; no publish target |
-| [Candle Core and FlashAttention](https://github.com/huggingface/candle/tree/27f20fea993c81ea6d32ce44018f42b68466525e) | Both pinned to git revision `27f20fea993c81ea6d32ce44018f42b68466525e`; Candle Core enables `cuda` directly |
-| `cudaforge` | Manifest requirement `0.1.2`; detects the compute target and invokes `nvcc` |
-| `anyhow`, `half` | Manifest requirements `1` and `2.7`, respectively |
+| [`src/main.rs`](src/main.rs) | Tensor/stream extraction, both phases, errors and PASS messages |
+| [`src/validation.rs`](src/validation.rs) | CPU-only output shape, length and complete finite-value checks |
+| [`kernels/fill_const.cu`](kernels/fill_const.cu) | C-linkage launcher returning immediate CUDA launch status |
+| [`build.rs`](build.rs) | Compile `kernels/*.cu` into `libfillconst.a` and link CUDA runtime `cudart` |
+| [`Cargo.toml`](Cargo.toml) | Private package 0.0.0 with its own workspace; Rust 1.94 minimum |
+| [`Cargo.lock`](Cargo.lock) | Independent dependency lock, committed for `--locked` reproduction |
+| [Candle Core and FlashAttention](https://github.com/huggingface/candle/tree/27f20fea993c81ea6d32ce44018f42b68466525e) | Both pin git revision `27f20fea993c81ea6d32ce44018f42b68466525e` |
+| `cudaforge` | Manifest requirement `0.1.2`; compute-target detection and `nvcc` invocation |
+| `anyhow`, `half` | Manifest requirements `1` and `2.7` |
 
-The CUDA build uses C++17, `-O3`, `--use_fast_math`, and position-independent
-code. There is no `--features cuda` switch for this prototype: its dependency
-already enables CUDA. The retained directory has no committed `Cargo.lock` or
-package-specific Rust minimum; the Candle revisions are fixed, while compatible
-registry dependencies are resolved on the first standalone build. The current
-repository pins Rust 1.94.0; the command below selects it explicitly after copying
-the experiment outside the workspace.
+The CUDA build uses C++17, `-O3`, `--use_fast_math` and position-independent code.
+There is no prototype `--features cuda` switch: its Candle dependencies already
+enable CUDA. Its local `[workspace]` makes this package directly runnable while
+keeping CUDA dependencies out of the root workspace's CPU-only tests. Its own
+lockfile is independent of the root engine lockfile and retains the same pinned
+Candle revision.
 
 ## Prepare and run
 
-Use a Linux CUDA environment, including WSL2, with an NVIDIA GPU, a compatible
-driver, CUDA Toolkit (`nvcc` on `PATH`), the CUDA runtime, and a host C++ compiler.
-The original experiment targeted SM 8.0+ and documented RTX 4080 / SM 8.9.
-That historical target is not a replacement for the shipped engine's current
-hardware requirements. Compilation also builds the pinned Candle FlashAttention
-dependency, so allow time, host memory and disk for a CUDA dependency build.
-No model download or Python environment is needed.
+Use Linux or WSL2 with an NVIDIA GPU, a compatible driver, full CUDA Toolkit
+(`nvcc` on `PATH`), CUDA runtime and host C++ compiler. The original experiment
+recorded RTX 4080 / SM 8.9 and intended SM 8.0+; this is not an engine hardware
+validation promise. Allow host memory, disk and time to build Candle's CUDA
+and FlashAttention dependencies. No model download or Python environment is needed.
 
-The prototype is not a member of the root Cargo workspace. Running
-`cargo run` directly in this directory currently fails with Cargo's
-"current package believes it's in a workspace when it's not" error. To run the
-retained experiment without changing the production workspace, copy its retained
-sources to a fresh directory outside the repository. From the
-repository root:
+From the repository root:
 
 ```bash
-PROTOTYPE_ROOT="$(mktemp -d /tmp/vllm-oxide-candle-prototype.XXXXXX)"
-cp -R research/prototype-candle-stack "$PROTOTYPE_ROOT/"
-cd "$PROTOTYPE_ROOT/prototype-candle-stack"
-cargo +1.94.0 run --release
+cargo +1.94.0 metadata --locked --no-deps \
+  --manifest-path research/prototype-candle-stack/Cargo.toml
+cargo +1.94.0 run --release --locked \
+  --manifest-path research/prototype-candle-stack/Cargo.toml
 ```
 
-The first build needs access to the pinned Candle git source and registry
-dependencies unless they are already cached. Cargo writes the standalone
-`Cargo.lock`, compiled objects and executable under this temporary copy. Keep
-them with any experiment logs when reproducing an old result. The program has
-**no CLI arguments** and always selects device 0; changing shapes, seed behavior,
-or device requires a source change and a separate experiment record.
+The first build needs the pinned Git source and registry dependencies unless
+cached. Cargo writes objects and the executable into the prototype's own
+`target/` directory; `.gitignore` excludes that directory and `build.log`.
+The program takes no CLI arguments and always selects CUDA device 0. Changing
+shapes or device selection is a separate experiment source change.
 
-## Read the result
+Phase A's launcher reports immediate CUDA status and Rust explicitly synchronizes
+before releasing its pointer/storage guards, catching asynchronous execution
+errors before readback. It returns a nonzero process status on any failure.
+Phase B reads all output values back in one transfer, rejecting both NaN and Inf.
+A successful complete run prints `[proto][A] PASS` followed by `[proto][B] PASS`.
+Preserve full stdout/stderr, exit status, environment and source revision; Phase A
+can succeed before Phase B fails.
 
-A successful run prints `[proto][A] PASS` followed by `[proto][B] PASS`. A
-failed explicit value/shape/NaN check exits 1; setup, allocation and backend
-errors propagate as nonzero execution failures. Phase A may pass before phase B
-fails, so retain the complete output and exit status.
+## CPU regression checks and limits
 
-These messages describe the checks performed by that invocation. The original
-README reported an RTX 4080 experiment, but this directory contains no retained
-run receipt or raw log establishing a newly reproduced PASS. Documentation
-maintenance does not rerun the GPU experiment or infer a current result from the
-printed strings in the source.
+The readback validator can be tested without CUDA, dependency compilation or a
+GPU. This runs the same helper used by Phase B, including a NaN at an index the
+old sampling stride skipped, positive/negative Inf, wrong shapes and incomplete
+or empty readbacks:
 
-This executable does not establish BF16 model accuracy, decoding behavior,
-throughput, KV-cache reuse or scheduler correctness. Phase B samples NaNs rather
-than checking every element and has no reference comparison or seeded replay.
-There is no dedicated test suite or ordinary CI job for this package. The
-production engine uses the same pinned Candle Core revision, but its scheduling,
-attention implementation, kernels and acceptance checks live in the main
-workspace; this prototype's paged-FlashAttention call is not a specification of
-the released backend.
+```bash
+PROTO_TEST_BIN="$(mktemp /tmp/vllm-oxide-prototype-validation.XXXXXX)"
+rustc +1.94.0 --edition 2021 --test \
+  research/prototype-candle-stack/src/validation.rs -o "$PROTO_TEST_BIN"
+"$PROTO_TEST_BIN"
+rm "$PROTO_TEST_BIN"
+```
 
-For current engine checks, use the [validation guide](../../docs/validation/README.md),
-[public GPU smoke](../../docs/validation/public-gpu-smoke.md), and
-[v0.2.0 results](../../docs/releases/goldens-v0.2.md).
+Building or running the full Cargo package still requires CUDA. Ordinary engine
+CI does not execute it. This prototype does not establish BF16 model accuracy,
+decoding behavior, throughput, KV-cache reuse or scheduler correctness. Its
+paged-FlashAttention call is not a specification of the released backend.
+The historical experiment's claimed result does not become a new GPU PASS when
+source or documentation is maintained. Use the [validation guide](../../docs/validation/README.md)
+for engine checks and the [release notes](../../docs/releases/) for version results.
