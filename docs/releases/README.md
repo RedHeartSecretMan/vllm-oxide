@@ -115,6 +115,22 @@ gh release edit v0.2.0 --repo RedHeartSecretMan/vllm-oxide \
 
 Before and after editing, compare the Release ID, tag, target commit, original publication timestamp, draft/prerelease/Latest status and asset identities. Description and title improvements preserve all of them; original failed or diagnostic records keep their verdicts.
 
+## Authorized source maintenance of existing versions
+
+The 2026-10-14 maintenance explicitly includes code fixes in the three existing
+source snapshots, including `research` and `tools`. Use version-specific
+regression checks and review the executable diff. Preserve the original model
+validation definitions, budgets, measurement identities and historical verdicts.
+Record new checks separately; old PASS reports are not new measurements.
+
+Before updating a tag, record its exact object locally. Publish a reviewed
+maintenance descendant with an exact old-object force-with-lease check. Preserve
+Release IDs, original dates, status and attached assets, and synchronize the
+source identity and reviewed notes. Download each new archive and compare every
+tracked file with the reviewed commit. Remove temporary remote work branches;
+retain the three official tags without additional backup tags. See the
+[source maintenance record](../version-doc-update.md).
+
 ## Validation records
 
 - [v0.2.0 validation and performance summary](goldens-v0.2.md)

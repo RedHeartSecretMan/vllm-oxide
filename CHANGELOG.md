@@ -1,5 +1,16 @@
 # Changelog
 
+## Source maintenance — 2026-10-14
+
+Version-specific maintenance is applied to the three existing release source
+snapshots at the user's request. It covers sampling numeric boundaries, model
+configuration validation, fixture output confinement, unaligned tensor reads,
+early EOS handling, and the research prototype's workspace and safety checks.
+Original measurements, budgets and historical verdicts retain their source
+identities. See [source maintenance](docs/version-doc-update.md) for scope and
+validation records.
+
+
 All notable changes to vllm-oxide will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

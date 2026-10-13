@@ -9,8 +9,11 @@ from golden_gen.replay import verify_oracle_replay
 
 def _write_fixture(directory, token: int) -> None:
     directory.mkdir(exist_ok=True)
+    path = directory / "canonical_01.transformers.safetensors"
+    # This helper replaces its own temporary test fixture with intentional corruption.
+    path.unlink(missing_ok=True)
     save_fixture(
-        directory / "canonical_01.transformers.safetensors",
+        path,
         token_ids=np.array([token], dtype=np.int64),
         logits=np.array([[0.0, 1.0]], dtype=np.float32),
         top5_indices=None,
