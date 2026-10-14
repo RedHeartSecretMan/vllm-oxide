@@ -2,9 +2,9 @@
 
 [Documentation](../docs/README.md) · [Development](../docs/development.md) · [Validation](../docs/validation/README.md)
 
-The engine is built from the Rust workspace under `crates/`. This directory
-contains maintainer tooling for validation and historical investigation; it is
-not needed by an application that uses `LLM::generate`.
+Build the engine from the Rust workspace under `crates/`. The tools in this
+directory support validation and historical investigations; applications using
+`LLM::generate` can run without them.
 
 | Tool | Purpose | Environment | Details |
 |---|---|---|---|

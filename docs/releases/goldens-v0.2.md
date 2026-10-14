@@ -1,6 +1,6 @@
 # v0.2.0 验收摘要
 
-本文件记录实际已通过的产品验证及其原始来源。完整 captures、原始 logits、运行日志和性能遥测保存在本地；本文件不是 schema5 manifest/archive 证据包，也不声明旧组合证据包的完整消费者验收已完成。
+v0.2.0 的产品验证结果及其原始来源如下。完整 captures、原始 logits、运行日志和性能遥测保存在本地，schema5 manifest/archive 证据包有独立的验证流程。旧版组合证据包尚未完成完整消费者验收。
 
 ## 来源与实现一致性
 
@@ -43,7 +43,7 @@
 
 全部六次测量的 token/config/输出身份、同步时间、统计和显存摘要均经验证。显存采样保留 5ms 目标及严格 50ms 时序上限；共 1831 个原始样本，最大完成间隔 13.359862ms，最长 API 调用 8.274851ms，全部 primary failure 为空。没有声明 GPU 独占或跨硬件性能保证。
 
-实际性能 producer build 来源为 `7c9a6957f18919e2aa0ca3b74cd1e8a331eb505f`，保存二进制 SHA-256 为 `44107b3a5ad5ff8c656525aed66e942174ea104078d9bb75243649f05ff93c75`。新原始 `benchmark.json` 的 SHA-256 为 `807d63db8a12e0d144d9f49c2d757f82fc1d0330652e14ed18c296aa766bbb33`；旧失败和 diagnostic 工件保持原样。
+性能 producer 的构建输入指纹为 `7c9a6957f18919e2aa0ca3b74cd1e8a331eb505f`，保存的二进制 SHA-256 为 `44107b3a5ad5ff8c656525aed66e942174ea104078d9bb75243649f05ff93c75`。新原始 `benchmark.json` 的 SHA-256 为 `807d63db8a12e0d144d9f49c2d757f82fc1d0330652e14ed18c296aa766bbb33`；旧失败和 diagnostic 工件保持原样。
 
 ## CPU CI 与环境
 

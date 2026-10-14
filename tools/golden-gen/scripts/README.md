@@ -2,9 +2,10 @@
 
 [Tooling overview](../../README.md) · [golden-gen guide](../README.md) · [Validation guide](../../../docs/validation/README.md)
 
-These scripts investigate specific BF16 rounding or historical layer differences.
-They report `diagnostic_only: true` and `accepting: false`; they do not create
-fixtures, approve budgets, or establish a new model-accuracy result. Keep their
+Use these scripts to investigate specific BF16 rounding and historical layer
+differences. Reports carry `diagnostic_only: true` and `accepting: false`. They
+provide diagnostics without creating fixtures, approving budgets, or establishing
+a new model-accuracy result. Keep their
 JSON, traces and model inputs outside Git. Use the
 [layered workflow](../README.md#layered-accuracy-protocol-new-workflow) for current
 acceptance and the [public GPU smoke](../../../docs/validation/public-gpu-smoke.md)
@@ -71,8 +72,7 @@ uv run --project tools/golden-gen --locked --extra gpu \
 ```
 
 Unlike the residual/RoPE probe, this script imports no Transformers model
-classes. A failed assertion exits nonzero rather than emitting a successful
-report. It opens neither model weights nor fixtures.
+classes. A failed assertion exits nonzero and produces no successful report. It opens neither model weights nor fixtures.
 
 ## Fixed historical layer localization
 

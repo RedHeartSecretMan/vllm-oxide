@@ -1,10 +1,10 @@
-# 公开 CUDA 接口与 Quick Start 门禁
+# 公开 CUDA 接口与 Quick Start 验证
 
-这个门禁对应 #46：在干净源码 checkout 上构建生产 CUDA 路径，执行真实模型 warmup、
-同一 `LLM` 的 100 次重复调用、文本与 token ID 混合批次以及 README 原样 CLI 命令。
-它只证明这些公开接口的 smoke 检查通过；完整分层精度、性能、双资产发布和干净消费者
-验证仍由 #45/#47 的协议负责。`public-gpu-smoke.json` 明确写入
-`numerical_acceptance=false`，不替代 golden 成功标记。
+这项检查在干净源码 checkout 上构建生产 CUDA 路径，执行真实模型 warmup、
+同一 `LLM` 的 100 次重复调用、文本与 token ID 混合批次，以及 README 中的 CLI 命令，
+覆盖 #46 的公开接口 smoke 要求。完整分层精度、性能，以及历史双资产和干净消费者
+验证各有 #45/#47 中的独立协议。输出报告 `public-gpu-smoke.json` 标记为
+`numerical_acceptance=false`，仅记录功能 smoke 结果，不替代 golden 成功标记。
 
 ## 先决条件
 
@@ -31,7 +31,7 @@ tools/golden-gen/.venv/bin/python -m golden_gen.public_gpu_smoke \
 或任一子进程失败都会使门禁失败，不会写成功记录。
 
 每个构建、API 测试和 CLI 阶段都使用已有资源监督器，保留 stdout、stderr、guard 和
-清理证据；RAM 低于下限、其他 CUDA 计算进程或监督失败仍然致命。构建阶段各自限时
+清理证据。RAM 低于下限、出现其他 CUDA 计算进程或监督失败时，阶段会停止。构建阶段各自限时
 30 分钟，API 与 CLI 阶段各限时 5 分钟。失败时保留已有日志，用新目录重跑。
 
 ## GitHub Actions

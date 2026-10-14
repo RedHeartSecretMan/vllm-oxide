@@ -6,7 +6,7 @@ status: proposed
 
 The `880e22c` acceptance run failed on `acceptance-waiting-long`, and that case informed the subsequent projection-layout repair. Repeating the original 487-owner inventory is required regression evidence, but cannot restore its unseen status. The layered contract forbids reusing observed failed holdouts, while ADR-0024 preserves every existing obligation. We therefore propose an additional, independently frozen `confirmation` split, requiring both the original inventory and the new split to pass.
 
-This is a proposed acceptance-list checkpoint, not another change to the user-approved FP32 intermediate reduction reference or numerical budgets. No confirmation model output has been obtained. The current budget policy intentionally continues to target the previous registry, so both numerical and public-behavior confirmation collection remain sealed. This proposal does not accept a Ticket, permit opening confirmation, or authorize publication.
+This checkpoint proposes a new acceptance list while preserving the approved FP32 intermediate reduction reference and numerical budgets. At the time of the proposal, no confirmation model output had been obtained. The current budget policy intentionally continues to target the previous registry, so both numerical and public-behavior confirmation collection remain sealed. This proposal does not accept a Ticket, permit opening confirmation, or authorize publication.
 
 ## Inputs and gates
 

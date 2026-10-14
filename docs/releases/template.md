@@ -1,6 +1,6 @@
 # Release notes template
 
-Create matching English and Chinese notes. Use the English file as the GitHub Release description, with a prominent link to the Chinese version. Keep the section order below in both languages. Replace placeholders with verified facts; remove example rows and instructions before publishing.
+Write matching English and Chinese notes, using the same section order. Prepare the GitHub Release description from the English file and include a visible link to the Chinese version. Replace placeholders with verified facts and remove template instructions before publishing.
 
 ---
 
@@ -45,4 +45,4 @@ Describe unsupported functionality and outstanding issues that affect the stated
 
 List GitHub source archives and each actual attached asset's purpose. State whether tested binaries, model weights or evidence are supplied. Preserve original asset names, hashes and download URLs when editing old descriptions.
 
-Link the changelog, previous-to-current comparison, language counterpart, release history and support entrypoint. Review any GitHub-generated PR/contributor summary before adding it here; include meaningful user changes rather than internal bookkeeping.
+Link the changelog, previous-to-current comparison, language counterpart, release history and support entrypoint. Review any GitHub-generated PR/contributor summary before adding it here; focus on changes users can observe.

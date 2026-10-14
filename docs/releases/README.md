@@ -45,8 +45,10 @@ RELEASE_VERSION=0.2.1
 RELEASE_COMMIT=replace-with-full-reviewed-commit
 RELEASE_NOTES=/absolute/path/to/reviewed-release-notes.md
 
-git tag -a "v$RELEASE_VERSION" "$RELEASE_COMMIT" -m "vllm-oxide v$RELEASE_VERSION"
-git push origin "refs/tags/v$RELEASE_VERSION"
+git fetch origin main &&
+git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main &&
+git tag -a "v$RELEASE_VERSION" "$RELEASE_COMMIT" -m "vllm-oxide v$RELEASE_VERSION" &&
+git push origin "refs/tags/v$RELEASE_VERSION" &&
 gh release create "v$RELEASE_VERSION" \
   --repo RedHeartSecretMan/vllm-oxide \
   --verify-tag --target "$RELEASE_COMMIT" \
@@ -69,10 +71,10 @@ Published tags normally identify immutable source snapshots. Improve wording wit
 
 ## Authorized documentation refresh of an existing version
 
-The user explicitly requested that all three existing source archives include
-the improved version-specific documentation, including their `research` and
-`tools` directories. This is a documentation-maintenance exception, not a
-backport of v0.2.0 behavior into older releases.
+An explicitly authorized refresh updated the documentation in all three
+existing source archives, including `research` and `tools`. The documentation
+phase preserved each version's executable behavior and API. Later code fixes
+follow the separate source-maintenance scope below.
 
 For this operation:
 
@@ -84,7 +86,8 @@ For this operation:
    complete source-file diff. Record the original implementation commit and
    annotated tag object locally for provenance and rollback; do not publish
    additional backup tags.
-3. Publish the reviewed maintenance commits on named branches. Update existing
+3. Review the maintenance commits on temporary branches and retain their history
+   on the default branch before removing them. Update existing
    release tags only under the user's explicit authority, with a force-with-lease
    check against each original remote tag object. A changed remote ref stops the
    update; it must be inspected rather than overwritten.
@@ -102,33 +105,33 @@ maintenance revision. It does not claim new GPU measurements or change a
 historical failure into PASS. Regular releases continue to use new version tags
 for behavior changes.
 
-Each `*.en.md` file is the maintained source of that version's English GitHub Release description. Synchronize a reviewed wording change after its documentation PR lands:
+Each `*.en.md` file is the source for that version's English GitHub Release description. Prepare a separate notes file with absolute links and the full maintained source commit. Check that commit against the tag, then synchronize the reviewed description after its documentation PR lands:
 
 ```bash
-gh release edit v0.1.0 --repo RedHeartSecretMan/vllm-oxide \
-  --notes-file docs/releases/v0.1.0.en.md
-gh release edit v0.2.0.rc.1 --repo RedHeartSecretMan/vllm-oxide \
-  --notes-file docs/releases/v0.2.0-rc.1.en.md
-gh release edit v0.2.0 --repo RedHeartSecretMan/vllm-oxide \
-  --notes-file docs/releases/v0.2.0.en.md
+RELEASE_TAG=v0.2.0
+RELEASE_NOTES=/absolute/path/to/reviewed-github-release-notes.md
+gh release edit "$RELEASE_TAG" --repo RedHeartSecretMan/vllm-oxide \
+  --notes-file "$RELEASE_NOTES"
 ```
 
 Before and after editing, compare the Release ID, tag, target commit, original publication timestamp, draft/prerelease/Latest status and asset identities. Description and title improvements preserve all of them; original failed or diagnostic records keep their verdicts.
 
 ## Authorized source maintenance of existing versions
 
-The 2026-10-14 maintenance explicitly includes code fixes in the three existing
-source snapshots, including `research` and `tools`. Use version-specific
-regression checks and review the executable diff. Preserve the original model
-validation definitions, budgets, measurement identities and historical verdicts.
-Record new checks separately; old PASS reports are not new measurements.
+The authorized 2026-10-14 maintenance includes code fixes in all three source
+snapshots, including `research` and `tools`. Review the executable diff and run
+regression checks for each version. Keep the original model definitions,
+numerical budgets, measurement identities, and historical verdicts. Record new
+checks against their actual source commits.
 
 Before updating a tag, record its exact object locally. Publish a reviewed
 maintenance descendant with an exact old-object force-with-lease check. Preserve
 Release IDs, original dates, status and attached assets, and synchronize the
 source identity and reviewed notes. Download each new archive and compare every
-tracked file with the reviewed commit. Remove temporary remote work branches;
-retain the three official tags without additional backup tags. See the
+tracked file with the reviewed commit. Before removing a temporary remote work
+branch, confirm its maintained release commits and documented historical sources
+are ancestors of the remote default branch. Keep the three official tags and
+store any backup refs locally. See the
 [source maintenance record](../version-doc-update.md).
 
 ## Validation records

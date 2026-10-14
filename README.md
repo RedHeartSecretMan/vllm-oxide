@@ -6,15 +6,15 @@
 [![Release](https://img.shields.io/github/v/release/RedHeartSecretMan/vllm-oxide)](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-vllm-oxide is a Rust engine for **single-GPU, synchronous, offline Qwen3 inference**, built on [Candle](https://github.com/huggingface/candle) and project-owned CUDA kernels. It draws on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm)'s architecture, with continuous batching, prefix caching, a paged KV cache, and recompute preemption.
+vllm-oxide runs Qwen3 offline on a single GPU through a synchronous Rust API. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm). The engine supports continuous batching, prefix caching, a paged KV cache, and recompute preemption.
 
-**v0.2.0 is available as source.** The validated workload is **Qwen3-0.6B in BF16** on one CUDA GPU. See the [release notes](docs/releases/v0.2.0.en.md), [validation summary](docs/releases/goldens-v0.2.md), and [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
+v0.2.0 is available as a source release, validated with Qwen3-0.6B in BF16 on one CUDA GPU. See the [release notes](docs/releases/v0.2.0.en.md), [validation summary](docs/releases/goldens-v0.2.md), and [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
 
 [Getting started](docs/getting-started.md) · [Documentation](docs/README.md) · [Architecture](docs/architecture.md) · [Releases](docs/releases/README.md) · [Contributing](CONTRIBUTING.md)
 
 ## What you can build
 
-Embed the engine in a Rust application, submit a batch of text or token-ID prompts, and receive completed text and token IDs. Reuse one `LLM` across calls to retain its model and cache allocation. The CLI offers the same generation path for one prompt at a time.
+Use the Rust library to generate from a batch of text or token-ID prompts. Each result contains the generated text and token IDs. Reusing one `LLM` across calls keeps the model loaded and its cache allocation available. The CLI uses the same generation path for one prompt at a time.
 
 | Area | v0.2.0 support |
 |---|---|
@@ -24,7 +24,7 @@ Embed the engine in a Rust application, submit a batch of text or token-ID promp
 | Token selection | Greedy, temperature, top-k, top-p, presence/frequency/repetition penalties, EOS and token-limit stopping |
 | Distribution | Tagged source, a Rust library, and a CLI; no prebuilt binary or published crates.io package |
 
-Serving, async streaming, multi-GPU/TP/NCCL, other model families, quantization, LoRA, speculative decoding, and CUDA Graphs are outside this release. Architecture inspiration does not imply API compatibility or feature parity with upstream vLLM.
+Serving, async streaming, multi-GPU/TP/NCCL, other model families, quantization, LoRA, speculative decoding, and CUDA Graphs are outside this release.
 
 ## Quick start
 
@@ -39,7 +39,7 @@ cargo run --locked --release -p vllm_oxide --example generate_qwen3 --features c
     hub:Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234
 ```
 
-The first run builds the CUDA backend and downloads model files. The example generates a continuation of “The meaning of life is”. Later runs reuse downloaded files. A local model directory can be passed instead of the `hub:` argument.
+The first run builds the CUDA backend and downloads the model. The example continues the prompt "The meaning of life is". Later runs reuse the downloaded files. To use a local checkpoint, replace the `hub:` argument with its directory.
 
 To choose your own prompt, use the CLI with a local checkpoint:
 
@@ -88,7 +88,7 @@ The supported public types are `LLM`, `EngineOptions`, `Prompt`, `SamplingParams
 
 ## Scope and performance
 
-The implementation prioritizes numerical correctness. The release's [validation summary](docs/releases/goldens-v0.2.md) records completed numerical, behavior, and public CUDA checks. In the fixed RTX 4080/WSL2 workload, median decode throughput was **29.7601 token/s for one request** and **115.8207 token/s across four requests**. See [benchmarks](docs/benchmarks/README.md) for the workload, measurement boundaries, and memory usage. These observations do not establish a cross-hardware guarantee or vLLM performance parity.
+The [validation summary](docs/releases/goldens-v0.2.md) records the release's numerical, behavior, and public CUDA checks. In the fixed RTX 4080/WSL2 workload, median decode throughput was **29.7601 token/s for one request** and **115.8207 token/s across four requests**. See [benchmarks](docs/benchmarks/README.md) for the workload, measurement boundaries, and memory usage. These results apply to the measured workload and hardware; they do not establish performance parity with vLLM.
 
 ## Development and validation
 
@@ -99,7 +99,7 @@ cargo build --locked --workspace
 cargo test --locked --workspace
 ```
 
-A CPU build supports development and tests; **actual inference requires `--features cuda` and a GPU**. Automatic GitHub CI checks compilation, formatting, Clippy, Rust tests, Python CPU validation tooling, and dependencies. Numerical accuracy, CUDA API/CLI behavior, and performance are validated separately on a local GPU. CI success alone does not establish model accuracy.
+Use CPU builds for development and tests. Inference requires `--features cuda` and a GPU. GitHub CI checks compilation, formatting, Clippy, Rust tests, Python CPU validation tools, and dependencies. Model accuracy, CUDA API/CLI behavior, and performance have separate checks on a local GPU.
 
 For contribution setup and complete checks, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development guide](docs/development.md). The [architecture overview](docs/architecture.md) maps a generation call to the current implementation, and the [validation guide](docs/validation/README.md) separates routine CI from real-model checks.
 

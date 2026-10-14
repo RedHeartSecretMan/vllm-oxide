@@ -2,10 +2,10 @@
 
 [Project overview](../README.md) · [Documentation](../docs/README.md) · [Architecture](../docs/architecture.md)
 
-This directory keeps two kinds of development material: a retained executable
-stack experiment, and a source-backed repository-design note. Choose the
-material according to the question you want to answer. The supported engine and
-installation path are described in the [getting-started guide](../docs/getting-started.md).
+This directory contains the Candle/CUDA stack experiment and notes on repository
+documentation. Use them to investigate the questions listed below. To build
+and run the supported engine, follow the
+[getting-started guide](../docs/getting-started.md).
 
 | Material | Purpose | Status |
 |---|---|---|
@@ -18,8 +18,8 @@ The prototype uses synthetic inputs without model downloads or CLI flags. Its
 independent workspace and committed lockfile support direct runs from this
 checkout. CPU tests cover the output validator; CUDA runs check a constant-fill
 readback, launch/execution errors and the shape plus every finite attention
-output value. These checks establish interoperability, rather than model
-accuracy or production performance. Read its
+output value. These checks verify interoperability. Model accuracy and production performance
+require their own measurements. Read its
 [source and dependencies](prototype-candle-stack/README.md#source-and-dependencies)
 before rebuilding the pinned CUDA stack.
 

@@ -1,6 +1,8 @@
 # Bounded resource supervision and truthful measurement provenance
 
-This contract is adopted by [ADR-0019](../adr/0019-bounded-resource-supervision.md), extended by [ADR-0021](../adr/0021-fresh-supervised-release-evidence.md), selects fresh evidence under [ADR-0024](../adr/0024-approve-explicit-gemm-reduction.md), and permits the narrowly scoped local byte-transport repair under [ADR-0028](../adr/0028-local-release-evidence.md). The [supervision policy](layered-supervision-policy.json) supplies the exact configuration. The current `bounded-telemetry-fresh-v1` profile retains zero owners; the historical recovery profile alone requires a compatibility ledger. It does not modify the [accuracy budgets](layered-accuracy-budgets.json), case registry, model, sampling rules or numerical algorithms. All numerical cases retain the same four approved conditions.
+[ADR-0019](../adr/0019-bounded-resource-supervision.md) adopted this supervision contract, and [ADR-0021](../adr/0021-fresh-supervised-release-evidence.md) added fresh evidence collection. [ADR-0024](../adr/0024-approve-explicit-gemm-reduction.md) selected that fresh workflow; [ADR-0028](../adr/0028-local-release-evidence.md) allowed the scoped local byte-transport repair.
+
+The [supervision policy](layered-supervision-policy.json) supplies the exact configuration. The `bounded-telemetry-fresh-v1` profile retains zero owners. Only the historical recovery profile needs a compatibility ledger. The [accuracy budgets](layered-accuracy-budgets.json), case registry, model, sampling rules, and numerical algorithms keep their existing definitions, including all four approved conditions.
 
 ## 1. Separate real sources, not relabeled evidence
 
@@ -62,7 +64,7 @@ Times use one monotonic origin established before the initial probe. `phase` is 
 
 `resource_samples` contains only complete successful fresh snapshots, adding `started_seconds` and `completed_seconds` to the existing resource fields and elapsed time. A fresh event's `snapshot_index` references exactly its complete sample; timeout/fatal events use null and preserve their errors. `before` and `after` must match the corresponding fresh samples. `ram_sample_count` counts independent fast samples; the recorded RAM minimum includes all of them and all complete snapshots. Record actual maximum sampling gap; no new numerical-accuracy threshold is inferred from it.
 
-Consumers must reconstruct sample/event/query order, single-flight, recovery count/window, timeout configuration, lifecycle order, extrema, fast-sample count and required initial/final evidence. They also verify actual source/invocation/policy identity, worker exit zero, valid resource data, no observed foreign compute and empty owned/telemetry cleanup. Do not trust `failure=null` or a supplied PASS flag alone. Scheduling/cleanup latency must be recorded truthfully; a late result is not a pre-deadline fresh result. A deadline or cleanup failure remains invalid rather than being hidden by rounding timestamps.
+Consumers must reconstruct sample/event/query order, single-flight, recovery count/window, timeout configuration, lifecycle order, extrema, fast-sample count and required initial/final evidence. They also verify actual source/invocation/policy identity, worker exit zero, valid resource data, no observed foreign compute and empty owned/telemetry cleanup. Do not trust `failure=null` or a supplied PASS flag alone. Scheduling/cleanup latency must be recorded truthfully; a late result is not a pre-deadline fresh result. A deadline or cleanup failure remains invalid even if rounding would place its timestamp within the limit.
 
 ## 4. Exact old-guard compatibility (historical recovery profile only)
 
