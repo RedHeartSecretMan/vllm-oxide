@@ -8,7 +8,7 @@ repository.workspace = true
 authors.workspace = true
 # Distributed through Git source and GitHub Releases; not crates.io.
 publish = false
-description = "Rust/CUDA single-GPU offline inference for Qwen3, with continuous batching and paged KV caching."
+description = "A large language model inference engine in Rust and CUDA, with continuous batching and paged KV caching."
 readme = "../../README.md"
 documentation = "https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/docs/getting-started.md#rust-api"
 keywords = ["llm", "inference", "cuda", "qwen", "rust"]
