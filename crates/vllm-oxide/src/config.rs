@@ -10,8 +10,8 @@
 //!    mistral.rs's accepted values so the behaviour is identical.
 //! 3. `default_dtype` — internally reads `config.json`'s `torch_dtype` field. This is
 //!    the fix for nano-vllm's latent bug (`model_runner.py:29` reads the
-//!    nonexistent `hf_config.dtype` attribute). User-overridable via the
-//!    the source of the default when `EngineOptions::dtype` is `None`.
+//!    nonexistent `hf_config.dtype` attribute). `EngineOptions::dtype` overrides
+//!    this default when explicitly supplied.
 
 use candle_core::DType;
 use serde::Deserialize;

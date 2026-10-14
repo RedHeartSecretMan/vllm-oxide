@@ -586,7 +586,12 @@ fn collect_snapshot_files(root: &Path) -> Result<BTreeSet<String>> {
         {
             let entry = entry.with_context(|| format!("reading entry under {}", dir.display()))?;
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry.file_type().with_context(|| {
+                format!("reading cached snapshot entry type {}", path.display())
+            })?;
+            // Hub blob links are files; directory symlinks must not introduce
+            // cycles or walk outside the selected snapshot.
+            if file_type.is_dir() {
                 pending.push(path);
             } else if path.is_file() {
                 let relative = path.strip_prefix(root).with_context(|| {
@@ -639,6 +644,32 @@ mod tests {
         std::fs::write(root.join("config.json"), config_json).unwrap();
         std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
         std::fs::write(root.join("model.safetensors"), b"").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_snapshot_preserves_file_symlinks_without_traversing_directory_links() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("snapshot");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        std::fs::write(external.join("blob"), b"cached bytes").unwrap();
+        std::fs::write(root.join("nested/config.json"), b"{}").unwrap();
+        symlink(external.join("blob"), root.join("model.safetensors")).unwrap();
+        symlink(&external, root.join("linked-directory")).unwrap();
+        symlink(&root, root.join("cycle")).unwrap();
+
+        let files = collect_snapshot_files(&root).unwrap();
+        assert_eq!(
+            files,
+            BTreeSet::from([
+                "model.safetensors".to_string(),
+                "nested/config.json".to_string()
+            ])
+        );
     }
 
     #[test]

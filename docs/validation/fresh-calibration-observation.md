@@ -1,5 +1,11 @@
 # 修复源码后的新校准观察
 
+本页记录独立观察入口引入时的检查点。后续完整 fresh-evidence 流程由
+[ADR-0021](../adr/0021-fresh-supervised-release-evidence.md) 和
+[监督契约](layered-supervision-contract.md)规定，使用 execution manifest schema 3、
+零 retained owner；下文末段的 schema 2 / ledger 指旧流程。实际发布结果见
+[v0.2.0 摘要](../releases/goldens-v0.2.md)。
+
 旧监督政策用于按原始源码和 binary 身份保留、补齐既有采集记录。它不应把修复后的
 源码重标为旧源码。`golden_gen.layered_cli collect/collect-aux --fresh-observation`
 提供独立的新观察入口；已有监督采集的默认行为保持不变。

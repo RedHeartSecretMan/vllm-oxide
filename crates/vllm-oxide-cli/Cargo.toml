@@ -8,7 +8,9 @@ repository.workspace = true
 authors.workspace = true
 # Distributed through Git source and GitHub Releases; not crates.io.
 publish = false
-description = "Thin CLI binary for vllm-oxide — parses argv and calls LLM::generate."
+description = "Command-line Qwen3 offline generation through vllm-oxide's synchronous Rust API."
+readme = "../../README.md"
+documentation = "https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/docs/getting-started.md"
 
 [features]
 default = []

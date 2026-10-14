@@ -63,7 +63,7 @@ struct Cli {
     #[arg(long, default_value = "/tmp/vllm-oxide-goldens")]
     cache_dir: PathBuf,
 
-    /// Enable L3 per-layer activations comparison (debug-only, skeleton).
+    /// Request L3 per-layer comparison (currently unavailable; returns an error).
     #[arg(long)]
     debug: bool,
 
@@ -112,6 +112,7 @@ fn main() -> Result<()> {
         &cli.measurement_tree,
     )?;
     vllm_oxide_test::measurement::validate_running_binary(&cli.repo_root)?;
+    vllm_oxide_test::measurement::validate_reviewed_prompts(&cli.repo_root, &cli.prompts_dir)?;
     vllm_oxide_test::measurement::validate_release_model(&cli.model_path)?;
 
     // 1. Load or download golden fixtures.

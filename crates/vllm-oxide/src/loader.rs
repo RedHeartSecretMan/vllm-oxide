@@ -51,6 +51,8 @@ fn var_builder_from_paths(
     if paths.is_empty() {
         return Err(anyhow!("{description} resolved zero safetensors shards"));
     }
+    // SAFETY: paths belong to the resolved checkpoint; model files must stay
+    // read-only while mapped, as required by the mmap boundary documented above.
     let tensors = unsafe { MmapedSafetensors::multi(paths) }
         .with_context(|| format!("mapping safetensors for {description}"))?;
     let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
@@ -98,11 +100,15 @@ fn resolve_local_shards(dir: &Path) -> Result<Vec<PathBuf>> {
 
     let dir_entries = std::fs::read_dir(dir)
         .with_context(|| format!("reading checkpoint dir {}", dir.display()))?;
-    let mut shards: Vec<PathBuf> = dir_entries
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("safetensors"))
-        .collect();
+    let mut shards = Vec::new();
+    for entry in dir_entries {
+        let entry =
+            entry.with_context(|| format!("reading checkpoint entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("safetensors") {
+            shards.push(path);
+        }
+    }
     shards.sort();
 
     if shards.is_empty() {
@@ -263,6 +269,15 @@ mod tests {
             assert_eq!(paths.len(), 2);
             assert!(paths[0].ends_with("aaa.safetensors"));
             assert!(paths[1].ends_with("zzz.safetensors"));
+        }
+
+        #[test]
+        fn bare_layout_ignores_directories_named_like_shards() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(tmp.path().join("backup.safetensors")).unwrap();
+            write_safetensors_fixture(&tmp.path().join("part.safetensors"), "w", &[1.0]);
+            let paths = resolve_local_shards(tmp.path()).unwrap();
+            assert_eq!(paths, vec![tmp.path().join("part.safetensors")]);
         }
 
         #[test]

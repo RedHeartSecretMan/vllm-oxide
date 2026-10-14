@@ -24,6 +24,7 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    vllm_oxide_test::measurement::validate_reviewed_prompts(&cli.repo_root, &cli.prompts_dir)?;
     let prompts = vllm_oxide_test::prompts::load_all_prompts(&cli.prompts_dir)?;
     vllm_oxide_test::observation::run_candidate_capture(
         &cli.model_path,

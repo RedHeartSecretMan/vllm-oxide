@@ -30,12 +30,12 @@ asset bundle was published or that an old combined bundle passed full verificati
 
 ## Documentation revision and source provenance
 
-This maintained v0.2.0 archive refreshes documentation while preserving the
-original implementation. Historical validation binds exact source commits,
+This maintained v0.2.0 archive includes documentation improvements and focused
+source fixes. The original implementation remains in its Git history. Historical validation binds exact source commits,
 Definition bytes, reviewed binaries and approved calibration records. Reproduce
 an original stage using its actual measured/evaluator checkout and retained
 inputs from the [validation summary](../../docs/releases/goldens-v0.2.md), rather
-than substituting this documentation commit as a measurement identity. See the
+than substituting the maintenance commit as a measurement identity. See the
 [version-specific revision](../../docs/releases/version-doc-update.md) and
 [shared maintenance record](../../docs/version-doc-update.md). No new GPU run or
 bundled unpublished input is implied by the documentation refresh.
