@@ -74,7 +74,10 @@ fn main() -> ExitCode {
             eprintln!("[demo] hidden_states shape = {:?}", hidden.shape());
             match built.model.compute_logits(&hidden) {
                 Ok(logits) => eprintln!("[demo] logits shape     = {:?}", logits.shape()),
-                Err(e) => eprintln!("[demo] compute_logits failed: {e}"),
+                Err(e) => {
+                    eprintln!("[demo] compute_logits failed: {e}");
+                    return ExitCode::from(2);
+                }
             }
         }
         Err(e) => {

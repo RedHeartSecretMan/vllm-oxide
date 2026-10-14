@@ -77,7 +77,9 @@ pub fn compare_l1(
         };
         let expected_index = usize::try_from(expected)
             .context("expected token ID must be a nonnegative platform index")?;
-        let gap = top2_logit_gap(logits, i, expected_index)?;
+        let actual_index = usize::try_from(actual)
+            .context("actual token ID must be a nonnegative platform index")?;
+        let gap = top2_logit_gap(logits, i, expected_index, actual_index)?;
         if gap < eps {
             Ok(Some(MismatchKind::NearTie(gap)))
         } else {
@@ -218,12 +220,16 @@ where
 /// Compute the gap between the top-2 logits at a given position.
 ///
 /// Extracts row `position` from the logits tensor `[n, vocab_size]`, finds
-/// the top two values, and returns their difference. If the top-2 includes
-/// the expected token, returns the gap from the expected token to the next
-/// highest. Otherwise returns infinity (hard mismatch).
-fn top2_logit_gap(logits: &Tensor, position: usize, expected_token: usize) -> Result<f64> {
+/// the top two values, and returns their difference when the selected token
+/// is the candidate argmax and the expected value is in the top two (including
+/// tied values). Otherwise returns infinity (hard mismatch).
+fn top2_logit_gap(
+    logits: &Tensor,
+    position: usize,
+    expected_token: usize,
+    actual_token: usize,
+) -> Result<f64> {
     let row = logits.get(position)?;
-    let _vocab_size = row.dims()[0];
     let row_f32 = row.to_dtype(DType::F32)?;
     let values = row_f32.to_vec1::<f32>()?;
 
@@ -242,7 +248,10 @@ fn top2_logit_gap(logits: &Tensor, position: usize, expected_token: usize) -> Re
         }
     }
 
-    if top1_idx == expected_token {
+    let expected = values
+        .get(expected_token)
+        .context("expected token is outside candidate vocabulary")?;
+    if actual_token == top1_idx && *expected >= top2 {
         Ok((top1 - top2) as f64)
     } else {
         // Expected token not in top-2 — hard mismatch, no near-tie.
@@ -405,5 +414,48 @@ mod tests {
         assert_eq!(result.exact_matches, 3);
         assert_eq!(result.regression_skips, 0);
         assert_eq!(result.mismatches, 1);
+    }
+    #[test]
+    fn malformed_candidate_logit_rank_returns_error() {
+        let fixture = FixtureData {
+            prompt_id: "invalid-rank".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 1,
+            token_ids: vec![1],
+            n_prompt_tokens: 1,
+            logits: None,
+            logits_shape: (1, 2),
+            top5_indices: None,
+            top5_logits: None,
+        };
+        let logits = Tensor::new(&[0.0_f32, 1.0], &candle_core::Device::Cpu).unwrap();
+        assert!(compare_l1(&fixture, &[0], Some(&logits), &make_tolerance(), None).is_err());
+    }
+    #[test]
+    fn a_runner_up_reference_token_uses_the_existing_near_tie_policy() {
+        let fixture = FixtureData {
+            prompt_id: "runner-up".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 1,
+            token_ids: vec![0],
+            n_prompt_tokens: 1,
+            logits: None,
+            logits_shape: (1, 3),
+            top5_indices: None,
+            top5_logits: None,
+        };
+        let logits = Tensor::new(&[[1.0_f32, 1.000_01, -10.0]], &candle_core::Device::Cpu).unwrap();
+        let result = compare_l1(&fixture, &[1], Some(&logits), &make_tolerance(), None).unwrap();
+        assert!(result.passed);
+        assert_eq!(result.near_tie_skips, 1);
+        assert_eq!(result.epsilon, make_tolerance().atol * 2.0);
+        // An unrelated output token must never obtain a near-tie exemption.
+        assert!(
+            !compare_l1(&fixture, &[2], Some(&logits), &make_tolerance(), None)
+                .unwrap()
+                .passed
+        );
     }
 }

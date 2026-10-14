@@ -44,4 +44,4 @@ target/release/vllm_oxide_cli --model "$QWEN3_MODEL_DIR" \
 
 CPU 测试通过不等于 GPU 数值验证通过。[验证说明](docs/validation/README.md)保留了原始失败、比较覆盖限制以及缺少验证性能基线的事实。
 
-工作区声明使用 [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) 许可证。漏洞报告请遵循[安全政策](SECURITY.md)。
+工作区声明使用 [Apache-2.0](LICENSE) 许可证。漏洞报告请遵循[安全政策](SECURITY.md)。

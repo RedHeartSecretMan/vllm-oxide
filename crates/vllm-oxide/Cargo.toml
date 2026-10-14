@@ -8,7 +8,9 @@ repository.workspace = true
 authors.workspace = true
 # Distributed through Git source and GitHub Releases; not crates.io.
 publish = false
-description = "A Rust port of nano-vllm trending toward vLLM's V1 architecture (single-GPU, Qwen3-focused, offline LLM inference)."
+description = "Experimental Rust/CUDA single-GPU offline Qwen3 inference."
+readme = "../../README.md"
+documentation = "https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.1.0/docs/getting-started.md"
 
 [lib]
 name = "vllm_oxide"
@@ -34,8 +36,8 @@ candle-core = { git = "https://github.com/huggingface/candle.git", rev = "27f20f
 candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e" }
 candle-flash-attn = { git = "https://github.com/huggingface/candle.git", rev = "27f20fea993c81ea6d32ce44018f42b68466525e", optional = true }
 
-# Sync API only. hf-hub 1.0 introduced an async rewrite with no proven candle
-# integration at this pinned rev; we explicitly want the 0.5 sync `Api`.
+# Synchronous Hub API for the engine's construction contract. Keep this API
+# version aligned with the pinned checkpoint loader and its offline cache tests.
 # `default-features = false` + `ureq` avoids the default `native-tls` (openssl)
 # dependency — ureq 3.x uses rustls by default, which has no system-library
 # requirement and lets `cargo check` run on a bare CI runner.

@@ -108,7 +108,7 @@ impl Sequence {
     ///
     /// # Preconditions
     ///
-    /// `i < self.num_blocks()`. Panics (debug assertion) otherwise.
+    /// `i < self.num_blocks()`. Panics on an invalid slice range otherwise.
     ///
     /// Full blocks span `BLOCK_SIZE` tokens; the final block returns whatever
     /// remains (1..=BLOCK_SIZE tokens).

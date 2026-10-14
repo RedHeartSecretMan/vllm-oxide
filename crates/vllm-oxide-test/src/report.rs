@@ -30,7 +30,9 @@ impl ComparisonReport {
     }
 
     pub fn overall_passed(&self) -> bool {
-        self.l1_passed() && self.l2_passed()
+        (!self.l1_results.is_empty() || !self.l2_results.is_empty())
+            && self.l1_passed()
+            && self.l2_passed()
     }
 }
 
@@ -111,11 +113,11 @@ fn print_l2_section(report: &ComparisonReport) {
         return;
     }
 
-    println!("── L2 (same-prefix logits, no chain divergence) ──");
+    println!("── L2 (complete shared-prefix logits) ──");
     for r in &report.l2_results {
         let status = if r.passed { "✓" } else { "✗" };
         println!(
-            "  {} {}: same-token steps={}, max_abs_diff={:.2e}, exceeding={}/{} elements",
+            "  {} {}: shared-prefix steps={}, max_abs_diff={:.2e}, exceeding={}/{} elements",
             status,
             r.prompt_id,
             r.same_token_steps,
@@ -124,7 +126,10 @@ fn print_l2_section(report: &ComparisonReport) {
             r.total_elements,
         );
         if r.diff_token_steps > 0 {
-            println!("    {} steps skipped (token mismatch)", r.diff_token_steps,);
+            println!(
+                "    {} later rows excluded after causal-prefix divergence",
+                r.diff_token_steps,
+            );
         }
     }
     println!();
@@ -190,4 +195,12 @@ pub fn json_report(report: &ComparisonReport, tolerance: &ToleranceCalibration) 
     };
     serde_json::to_string_pretty(&data)
         .unwrap_or_else(|e| format!("{{ \"error\": \"serialization failed: {e}\" }}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_empty_comparison_report_never_passes() {
+        assert!(!super::ComparisonReport::default().overall_passed());
+    }
 }

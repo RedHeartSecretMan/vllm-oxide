@@ -1,12 +1,18 @@
-# vllm-oxide-test — historical comparison tool
+# vllm-oxide-test — schema-1 comparison tool
 
 [Documentation](../../docs/README.md) · [Validation record](../../docs/validation/README.md) · [Fixture generator](../../tools/golden-gen/README.md)
 
-This v0.1.0 package compares Rust engine output with schema-1 fixtures. Engine execution requires a GPU; the package's unit tests run on CPU. It is a historical manual comparison tool, not the stricter current acceptance evaluator. **A zero exit status does not guarantee full fixture coverage.**
+This v0.1.0 package compares Rust engine output with schema-1 fixtures. Engine
+execution requires a GPU; the package's regression tests run on CPU. It retains
+legacy L1/token and L2/logit meanings and is separate from the current layered
+acceptance evaluator. The maintained runner rejects missing declared evidence,
+comparison errors and empty reports. Original release measurements and their
+failures keep their original source identities.
 
 ## Local fixture comparison
 
-From the repository root, with local Qwen3-0.6B weights and the original fixture archive extracted:
+From the repository root, with local Qwen3-0.6B weights and the original fixture
+archive extracted:
 
 ```bash
 export QWEN3_MODEL_DIR=/absolute/path/to/Qwen3-0.6B
@@ -17,44 +23,80 @@ cargo run --locked --release -p vllm_oxide_test --features cuda -- \
     --prompts-dir tools/golden-gen/prompts
 ```
 
-The package declares `cuda = ["vllm_oxide/cuda"]`; enable it for real inference. It declares the binary name `vllm-oxide-test`, so a release build places it at `target/release/vllm-oxide-test`. `--model-path` takes a local directory, not a Hub repo ID. The engine requires SM 8.9+; recorded validation was RTX 4080/WSL2. The historical manifest declares Rust 1.75 without an independently established minimum-toolchain matrix.
+The package declares `cuda = ["vllm_oxide/cuda"]`; enable it for inference.
+Its binary is `target/release/vllm-oxide-test`. `--model-path` accepts a complete
+local directory, not a Hub repository ID. The engine requires SM 8.9+; original
+validation used RTX 4080/WSL2. The maintained source pins Rust 1.94.0. The
+original Rust 1.75 declaration was not validated and did not satisfy the lock.
 
-The local manifest must be next to its fixture files; safetensors SHA-256 values are checked when fixtures load. Use the accompanying original manifest and pinned model revision, rather than recalibrating original evidence in place.
+The manifest must be next to its fixture files. The runner preflights every
+declared fixture's checksum, tensor geometry, finite values, token vocabulary
+and prompt identity before the first model initialization. Use the original
+manifest and pinned model revision; never recalibrate retained evidence in place.
 
 ## CLI options
 
 | Option | Behavior |
 |---|---|
-| `--model-path PATH` | Required local checkpoint (`config.json`, `tokenizer.json`, weights and shard index when needed) |
+| `--model-path PATH` | Required complete local checkpoint |
 | `--manifest PATH` | Local manifest, with fixtures in its parent directory |
 | `--release-tag TAG` | Alternative fixture source using GitHub assets |
 | `--repo OWNER/REPO` | Download repository; default `RedHeartSecretMan/vllm-oxide` |
 | `--cache-dir PATH` | Download cache; default `/tmp/vllm-oxide-goldens` |
-| `--prompts-dir PATH` | Defaults to `tools/golden-gen/prompts` relative to working directory |
-| `--epsilon VALUE` | Canonical L1 near-tie override; default `2 × atol` |
-| `--debug` | Add L3 placeholder output |
-| `--json` | Emit a JSON report |
-| `--l1-only` | Omit L2 |
-| `--l2-only` | Omit L1 |
+| `--prompts-dir PATH` | Canonical and regression JSONL directory; default `tools/golden-gen/prompts` |
+| `--epsilon VALUE` | Finite non-negative canonical L1 near-tie override; default `2 × atol` |
+| `--debug` | Rejected: L3 activation comparison is not implemented |
+| `--json` | Emit the comparison report as JSON |
+| `--l1-only` | Explicitly select token comparison only |
+| `--l2-only` | Explicitly select full-logit comparison only; rejects regression fixtures lacking full logits |
 
-Choose either `--manifest` or `--release-tag`; one is required by runtime validation. Do not combine `--l1-only` and `--l2-only`: the archived CLI does not reject that combination, and it can leave both comparison lists empty.
+Select either `--manifest` or `--release-tag`; a source is required. The two
+partial-comparison flags conflict. A deliberate partial run establishes only
+the selected layer. A nonempty manifest is also required; its declared inventory
+defines this tool's scope and does not provide the modern protocol's separate
+frozen-registry completeness guarantee. Fake-oracle fixtures cannot establish
+numerical acceptance.
 
-The historical downloader reads release metadata, expects `manifest.json` plus every fixture as a **separate asset**, verifies fixture SHA-256 and caches files. It does not unpack `.tar.gz`. v0.1.0 attaches `manifest.json` and `goldens-v0.1.tar.gz`, so its original assets should be downloaded/extracted for local `--manifest` mode. The older example tag `goldens-v0.1` in source comments is not a replacement for this release's actual asset layout.
+The historical downloader expects `manifest.json` and each safetensors file as
+a separate attached asset. It does not unpack `.tar.gz`. The actual v0.1.0
+Release retains `manifest.json` and `goldens-v0.1.tar.gz`, so use the extracted
+archive and local `--manifest` mode for those assets. The old `goldens-v0.1` tag
+in source comments is not a replacement for the actual attachment layout.
 
-## Comparison behavior and limits
+## Maintained comparison behavior
 
-| Layer | Implemented behavior | Limits |
+| Layer | Behavior | Scope |
 |---|---|---|
-| L1 canonical | Greedy token IDs/lengths, optional near-tie classification using generated logits | Exclusions are separate from exact matches; the helper recognizes expected top-1 only, despite the intended top-2 comment |
-| L1 regression | Token IDs/lengths with manifest skip-map exclusions | CLI loads only canonical prompt IDs, so regression fixtures are normally skipped |
-| L2 | Absolute-only comparison (`abs(actual − expected) <= atol`) on rows whose current token matches | Does not enforce a common full prefix or stop at first divergence; omitted rows/empty comparisons are not full accuracy evidence |
-| L3 | Placeholder message when `--debug` is supplied | No activation capture/comparison; stub result does not enter overall verdict |
+| L1 canonical | Greedy token IDs and lengths, with separately reported legacy near-tie exclusions | The actual token must be the candidate argmax and the expected token must fall in its top two, including ties; the top-two gap must be strictly below epsilon |
+| L1 regression | Token IDs and lengths with original manifest skip-map exclusions | Excluded positions remain distinct from exact matches |
+| L2 | Absolute-only full-logit comparison through the first divergent token, including that row | Later rows are excluded even if their selected token happens to match again |
+| L3 | No implemented activation comparison | The CLI refuses `--debug` rather than returning a placeholder PASS |
 
-The runner iterates canonical fixtures from both oracle identities. `canonical_05a`–`canonical_05d` are expanded fixture IDs but the archived canonical prompt loader only keys the parent `canonical_05`, so those subfixtures may not find a prompt and are skipped. Missing prompts and several generation/conversion errors log a message and continue.
+Both canonical and regression corpora are loaded. Batch specifications expand
+to their concrete member IDs; each fixture is captured as a separate request
+for this diagnostic comparison. It does not recreate the original oracle's
+batched execution geometry or prove production batching equivalence. Both
+oracle identities remain part of the legacy manifest and are compared according
+to this schema-1 tool, without acquiring the current reference/baseline contract.
 
-Report aggregation checks `all()` over collected L1/L2 results. Empty result lists therefore pass; L2 can also pass with no compared elements. Inspect actual fixture/result counts, skipped/missing IDs, token lengths, errors, exact matches, exclusions and compared elements before interpreting output. This tooling limitation is preserved, not silently repaired by the documentation refresh.
+A missing prompt/file, invalid fixture, generation/conversion error or incomplete
+declared comparison now fails the run. L2 requires nonempty consistent geometry
+and a finite non-negative tolerance; non-finite compared values cannot pass.
+The legacy JSON names `same_token_steps` and `diff_token_steps` now count compared
+shared-prefix rows and later excluded rows respectively.
 
-The original release recorded four of eight groups with full-output token differences, `atol=66.46875`, and six regression cases with skip positions. Preserve those findings. The [golden-generation ADR](../../docs/adr/0005-golden-generation-correctness-strategy.md) describes the intended strategy; the [validation guide](../../docs/validation/README.md) distinguishes it from this source's actual coverage and implementation.
+The original implementation could skip missing prompts/errors and pass an empty
+report; its L2 filter tested current-token equality without enforcing the whole
+prefix. Those behaviors motivated the maintenance fixes. The near-tie helper now
+recognizes a reference runner-up while requiring the actual token to be the
+candidate argmax; the original `epsilon = 2 × atol` default and six-case
+regression skip map are unchanged. This is not the modern reference-choice-loss
+gate. These repairs do not change the
+original release's four of eight full-output token differences,
+`atol=66.46875`, or six regression cases with skipped positions. No new model
+accuracy or performance result is claimed by repairing the runner. See
+[historical validation](../../docs/validation/README.md) and the
+[source maintenance record](../../docs/version-doc-update.md).
 
 ## CPU tests and source layout
 
@@ -63,6 +105,14 @@ cargo test --locked -p vllm_oxide_test
 cargo test --locked --workspace
 ```
 
-These tests do not load models or establish GPU correctness. `src/main.rs` orchestrates comparisons; `types.rs`/`manifest.rs` parse schema and tensors; `download.rs` handles assets and hashes; `prompts.rs` loads canonical JSONL; `l1.rs`, `l2.rs` and `l3.rs` implement comparison layers; `report.rs` aggregates output. There is no modern performance sampler or layered schema-5 reader in this version.
+CPU tests cover prompt expansion, declared-fixture preflight, empty-report
+rejection, malformed/non-finite logits, causal-prefix boundaries, unsupported
+L3 and initialization-error propagation. They load no model and establish no GPU
+accuracy result. `src/main.rs` orchestrates comparisons; `types.rs` and
+`manifest.rs` parse schema and tensors; `download.rs` handles assets and hashes;
+`prompts.rs` loads both corpora; `l1.rs`, `l2.rs`, `l3.rs` and `report.rs` retain
+the legacy layers/report structures. There is no modern performance sampler or
+layered schema-5 consumer in this version.
 
-Cache and fixture directories stay local. Preserve original manifests/logs before cleaning a scratch directory, and keep raw acceptance packages out of git and release uploads for this documentation maintenance.
+Keep caches, fixtures and complete raw evidence local. Preserve original
+manifests and results before cleaning a scratch directory.

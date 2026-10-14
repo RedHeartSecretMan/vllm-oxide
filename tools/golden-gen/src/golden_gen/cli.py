@@ -127,21 +127,40 @@ def _run_generate(args: argparse.Namespace) -> int:
         if existing.tolerance.atol > 0.0:
             existing_tolerance = existing.tolerance
 
+    failed_oracles: set[str] = set()
     for name, oracle_cls in oracle_specs:
-        oracle = oracle_cls()
-        if args.dry_run:
-            oracle.name = name
+        oracle = None
         try:
+            oracle = oracle_cls()
+            if args.dry_run:
+                oracle.name = name
             fixtures = run_all(
-                [oracle], all_prompts, output_dir, only_category=only_category,
+                [oracle],
+                all_prompts,
+                output_dir,
+                only_category=only_category,
             )
             new_keys = {(f.oracle, f.prompt_id) for f in fixtures}
             all_fixtures = [f for f in all_fixtures if (f.oracle, f.prompt_id) not in new_keys]
             all_fixtures.extend(fixtures)
         except Exception as e:
             print(f"ERROR: oracle {name} failed: {e}", file=sys.stderr)
+            failed_oracles.add(name)
         finally:
-            oracle.close()
+            if oracle is not None:
+                try:
+                    oracle.close()
+                except Exception as e:
+                    print(f"ERROR: oracle {name} cleanup failed: {e}", file=sys.stderr)
+                    failed_oracles.add(name)
+
+    if failed_oracles:
+        print(
+            "ERROR: fixture generation incomplete; manifest was not published "
+            f"(failed oracles: {', '.join(sorted(failed_oracles))})",
+            file=sys.stderr,
+        )
+        return 1
 
     print(f"Generated {len(all_fixtures)} fixtures in {output_dir}")
 

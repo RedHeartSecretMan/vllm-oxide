@@ -49,11 +49,23 @@ impl RMSNorm {
     /// When `residual` is `None`, no add is performed and the returned
     /// residual equals the input `x` (residual stream bootstrap).
     pub fn forward(&self, x: &Tensor, residual: Option<&Tensor>) -> Result<(Tensor, Tensor)> {
+        if !self.eps.is_finite() || self.eps <= 0.0 {
+            candle_core::bail!("RMSNorm epsilon must be positive and finite")
+        }
         let orig_dtype = x.dtype();
         let internal_dtype = match orig_dtype {
             DType::F16 | DType::BF16 => DType::F32,
             d => d,
         };
+        if internal_dtype == DType::F32 {
+            // Candle materializes scalar arithmetic in the statistics dtype.
+            // A positive F64 configuration can still narrow to zero or infinity.
+            #[allow(clippy::cast_possible_truncation)]
+            let epsilon = self.eps as f32;
+            if !epsilon.is_finite() || epsilon <= 0.0 {
+                candle_core::bail!("RMSNorm epsilon must be positive and finite in F32 statistics")
+            }
+        }
 
         let (sum_fp32, new_residual) = match residual {
             Some(r) => {
@@ -93,12 +105,58 @@ mod tests {
     /// Pure-FP32 reference implementation, independent of the production code
     /// path. The property test compares this against `RMSNorm::forward` run on
     /// BF16 input (which internally upcasts to FP32). Agreement within
-    /// `1e-3` confirms the upcast path didn't drop precision.
+    /// `3e-2` covers BF16 input quantization while detecting loss of the upcast.
     fn rms_norm_fp32_reference(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let hidden_size = x.dim(Minus1)?;
         let var = (x.sqr()?.sum_keepdim(Minus1)? / hidden_size as f64)?;
         let normed = x.broadcast_div(&(var + eps as f64)?.sqrt()?)?;
         normed.broadcast_mul(weight)
+    }
+
+    #[test]
+    fn invalid_epsilon_is_rejected_for_every_floating_statistics_type() {
+        let dev = candle_core::Device::Cpu;
+        for dtype in [DType::F64, DType::F32, DType::F16, DType::BF16] {
+            let input = Tensor::zeros((1, 4), dtype, &dev).unwrap();
+            let weight = Tensor::ones(4, dtype, &dev).unwrap();
+            for eps in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert!(
+                    RMSNorm::new(weight.clone(), eps)
+                        .forward(&input, None)
+                        .is_err(),
+                    "dtype={dtype:?} eps={eps}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonrepresentable_statistics_epsilon_returns_error() {
+        let dev = candle_core::Device::Cpu;
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            let input = Tensor::zeros((1, 4), dtype, &dev).unwrap();
+            let weight = Tensor::ones(4, dtype, &dev).unwrap();
+            for eps in [f64::from_bits(1), 1e-300, f64::MAX] {
+                let norm = RMSNorm::new(weight.clone(), eps);
+                assert!(
+                    norm.forward(&input, None).is_err(),
+                    "dtype={dtype:?} eps={eps}"
+                );
+            }
+        }
+        // F64 statistics can represent this epsilon; their valid range must
+        // not be reduced to F32 merely because production Qwen3 uses BF16.
+        let input = Tensor::zeros((1, 4), DType::F64, &dev).unwrap();
+        let weight = Tensor::ones(4, DType::F64, &dev).unwrap();
+        assert_eq!(
+            RMSNorm::new(weight, 1e-300)
+                .forward(&input, None)
+                .unwrap()
+                .0
+                .to_vec2::<f64>()
+                .unwrap(),
+            vec![vec![0.0; 4]]
+        );
     }
 
     mod shape {

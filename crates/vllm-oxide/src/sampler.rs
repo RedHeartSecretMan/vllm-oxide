@@ -158,6 +158,9 @@ impl Sampler {
         }
         let batch = logits.dim(0)?;
         let vocab = logits.dim(1)?;
+        if batch == 0 || vocab == 0 {
+            candle_core::bail!("sampler.forward: batch and vocabulary must be nonempty")
+        }
         if params.len() != batch {
             return Err(CandleError::msg(format!(
                 "sampler.forward: params.len() = {} but batch = {batch}",
@@ -338,9 +341,9 @@ impl Sampler {
     }
 }
 
-/// Reserve wider arithmetic only when an accepted finite F32 row can overflow
-/// during penalties or temperature scaling. The bound may be conservative,
-/// but the ordinary F32 pipeline and its seeded draws remain unchanged.
+/// Reserve wider arithmetic when an accepted finite F32 row can overflow or
+/// lose unit-scale Gumbel noise entirely in a large common logit offset.
+/// The ordinary F32 pipeline and its seeded draws remain unchanged.
 fn requires_wide_sampling(buf: &[f32], params: &SamplingParams, history: &[u32]) -> bool {
     let penalized = params.has_penalties() && !history.is_empty();
     if params.is_greedy() && !penalized {
@@ -370,7 +373,10 @@ fn requires_wide_sampling(buf: &[f32], params: &SamplingParams, history: &[u32])
         return false;
     }
     let inv_t = 1.0_f32 / params.temperature;
-    !inv_t.is_finite() || bound * f64::from(inv_t) > f64::from(f32::MAX)
+    // At 2^24, adjacent F32 scores are two units apart, enough to swallow
+    // typical Gumbel noise. The existing normalized wide path removes that
+    // common offset without changing greedy or ordinary model-logit rows.
+    !inv_t.is_finite() || bound * f64::from(inv_t) >= 16_777_216.0
 }
 
 /// Preserve the original count instead of merging additive penalties into an
@@ -579,6 +585,22 @@ mod tests {
     use super::*;
     use candle_core::Device;
 
+    #[test]
+    fn malformed_logits_and_batch_shapes_return_errors() {
+        let mut sampler = Sampler::new_with_seed(7);
+        let params = [SamplingParams::default()];
+        let histories = [Vec::<u32>::new()];
+        for shape in [vec![], vec![3], vec![1, 2, 3], vec![0, 3], vec![1, 0]] {
+            let logits = Tensor::zeros(shape, DType::F32, &Device::Cpu).unwrap();
+            assert!(sampler.forward(&logits, &params, &histories).is_err());
+        }
+        let logits = Tensor::zeros((1, 3), DType::F32, &Device::Cpu).unwrap();
+        assert!(sampler.forward(&logits, &[], &histories).is_err());
+        assert!(sampler
+            .forward(&logits, &params, &[] as &[Vec<u32>])
+            .is_err());
+    }
+
     mod numerical_boundaries {
         use super::*;
 
@@ -602,6 +624,24 @@ mod tests {
             // v0.1.0 intentionally retains its original host sampling adapter;
             // exercise it with a real CUDA tensor without adding a new backend.
             let device = Device::new_cuda(0).unwrap();
+            for logit in [1e20_f32, -1e20_f32] {
+                let logits = Tensor::from_vec(vec![logit, logit], (1, 2), &device).unwrap();
+                let params = SamplingParams {
+                    temperature: 1.0,
+                    ..SamplingParams::default()
+                };
+                let mut sampler = Sampler::new_with_seed(19);
+                let selected: Vec<_> = (0..64)
+                    .map(|_| {
+                        sampler
+                            .forward(&logits, std::slice::from_ref(&params), &[vec![]])
+                            .unwrap()
+                            .to_vec1::<u32>()
+                            .unwrap()[0]
+                    })
+                    .collect();
+                assert!(selected.contains(&0) && selected.contains(&1));
+            }
             let logits = Tensor::from_vec(
                 vec![10.0_f32, 20.0, 10.0, 20.0, -20.0, -10.0, 10.0, 20.0],
                 (4, 2),
@@ -682,6 +722,22 @@ mod tests {
                     1, 1, 3, 0, 1, 0, 1, 1, 0, 3, 1, 0
                 ]
             );
+        }
+
+        #[test]
+        fn large_common_offsets_keep_non_greedy_ties_stochastic() {
+            for logit in [1e20_f32, -1e20_f32] {
+                for (top_k, top_p) in [(None, None), (Some(2), None), (None, Some(0.9))] {
+                    let params = SamplingParams {
+                        temperature: 1.0,
+                        top_k,
+                        top_p,
+                        ..SamplingParams::default()
+                    };
+                    let selected = sample_many(&[logit, logit], &params, &[]);
+                    assert!(selected.contains(&0) && selected.contains(&1));
+                }
+            }
         }
 
         #[test]

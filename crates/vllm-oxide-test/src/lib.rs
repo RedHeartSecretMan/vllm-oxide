@@ -5,7 +5,7 @@
 //! levels:
 //!
 //! - **L1**: greedy token-sequence exact match with near-tie skipping
-//! - **L2**: per-step logits tensor comparison with calibrated atol+rtol
+//! - **L2**: per-step logits tensor comparison with calibrated atol
 //! - **L3**: per-layer activations (debug-only, skeleton in v0.1)
 //!
 //! This is a **release gate** (manual, GPU). CI green (CPU property tests)

@@ -113,10 +113,10 @@ mod tests {
 
         #[test]
         fn qwen3_0_6b_layout() {
-            // Qwen3-0.6B: 28 layers, 4 KV heads (GQA), head_dim 128.
+            // Qwen3-0.6B: 28 layers, 8 KV heads (GQA), head_dim 128.
             // Pool size is a per-launch decision; 1024 here is illustrative.
-            let shape = kv_cache_layout_shape(28, 1024, 256, 4, 128);
-            assert_eq!(shape, [2, 28, 1024, 256, 4, 128]);
+            let shape = kv_cache_layout_shape(28, 1024, 256, 8, 128);
+            assert_eq!(shape, [2, 28, 1024, 256, 8, 128]);
         }
 
         #[test]

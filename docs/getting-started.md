@@ -49,7 +49,7 @@ printf '%s' 'The meaning of life is' | \
 | `--top-p` | Nucleus probability threshold | Disabled |
 | `--max-tokens` | Maximum completion tokens | `16` |
 
-The CLI submits one prompt, prints continuation text and propagates construction/generation errors. It does not apply a chat template. Batch input, token-ID prompts, penalties, `ignore_eos`, engine options, dtype and GPU selection have no CLI switches.
+The CLI rejects negative or NaN temperature, zero top-k/max-tokens and non-finite or out-of-range top-p during argument parsing, before loading a model; positive-infinity temperature remains accepted. It submits one prompt, prints continuation text and propagates construction/generation errors. It does not apply a chat template. Batch input, token-ID prompts, penalties, `ignore_eos`, engine options, dtype and GPU selection have no CLI switches.
 
 ## Rust API
 
@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
 
 This version's output field is `seq_id`, not v0.2.0's `request_id`. Supply one `SamplingParams` for every prompt. `Prompt::Text` and `Prompt::TokenIds` are available; outputs contain decoded text and raw completion token IDs. The archived `LLM::generate` has known lifecycle limits, so this example deliberately demonstrates a single call rather than promising the current version's repeated-call guarantees.
 
-Default engine settings are 16,384 batched tokens, 512 sequences, 4,096 context tokens, `gpu_memory_utilization=0.9`, `enforce_eager=true`, and checkpoint dtype. In this source, memory utilization sizes the KV pool from available device memory after warmup; it is not a peak-memory cap. `enforce_eager=false` does not enable implemented CUDA Graphs.
+Default engine settings are 16,384 batched tokens, 512 sequences, 4,096 context tokens, `gpu_memory_utilization=0.9`, `enforce_eager=true`, and checkpoint dtype. In this source, memory utilization sizes the KV pool from available device memory after warmup; it is not a peak-memory cap. `enforce_eager=false` is rejected; CUDA Graphs are unsupported. Token/concurrency budgets and context length must be positive, and the memory fraction must be finite and in `(0, 1]`.
 
 ## Diagnostic examples and common errors
 

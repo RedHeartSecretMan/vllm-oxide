@@ -225,9 +225,15 @@ impl LLM {
             );
         }
 
+        let tokenized_prompts = prompts
+            .iter()
+            .map(|prompt| tokenize_prompt(prompt, &self.tokenizer))
+            .collect::<Result<Vec<_>>>()?;
+        for (position, tokens) in tokenized_prompts.iter().enumerate() {
+            validate_prompt_token_ids(tokens, self.engine.vocab_size(), position)?;
+        }
         let mut prompt_lens: Vec<usize> = Vec::with_capacity(prompts.len());
-        for (prompt, params) in prompts.iter().zip(sampling_params.iter()) {
-            let token_ids = tokenize_prompt(prompt, &self.tokenizer)?;
+        for (token_ids, params) in tokenized_prompts.into_iter().zip(sampling_params.iter()) {
             let len = token_ids.len();
             prompt_lens.push(len);
             self.engine.add_request(token_ids, params.clone());
@@ -306,6 +312,7 @@ impl LLM {
         max_tokens: usize,
     ) -> Result<candle_core::Tensor> {
         let token_ids = tokenize_prompt(prompt, &self.tokenizer)?;
+        validate_prompt_token_ids(&token_ids, self.engine.vocab_size(), 0)?;
         let params = SamplingParams {
             temperature: 0.0,
             max_tokens,
@@ -345,6 +352,19 @@ impl Drop for LLM {
             }
         }
     }
+}
+
+fn validate_prompt_token_ids(tokens: &[u32], vocab_size: usize, position: usize) -> Result<()> {
+    if let Some((offset, token)) = tokens
+        .iter()
+        .enumerate()
+        .find(|(_, token)| u64::from(**token) >= vocab_size as u64)
+    {
+        bail!(
+            "generate: prompt[{position}] token_ids[{offset}]={token} is outside model vocabulary 0..{vocab_size}"
+        );
+    }
+    Ok(())
 }
 
 /// Tokenize a `Prompt` into `Vec<u32>` token IDs.
@@ -459,6 +479,8 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
     use candle_core::cuda::cudarc::driver::sys;
 
     let mut cu_device: sys::CUdevice = 0;
+    // SAFETY: the output points to a live CUdevice; CUDA was initialized by
+    // Device construction, and the status is checked before using the value.
     let result = unsafe { sys::cuDeviceGet(&mut cu_device, 0) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!(
@@ -469,6 +491,8 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
 
     let mut major: i32 = 0;
     let mut minor: i32 = 0;
+    // SAFETY: both output pointers are valid stack i32 values, and cu_device
+    // came from the successful driver query above. The status is checked.
     let result = unsafe { sys::cuDeviceComputeCapability(&mut major, &mut minor, cu_device) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!(
@@ -579,6 +603,8 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
     use candle_core::cuda::cudarc::driver::sys;
     let mut free: usize = 0;
     let mut total: usize = 0;
+    // SAFETY: initialization has established the current CUDA context; both
+    // outputs are live size_t-compatible usize values. The status is checked.
     let result = unsafe { sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!("cuMemGetInfo_v2 failed with error code {}", result as i32);
@@ -590,6 +616,16 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_prompt_ids_are_rejected_before_gpu_embedding() {
+        validate_prompt_token_ids(&[0, 99], 100, 0).unwrap();
+        for token in [100, 101, u32::MAX] {
+            let error = validate_prompt_token_ids(&[1, token], 100, 2).unwrap_err();
+            assert!(error.to_string().contains("prompt[2] token_ids[1]"));
+            assert!(error.to_string().contains("outside model vocabulary"));
+        }
+    }
 
     mod engine_options {
         use super::*;

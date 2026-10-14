@@ -5,8 +5,12 @@
 //! it, verifies their SHA-256 digests, and writes them to a local cache
 //! directory.
 
-use std::io::Read;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static DOWNLOAD_NONCE: AtomicU64 = AtomicU64::new(0);
 
 use anyhow::{Context, Result};
 
@@ -53,11 +57,16 @@ pub fn download_release(
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("parsing manifest.json")?;
 
+    for fixture in &manifest.fixtures {
+        validate_fixture_name(&fixture.filename)?;
+    }
+    validate_cache_path(cache_dir)?;
+
     // 3. Create cache dir and write manifest.
     std::fs::create_dir_all(cache_dir)
         .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
     let manifest_path = cache_dir.join("manifest.json");
-    std::fs::write(&manifest_path, &manifest_bytes)?;
+    write_cache_file(&manifest_path, &manifest_bytes)?;
 
     // 4. Download and verify each fixture.
     for fixture in &manifest.fixtures {
@@ -80,7 +89,7 @@ pub fn download_release(
         }
 
         tracing::info!(
-            "downloading {} ({} bytes)",
+            "downloading {} ({} tokens)",
             fixture.filename,
             fixture.num_tokens
         );
@@ -95,7 +104,7 @@ pub fn download_release(
             );
         }
 
-        std::fs::write(&dest_path, &bytes)
+        write_cache_file(&dest_path, &bytes)
             .with_context(|| format!("writing {}", dest_path.display()))?;
     }
 
@@ -119,6 +128,7 @@ pub fn load_from_dir(dir: &Path) -> Result<(Manifest, PathBuf)> {
 /// Verify all fixture files in a directory match their expected SHA-256.
 fn verify_fixture_hashes(dir: &Path, fixtures: &[crate::types::FixtureMetadata]) -> Result<()> {
     for fixture in fixtures {
+        validate_fixture_name(&fixture.filename)?;
         let path = dir.join(&fixture.filename);
         if !path.exists() {
             anyhow::bail!("fixture file not found: {}", path.display());
@@ -154,8 +164,7 @@ fn find_asset_url(assets: &[serde_json::Value], filename: &str) -> Result<String
 /// Download raw bytes from a URL using ureq.
 ///
 /// Uses `Accept: application/octet-stream` for GitHub asset downloads.
-/// Streams the response into a Vec<u8> while computing SHA-256 on the fly
-/// (though the caller also verifies).
+/// Streams the response into a Vec<u8>; the caller verifies its SHA-256 digest.
 fn download_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
     let mut response = agent
         .get(url)
@@ -177,4 +186,112 @@ fn download_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("reading response body from {url}"))?;
 
     Ok(buf)
+}
+
+fn validate_fixture_name(name: &str) -> Result<()> {
+    if !name.ends_with(".safetensors")
+        || name.len() == ".safetensors".len()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        anyhow::bail!("unsafe golden fixture filename: {name:?}");
+    }
+    Ok(())
+}
+
+fn validate_cache_path(path: &Path) -> Result<()> {
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("symlink in golden cache path: {}", ancestor.display());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+// Atomic replacement never follows an existing destination symlink or truncates
+// an inode shared with a hardlink outside the cache.
+fn write_cache_file(destination: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = destination.parent().context("cache file has no parent")?;
+    validate_cache_path(parent)?;
+    for _ in 0..1024 {
+        let temporary = parent.join(format!(
+            ".download-{}-{}",
+            std::process::id(),
+            DOWNLOAD_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let result = (|| {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary, destination)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        return result;
+    }
+    anyhow::bail!("could not allocate temporary golden download");
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_names_cannot_escape_or_alias_the_cache_manifest() {
+        for name in [
+            "../outside.safetensors",
+            "/outside.safetensors",
+            "a/b.safetensors",
+            "a\\b.safetensors",
+            "C:outside.safetensors",
+            "manifest.json",
+            ".safetensors",
+        ] {
+            assert!(validate_fixture_name(name).is_err(), "{name}");
+        }
+        validate_fixture_name("canonical_01.transformers.safetensors").unwrap();
+    }
+
+    #[test]
+    fn cache_replacement_does_not_write_through_symlinks_or_hardlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let outside = root.path().join("outside");
+        std::fs::write(&outside, b"keep").unwrap();
+        for symlink in [true, false] {
+            let destination = cache.join("fixture.safetensors");
+            if symlink {
+                std::os::unix::fs::symlink(&outside, &destination).unwrap();
+            } else {
+                std::fs::hard_link(&outside, &destination).unwrap();
+            }
+            write_cache_file(&destination, b"fixture").unwrap();
+            assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+            assert_eq!(std::fs::read(&destination).unwrap(), b"fixture");
+            std::fs::remove_file(destination).unwrap();
+        }
+        let link = root.path().join("linked-cache");
+        std::os::unix::fs::symlink(&cache, &link).unwrap();
+        assert!(write_cache_file(&link.join("forbidden"), b"no").is_err());
+        assert!(!cache.join("forbidden").exists());
+    }
 }

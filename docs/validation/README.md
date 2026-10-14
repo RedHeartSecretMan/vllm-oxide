@@ -16,17 +16,39 @@ The original v0.1.0 record was **not fully passing**. A documentation refresh do
 
 The five canonical prompt specifications expand to eight groups because `canonical_05` contains four separate sub-prompts. Both oracle adapters process that batch as four requests; Transformers uses a padded batch, not one concatenated sequence.
 
-## What the historical tools actually check
+## Original protocol and maintained tool behavior
 
-- Both oracles use BF16 model weights/computation. Stored full/top-5 logits are FP32 transport values. Transformers uses SDPA; vLLM uses eager generation and raw-logit capture.
-- Schema 1 records model revision, oracle versions, fixture SHA-256 values and a single calibrated `atol`. Calibration uses twice the maximum absolute difference across paired canonical logits and shared lengths, without rtol or a teacher-forced same-prefix guarantee.
-- The Rust runner loads only `canonical.jsonl`, so regression IDs and expanded batch IDs may be absent and skipped. It iterates canonical fixtures from both oracle identities rather than enforcing a single reference-only coverage set.
-- L1 compares token IDs and lengths, with separately reported near-tie and regression exclusions. Its near-tie helper only recognizes the expected token when it is the generated row's top-1, despite the historical comment describing top-2; this refresh documents the implementation without changing it.
-- L2 compares rows whose current generated token equals the fixture token. It does not stop after the first earlier divergence, so equal tokens later do not prove an identical prefix. Rows with different tokens are omitted; zero compared elements can still yield a passing result.
-- The CLI can log generation errors and continue. Report aggregation uses `all()` over collected results, so an empty/incomplete report can pass. A zero exit code therefore does not prove full coverage.
-- `--debug` adds an L3 placeholder message. Its `passed=true` field is a stub, not measured activation accuracy, and L3 does not enter the overall verdict.
+- Both oracles use BF16 model execution and save FP32 logits. Schema 1 records
+  model revision, oracle versions, fixture hashes and one calibrated `atol`.
+  Calibration uses twice the paired canonical maximum on shared output lengths,
+  without a teacher-forced same-prefix guarantee or a modern KL budget.
+- The original runner loaded only canonical prompt IDs, skipped missing
+  regression/batch members and could continue after generation errors. Empty
+  `all()` reports could pass. The maintained runner loads both corpora, expands
+  batch members, preflights every declared fixture, propagates failures and
+  rejects empty or incomplete declared comparisons.
+- Each fixture is captured as a separate diagnostic request; expanding its ID
+  does not reconstruct the oracle's original batched execution geometry.
+- L1 retains legacy near-tie and regression exclusions, counted separately from
+  exact matches. The maintained helper recognizes an expected runner-up only
+  when the actual token is candidate argmax and the top-two gap is strictly
+  below the original epsilon (default `2 × atol`). The six-case regression skip
+  map is unchanged. This is not the modern reference-choice-loss criterion, and
+  oracle disagreement does not itself prove nondeterminism.
+- The original L2 filtered rows by current-token equality, which could compare
+  different causal histories. The maintained comparison includes the first
+  divergent row and excludes every subsequent row. Empty/malformed geometry,
+  invalid tolerance and non-finite compared values cannot establish a PASS.
+- L3 activation comparison remains unimplemented; `--debug` is now rejected
+  explicitly. Mutually exclusive layer flags are rejected, and a declared
+  partial run is evidence only for its selected layer.
 
-These limitations explain why this historical report must not be presented as the stricter v0.2.0 acceptance contract. Read the [comparison README](../../crates/vllm-oxide-test/README.md) for commands and reporting details; keep expected coverage, actual coverage, mismatches, exclusions and errors visible when investigating old runs.
+These repairs improve the comparison tool; they do not rerun the original
+fixtures or convert historical failures into a new accepted result. Schema 1
+still lacks the current protocol's independent expected registry, full-source
+provenance and complete L0/L1/L2 evidence. See the
+[comparison guide](../../crates/vllm-oxide-test/README.md) and
+[maintenance record](../version-doc-update.md).
 
 ## Memory and performance
 

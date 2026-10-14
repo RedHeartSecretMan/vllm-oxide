@@ -113,6 +113,8 @@ pub fn load_weights_vb(
             "resolved zero safetensors shards from the requested source"
         ));
     }
+    // SAFETY: checkpoint files must remain read-only for the mapped builder's
+    // lifetime, as required by the module's mmap contract.
     let tensors = unsafe { MmapedSafetensors::multi(&paths)? };
     let backend: Box<dyn SimpleBackend + 'static> = Box::new(tensors);
     Ok(VarBuilderArgs::new_with_args(backend, dtype, device))
@@ -134,11 +136,15 @@ fn resolve_local_shards(dir: &Path) -> Result<Vec<PathBuf>> {
 
     let dir_entries = std::fs::read_dir(dir)
         .with_context(|| format!("reading checkpoint dir {}", dir.display()))?;
-    let mut shards: Vec<PathBuf> = dir_entries
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("safetensors"))
-        .collect();
+    let mut shards = Vec::new();
+    for entry in dir_entries {
+        let entry =
+            entry.with_context(|| format!("reading checkpoint entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("safetensors") {
+            shards.push(path);
+        }
+    }
     shards.sort();
 
     if shards.is_empty() {
@@ -162,6 +168,22 @@ struct SafetensorsIndex {
 /// referenced by `weight_map`, and return absolute paths rooted at `dir`.
 /// Errors if `weight_map` is empty or any referenced shard is missing.
 fn parse_index_shards(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
+    let unique = parse_index_shard_names(index_path)?;
+    let paths: Vec<PathBuf> = unique.into_iter().map(|name| dir.join(name)).collect();
+    for p in &paths {
+        if !p.is_file() {
+            return Err(anyhow!(
+                "shard {} is referenced by {} but is not present on disk \
+                 (partial download?)",
+                p.display(),
+                index_path.display()
+            ));
+        }
+    }
+    Ok(paths)
+}
+
+fn parse_index_shard_names(index_path: &Path) -> Result<Vec<String>> {
     let bytes =
         std::fs::read(index_path).with_context(|| format!("reading {}", index_path.display()))?;
     let parsed: SafetensorsIndex = serde_json::from_slice(&bytes)
@@ -178,18 +200,20 @@ fn parse_index_shards(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
         ));
     }
 
-    let paths: Vec<PathBuf> = unique.into_iter().map(|name| dir.join(name)).collect();
-    for p in &paths {
-        if !p.is_file() {
+    for name in &unique {
+        let path = Path::new(name);
+        if name.is_empty()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
             return Err(anyhow!(
-                "shard {} is referenced by {} but is not present on disk \
-                 (partial download?)",
-                p.display(),
+                "safetensors shard `{name}` from {} points outside checkpoint directory",
                 index_path.display()
             ));
         }
     }
-    Ok(paths)
+    Ok(unique)
 }
 
 /// Hub-path shard resolution. Honours `HF_HUB_OFFLINE` (online path will hang
@@ -214,13 +238,14 @@ fn resolve_hub_shards_online(repo: &str, revision: &str) -> Result<Vec<PathBuf>>
     ));
 
     match repo_handle.get("model.safetensors.index.json") {
-        Ok(index_path) => {
-            let dir = index_path
-                .parent()
-                .ok_or_else(|| anyhow!("cached index path has no parent dir"))?
-                .to_path_buf();
-            parse_index_shards(&index_path, &dir)
-        }
+        Ok(index_path) => parse_index_shard_names(&index_path)?
+            .into_iter()
+            .map(|filename| {
+                repo_handle.get(&filename).with_context(|| {
+                    format!("downloading indexed safetensors shard `{filename}` from Hub")
+                })
+            })
+            .collect(),
         Err(_) => {
             let p = repo_handle
                 .get("model.safetensors")
@@ -349,6 +374,15 @@ mod tests {
         }
 
         #[test]
+        fn bare_layout_ignores_directories_named_like_shards() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(tmp.path().join("backup.safetensors")).unwrap();
+            write_safetensors_fixture(&tmp.path().join("part.safetensors"), "w", &[1.0]);
+            let paths = resolve_local_shards(tmp.path()).unwrap();
+            assert_eq!(paths, vec![tmp.path().join("part.safetensors")]);
+        }
+
+        #[test]
         fn empty_dir_errors_with_looked_in_message() {
             let tmp = tempfile::tempdir().unwrap();
             let err = resolve_local_shards(tmp.path()).unwrap_err();
@@ -405,6 +439,33 @@ mod tests {
             let path = dir.join("model.safetensors.index.json");
             std::fs::write(&path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
             path
+        }
+
+        #[test]
+        fn rejects_index_paths_outside_the_checkpoint_before_loading_or_fetching() {
+            let tmp = tempfile::tempdir().unwrap();
+            for name in [
+                "",
+                "../outside.safetensors",
+                "/absolute.safetensors",
+                "a/../../outside.safetensors",
+            ] {
+                let index_path =
+                    write_index(tmp.path(), HashMap::from([("w".into(), name.into())]));
+                let error = parse_index_shard_names(&index_path).unwrap_err();
+                assert!(error.to_string().contains("outside checkpoint directory"));
+            }
+            let index_path = write_index(
+                tmp.path(),
+                HashMap::from([
+                    ("a".into(), "nested/shard.safetensors".into()),
+                    ("b".into(), "nested/shard.safetensors".into()),
+                ]),
+            );
+            assert_eq!(
+                parse_index_shard_names(&index_path).unwrap(),
+                vec!["nested/shard.safetensors"]
+            );
         }
 
         #[test]

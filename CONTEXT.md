@@ -48,8 +48,8 @@ _Avoid_: model runner (collapsed into EngineCore for single-GPU scope).
 Owns physical `Block`s (`block_id`, `ref_count`, `hash`, `token_ids`), the free-list deque, the used-set, and the prefix-cache hashtable (`hash_to_block_id`). Mirrors nano-vllm's xxhash-chained prefix-cache algorithm. CoW semantics for shared prefix blocks. `kvcache_block_size = 256` (constant).
 _Avoid_: block manager (V0 term; V1 split BlockPool from KVCacheManager).
 
-**KVCacheManager**:
-The **only** Scheduler-facing seam over `BlockPool` + the physical `PagedKVCache`. The Scheduler never imports `BlockPool` or `attention::PagedKVCache` directly. Owns the mapping from logical block tables to physical block ids and paged-cache slot indices.
+**KvCacheManager**:
+The scheduler-facing seam over `BlockPool` and the physical `PagedKVCache`. The Scheduler never imports `BlockPool` or `attention::PagedKVCache` directly. Owns the mapping from logical block tables to physical block ids and paged-cache slot indices.
 _Avoid_: KV cache adapter, block-to-slot mapper.
 
 **Scheduler**:
@@ -71,7 +71,7 @@ _Avoid_: attention context, batch metadata.
 ## API surface
 
 **LLM::generate**:
-The single public function — `generate(&mut self, prompts: &[Prompt], sampling_params: &[SamplingParams]) -> Result<Vec<RequestOutput>>`. Internally loops `step()` until `scheduler.is_finished()`, then detokenizes. Mirrors nano-vllm `LLM.generate`.
+The intended public generation entrypoint, `generate(&mut self, prompts: &[Prompt], sampling_params: &[SamplingParams]) -> Result<Vec<RequestOutput>>`. Internally loops `step()` until `scheduler.is_finished()`, then detokenizes. Mirrors nano-vllm `LLM.generate`; this historical crate also exposes internal and diagnostic APIs.
 _Avoid_: run, infer, complete, __call__.
 
 **Prompt**:
@@ -79,7 +79,7 @@ Input enum: `Text(String)` for natural-language prompts, `TokenIds(Vec<u32>)` fo
 _Avoid_: input, query, user message.
 
 **RequestOutput**:
-Per-request result: `{ seq_id: usize, text: String, token_ids: Vec<u32> }`. Both decoded text and raw token IDs are always provided so callers can post-process tokens without re-tokenizing.
+Per-request result: `{ seq_id: usize, text: String, token_ids: Vec<u32>, finished: bool }`. Both decoded text and raw token IDs are always provided so callers can post-process tokens without re-tokenizing.
 _Avoid_: generation result, completion output.
 
 **SamplingParams**:
@@ -109,15 +109,15 @@ The process of measuring `max(|transformers_logits - vllm_logits| per-element)` 
 _Avoid_: tolerance derivation, threshold computation.
 
 **Near-tie skip (L1)**:
-When vllm-oxide's argmax token differs from the reference oracle's, the raw logits are checked: the intended policy was to skip a close top-2 candidate with ε = atol × 2.0. The archived helper actually recognizes only expected top-1 in the generated logits. Treat its exclusions separately from exact matches; the [validation guide](docs/validation/README.md) explains the implementation limit. Used for canonical prompts (full logits available).
+When vllm-oxide's argmax token differs from the reference, the maintained helper requires the actual token to be the candidate argmax and the expected token to belong to its top two, including ties. A top-two gap strictly below ε is a legacy near-tie exclusion; the default ε remains atol × 2.0. The original helper failed to recognize the reference runner-up. Exclusions remain separate from exact matches; see [validation](docs/validation/README.md). Used for canonical prompts with full logits.
 _Avoid_: epsilon skip, close-call skip.
 
 **Skip map (L1 regression)**:
-For regression prompts (no full logits), positions where vLLM's token also differs from the reference are recorded in a skip map during calibration. vllm-oxide's L1 comparison skips these positions — they represent inherent BF16 non-determinism, not implementation bugs. No tunable hyperparameter.
+For regression prompts (no full logits), calibration records positions where vLLM's token also differs from the reference. The historical L1 comparator excludes those positions. Oracle disagreement alone does not establish nondeterminism or rule out an implementation defect; exclusions are recorded separately from passing comparisons.
 _Avoid_: exclusion set, known-mismatch list.
 
 **Same-prefix comparison (L2)**:
-The intended strategy compares logits on a common prefix to avoid different computational contexts after token divergence. The archived `compare_l2` actually filters each row by current-token equality and does not stop after earlier divergence. Later matching tokens therefore do not establish a shared prefix; see [validation](docs/validation/README.md).
+The maintained `compare_l2` compares complete shared-history rows through the first divergent token, including that row, then excludes the later suffix. The original implementation instead filtered by current-token equality and could compare different histories; see [validation](docs/validation/README.md).
 _Avoid_: prefix-aware L2, context-aware comparison.
 
 **Release gate vs CI gate**:

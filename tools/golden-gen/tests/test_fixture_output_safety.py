@@ -461,3 +461,67 @@ def test_atomic_publication_error_does_not_overwrite_existing_target(tmp_path, m
         write_small(target)
     assert target.read_bytes() == b"existing protected data"
     assert list(tmp_path.glob(".*.tmp")) == []
+
+
+@pytest.mark.parametrize("category", ["canonical", "regression"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_oracle_logits_are_rejected_before_any_fixture_is_written(
+    tmp_path, category, value
+):
+    from golden_gen.config import VOCAB_SIZE
+
+    class NonfiniteOracle(CountingOracle):
+        def generate(self, spec):
+            self.calls += 1
+            if category == "canonical":
+                logits = np.zeros((1, VOCAB_SIZE), dtype=np.float32)
+                logits[0, 0] = value
+                return [
+                    OracleResult.for_canonical(
+                        np.array([1], dtype=np.int64), logits, n_prompt_tokens=1
+                    )
+                ]
+            results = super().generate(spec)
+            results[0].top5_logits[0, 0] = value
+            return results
+
+    spec = PromptSpec(id="case", category=category, prompt="x", description="test")
+    with pytest.raises(ValueError, match="non-finite logits"):
+        run_all([NonfiniteOracle()], [spec], tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("rows", [None, [], [{0: 1.0, 1: 0.0}] * 2])
+def test_vllm_full_logit_rows_must_match_generated_token_count(rows):
+    from types import SimpleNamespace
+
+    from golden_gen.oracles.vllm_oracle import _extract_full_logits
+
+    with pytest.raises(RuntimeError, match="logprob rows"):
+        _extract_full_logits(SimpleNamespace(logprobs=rows), 1, 2)
+
+
+def test_vllm_full_logit_negative_token_cannot_alias_the_last_vocabulary_slot():
+    from types import SimpleNamespace
+
+    from golden_gen.oracles.vllm_oracle import _extract_full_logits
+
+    rows = [{0: SimpleNamespace(logprob=1.0), -1: SimpleNamespace(logprob=0.0)}]
+    with pytest.raises(RuntimeError, match="outside the declared vocabulary"):
+        _extract_full_logits(SimpleNamespace(logprobs=rows), 1, 2)
+
+
+@pytest.mark.parametrize("rows", [None, [], [{0: None, 1: None, 2: None, 3: None}]])
+def test_vllm_regression_rejects_missing_rows_and_incomplete_top5(rows):
+    from types import SimpleNamespace
+
+    from golden_gen.oracles.vllm_oracle import VllmOracle
+
+    output = SimpleNamespace(
+        prompt_token_ids=[1],
+        outputs=[SimpleNamespace(token_ids=[1], logprobs=rows)],
+    )
+    oracle = VllmOracle.__new__(VllmOracle)
+    oracle.llm = SimpleNamespace(generate=lambda *_args: [output])
+    with pytest.raises(RuntimeError, match="logprob rows|regression logits"):
+        oracle._generate_regression(["x"], None)

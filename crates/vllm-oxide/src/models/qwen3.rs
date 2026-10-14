@@ -42,6 +42,12 @@ pub struct Qwen3Config {
     pub tie_word_embeddings: Option<bool>,
     #[serde(default)]
     pub attention_bias: Option<bool>,
+    #[serde(default)]
+    pub rope_scaling: Option<serde_json::Value>,
+    #[serde(default)]
+    pub use_sliding_window: bool,
+    #[serde(default)]
+    pub layer_types: Option<Vec<String>>,
 }
 
 impl Qwen3Config {
@@ -99,6 +105,31 @@ impl Qwen3Config {
             .checked_mul(2)
             .ok_or_else(|| anyhow!("Qwen3Config: fused gate/up geometry overflows usize"))?;
         self.validate_cache_geometry(dtype, 1)?;
+        if self.rope_scaling.is_some() {
+            anyhow::bail!(
+                "Qwen3Config: rope_scaling is unsupported; use the default full rotary embedding"
+            );
+        }
+        if self.use_sliding_window {
+            anyhow::bail!(
+                "Qwen3Config: use_sliding_window is unsupported; expected full attention"
+            );
+        }
+        if let Some(layer_types) = &self.layer_types {
+            if layer_types.len() != self.num_hidden_layers
+                || layer_types.iter().any(|kind| kind != "full_attention")
+            {
+                anyhow::bail!(
+                    "Qwen3Config: layer_types must describe one full_attention entry per layer"
+                );
+            }
+        }
+        if self.hidden_act != "silu" {
+            anyhow::bail!(
+                "Qwen3Config: hidden_act `{}` is unsupported; expected silu",
+                self.hidden_act
+            );
+        }
         if !self.rope_theta.is_finite() || self.rope_theta <= 0.0 {
             anyhow::bail!("Qwen3Config: rope_theta must be finite and greater than zero");
         }
@@ -140,7 +171,7 @@ impl Qwen3Config {
     }
 
     fn has_qkv_bias(&self) -> bool {
-        self.attention_bias.unwrap_or(true)
+        self.attention_bias.unwrap_or(false)
     }
     fn tie_word_embeddings(&self) -> bool {
         self.tie_word_embeddings.unwrap_or(false)
@@ -216,24 +247,21 @@ impl Qwen3Attention {
         let o_spec = LinearSpec {
             in_features: nh * hd,
             out_features_per_shard: config.hidden_size,
-            bias: false,
+            bias,
         };
-        let (q_norm, k_norm) = if !bias {
-            (
-                Some(RMSNorm::from_vb(
-                    vb.pp("self_attn").pp("q_norm"),
-                    hd,
-                    config.rms_norm_eps,
-                )?),
-                Some(RMSNorm::from_vb(
-                    vb.pp("self_attn").pp("k_norm"),
-                    hd,
-                    config.rms_norm_eps,
-                )?),
-            )
-        } else {
-            (None, None)
-        };
+        // Qwen3 normalizes Q and K independently of projection biases.
+        let (q_norm, k_norm) = (
+            Some(RMSNorm::from_vb(
+                vb.pp("self_attn").pp("q_norm"),
+                hd,
+                config.rms_norm_eps,
+            )?),
+            Some(RMSNorm::from_vb(
+                vb.pp("self_attn").pp("k_norm"),
+                hd,
+                config.rms_norm_eps,
+            )?),
+        );
         let rotary_emb = RotaryEmbedding::new(
             hd,
             hd,
@@ -526,6 +554,103 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsupported_activation_before_weight_loading() {
+        let mut config = valid_small_config();
+        for activation in ["gelu", "relu", "", "SiLU"] {
+            config.hidden_act = activation.to_string();
+            let error = config.validate(candle_core::DType::BF16).unwrap_err();
+            assert!(error.to_string().contains("hidden_act"), "{error}");
+        }
+        config.hidden_act = "silu".to_string();
+        config.validate(candle_core::DType::BF16).unwrap();
+    }
+
+    #[test]
+    fn rejects_unimplemented_attention_and_rotary_modes() {
+        let dtype = candle_core::DType::BF16;
+        let mut config = valid_small_config();
+        config.rope_scaling = Some(serde_json::json!({"rope_type":"linear", "factor":2.0}));
+        assert!(config
+            .validate(dtype)
+            .unwrap_err()
+            .to_string()
+            .contains("rope_scaling"));
+        config.rope_scaling = None;
+        config.use_sliding_window = true;
+        assert!(config
+            .validate(dtype)
+            .unwrap_err()
+            .to_string()
+            .contains("use_sliding_window"));
+        config.use_sliding_window = false;
+        for kinds in [
+            vec![],
+            vec!["sliding_attention".into()],
+            vec!["full_attention".into(); 2],
+        ] {
+            config.layer_types = Some(kinds);
+            assert!(config
+                .validate(dtype)
+                .unwrap_err()
+                .to_string()
+                .contains("layer_types"));
+        }
+        config.layer_types = Some(vec!["full_attention".into()]);
+        config.validate(dtype).unwrap();
+    }
+
+    #[test]
+    fn attention_bias_defaults_to_false() {
+        let mut config = valid_small_config();
+        assert!(!config.has_qkv_bias());
+        config.attention_bias = Some(true);
+        assert!(config.has_qkv_bias());
+    }
+
+    #[test]
+    fn qk_normalization_and_output_bias_follow_qwen3_contract() {
+        let device = Device::Cpu;
+        let mut config = valid_small_config();
+        config.hidden_size = 2;
+        config.num_attention_heads = 1;
+        config.num_key_value_heads = 1;
+        config.head_dim = Some(2);
+        for bias in [false, true] {
+            config.attention_bias = Some(bias);
+            let mut tensors = std::collections::HashMap::new();
+            for name in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                tensors.insert(
+                    format!("self_attn.{name}.weight"),
+                    Tensor::zeros((2, 2), candle_core::DType::F32, &device).unwrap(),
+                );
+                if bias {
+                    tensors.insert(
+                        format!("self_attn.{name}.bias"),
+                        Tensor::ones(2, candle_core::DType::F32, &device).unwrap(),
+                    );
+                }
+            }
+            for name in ["q_norm", "k_norm"] {
+                tensors.insert(
+                    format!("self_attn.{name}.weight"),
+                    Tensor::ones(2, candle_core::DType::F32, &device).unwrap(),
+                );
+            }
+            let vb = VarBuilder::from_tensors(tensors, candle_core::DType::F32, &device);
+            let paged_kv = Arc::new(Mutex::new(
+                PagedKVCache::new(1, 1, 256, 1, 2, candle_core::DType::F32, &device).unwrap(),
+            ));
+            let attn_meta = Arc::new(Mutex::new(build_prefill_metadata(&[1], &[1], &[0])));
+            let attention =
+                Qwen3Attention::from_vb(vb, &config, &device, paged_kv, attn_meta, 0).unwrap();
+            assert!(attention.q_norm.is_some());
+            assert!(attention.k_norm.is_some());
+            assert_eq!(attention.qkv_proj.bias().is_some(), bias);
+            assert_eq!(attention.o_proj.bias().is_some(), bias);
+        }
+    }
+
+    #[test]
     fn validates_head_geometry_without_assuming_hidden_equals_attention_width() {
         let mut config = valid_small_config();
         config.hidden_size = 65;
@@ -676,6 +801,15 @@ mod tests {
             "num_hidden_layers",
             serde_json::json!(usize::MAX / (2 * 256 * 2 * 16 * 2 * 100) + 1),
         ));
+        cases.extend([
+            ("hidden_act", serde_json::json!("gelu")),
+            (
+                "rope_scaling",
+                serde_json::json!({"rope_type":"linear", "factor":2.0}),
+            ),
+            ("use_sliding_window", serde_json::json!(true)),
+            ("layer_types", serde_json::json!(["sliding_attention"])),
+        ]);
         for (field, value) in cases {
             let tmp = tempfile::tempdir().unwrap();
             let mut config = base.clone();

@@ -44,4 +44,4 @@ The historical CLI has **no `cuda` feature of its own**; the qualified `vllm_oxi
 
 CPU test success does not establish GPU numerical correctness. The [validation guide](docs/validation/README.md) preserves the actual historical failures, comparison coverage limitations and the absence of a validated performance baseline.
 
-The workspace declares [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) licensing. Please follow the [security policy](SECURITY.md) when reporting vulnerabilities.
+The workspace declares [Apache-2.0](LICENSE) licensing. Please follow the [security policy](SECURITY.md) when reporting vulnerabilities.

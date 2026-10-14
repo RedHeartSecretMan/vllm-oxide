@@ -4,7 +4,7 @@
 
 This developer tool generates paired fixtures from **Transformers BF16/SDPA** and **vLLM BF16**, then calibrates the historical schema-1 absolute logit tolerance. The Rust runtime does not depend on this Python package. Real oracle inference is a manual GPU operation; CPU tests and synthetic fixtures validate tooling only.
 
-The guide describes the v0.1.0 source. For new acceptance work, use the [v0.2.0 tooling](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/tools/golden-gen/README.md). The archived generator can return success after an oracle failure and can reuse existing output/tolerance; inspect actual coverage and logs rather than treating exit code zero as acceptance.
+The guide describes the maintained v0.1.0 source. For new acceptance work, use the [v0.2.0 tooling](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/tools/golden-gen/README.md). Generation fails when any requested oracle/prompt or oracle cleanup fails, and publishes a manifest only after successful completion. It can reuse existing output/tolerance after success; inspect actual coverage and logs before interpreting the historical calibration as numerical acceptance.
 
 ## Environment and installation
 
@@ -64,7 +64,7 @@ Generation loads vLLM first, then Transformers, closing each adapter after use. 
 
 There are no model/revision/seed/dtype/backend overrides on this CLI. They come from `src/golden_gen/config.py` and adapter source. `--manifest-dir` belongs to `calibrate`, while `--output-dir` belongs to `generate`.
 
-The generator merges existing manifest entries by `(oracle, prompt_id)` and may preserve an existing positive tolerance. Exceptions during an adapter's generation are printed and caught, after which the command can write a partial manifest and return zero. Calibration skips missing pairs/full logits and can return zero tolerance if no usable pair exists. These behaviors are historical implementation limits; use complete, fresh data and inspect coverage before drawing conclusions.
+On success, the generator merges existing manifest entries by `(oracle, prompt_id)` and may preserve an existing positive tolerance. Oracle construction, generation and cleanup failures return nonzero without writing a new or replacement manifest. Existing manifest bytes remain unchanged on such a failed run and cannot stand in for current completion; completed fixture files may remain for diagnosis. Calibration still skips missing pairs/full logits and can return zero tolerance if no usable pair exists. Use complete, fresh data and inspect coverage before drawing conclusions.
 
 ## Fixed model, prompts and oracle paths
 
@@ -116,7 +116,7 @@ The [v0.1.0 release](../../docs/releases/v0.1.0.en.md) retains the original `man
 
 Generated default `output/`, `.venv/`, bytecode and Python tool caches are ignored by this directory's `.gitignore`. An arbitrary custom output directory is not automatically ignored by name. Choose `/tmp` or another external location for experiments, never overwrite original retained evidence, and keep synthetic/real outputs separate.
 
-After retaining any needed logs and results, remove only the explicit scratch directory for that run. Environments and caches can be recreated, but model caches and original release evidence may belong to other work. Keep raw evidence packages local. The old [upload wrapper](../README.md#historical-release-wrapper) is historical code with remote side effects and is not part of this documentation workflow.
+After retaining any needed logs and results, remove only the explicit scratch directory for that run. Environments and caches can be recreated, but model caches and original release evidence may belong to other work. Keep raw evidence packages local. The maintained [local validation wrapper](../README.md#historical-release-wrapper) creates a fresh temporary GPU environment and fixture directory, retains stage logs, uses CUDA features for the Rust comparison and performs no remote publication.
 
 ## Source map
 
