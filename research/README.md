@@ -14,7 +14,7 @@ Use the [main-workspace getting-started guide](../docs/getting-started.md) to ru
 
 ## Reproduce and report research
 
-Start from the prototype's pinned dependency commit and read its build/run requirements. Its independent workspace and committed `Cargo.lock` support a direct run from this checkout. CPU tests exercise the complete-output validator. Keep generated build artifacts and logs local. Report the exact source, dependency resolution, GPU/driver/Toolkit, full stdout and exit code; the README's old test-machine reference is not proof of a current rerun.
+Start with the prototype's pinned dependency commit and build requirements. Its own workspace and committed `Cargo.lock` let you run it directly from this checkout. CPU tests cover the complete-output validator. Keep build artifacts and logs local, and report each run's source, resolved dependencies, GPU/driver/Toolkit, stdout, and exit code. The earlier test-machine description refers to the historical experiment.
 
 A new experiment should name its question, entrypoint, fixed inputs, observable success criteria and limits. Synthetic shape and complete finite-output checks do not establish model numerical equivalence. Promote a useful conclusion through a reviewed implementation and relevant engine tests, with any numerical measurements attached to their actual source identity.
 

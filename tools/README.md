@@ -2,7 +2,7 @@
 
 [Documentation](../docs/README.md) · [Development](../docs/development.md) · [Validation](../docs/validation/README.md)
 
-These tools generate and inspect evidence; they are not an inference server or the supported Rust API. The RC contains the following actual entrypoints. Later `public_gpu_smoke`, release source-role and direct-NVML tools are absent from this version.
+Use the RC tools below to generate and inspect validation evidence. This version predates `public_gpu_smoke`, release source-role adapters, and direct-NVML tools.
 
 | Entrypoint | Purpose | Execution and result |
 |---|---|---|
@@ -14,7 +14,7 @@ These tools generate and inspect evidence; they are not an inference server or t
 
 ## Choose the correct tool
 
-- Run Qwen3 with the public [CLI/API](../docs/getting-started.md), not the validation harness.
+- To run Qwen3, use the public [CLI/API](../docs/getting-started.md).
 - Develop the harness through its [complete CPU tests](golden-gen/README.md#development-setup-and-cpu-checks). A synthetic dry-run never establishes model accuracy.
 - Inspect numerical evidence with the [layered contract](../docs/validation/layered-accuracy-contract.md); schema-v4 data cannot satisfy schema5 layered acceptance.
 - Use [diagnostic scripts](golden-gen/scripts/README.md) to answer their fixed arithmetic/localization questions, preserving their nonaccepting status.

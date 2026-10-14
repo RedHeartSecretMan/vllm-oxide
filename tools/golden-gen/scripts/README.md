@@ -2,7 +2,7 @@
 
 [Tool index](../../README.md) · [golden-gen](../README.md) · [Research](../../../research/README.md)
 
-These three scripts are diagnostic-only. They produce no release acceptance and never select or weaken numerical budgets. Read their exact fixed inputs before running them. Later matrix/GEMM probes on `main` are not included in this RC.
+These three scripts investigate fixed numerical examples. Read each script's inputs before running it, and treat its output as diagnostic evidence. The scripts neither approve release acceptance nor change numerical budgets. Later matrix/GEMM probes on `main` are outside this RC.
 
 ## Prepare the runtime
 
@@ -66,7 +66,7 @@ After the corresponding original candidate capture is available, comparison runs
     --manifest /absolute/path/to/original/manifest.json
 ```
 
-The comparison checks capture provenance, shapes/dtypes and bit-equivalence of the fixed prefix before printing a diagnostic JSON summary. It does not manufacture candidate traces or new full-model acceptance. `--regression11` is narrower: the original reference fixture has token/top-5 data only, so the checker establishes collection equivalence rather than a full-logit reference L1 comparison. Preserve all original IDs and never use these opened diagnostic cases as a fresh holdout.
+The comparison checks capture provenance, shapes/dtypes, and bit-equivalence of the fixed prefix, then prints a diagnostic JSON summary. Supply the candidate traces separately; this comparison does not collect them or establish full-model acceptance. `--regression11` is narrower: the original reference fixture has token/top-5 data only, so the checker establishes collection equivalence rather than a full-logit reference L1 comparison. Preserve all original IDs and never use these opened diagnostic cases as a fresh holdout.
 
 ## Tests and interpretation
 

@@ -1,14 +1,13 @@
-# golden-gen — Golden Fixture Generator for vllm-oxide
+# golden-gen: RC validation tooling
 
 [Tools](../README.md) · [Documentation](../../docs/README.md) · [Diagnostic scripts](scripts/README.md)
 
-This is the validation package actually shipped in the historical `v0.2.0.rc.1` source. Its unit/adapter/readers are CPU-capable; real model collection and performance require CUDA. The RC's GitHub CI does not run the Python suite automatically. It is maintainer tooling, not a dependency of the public Rust inference API. **RC numerical results retain 18/66 failures and full performance remains incomplete.** See [RC provenance](../../docs/releases/v0.2.0-rc.1.en.md).
+This package provides the validation tools in `v0.2.0.rc.1`. Unit tests, adapters, and readers run on CPU; real model collection and performance measurements require CUDA. Run the Python suite locally, as the RC's GitHub CI does not include it. The Rust inference API has no runtime dependency on this package. The original RC result had 18 failures among 66 numerical cases and incomplete performance validation; see [RC provenance](../../docs/releases/v0.2.0-rc.1.en.md).
 
 Later source-role adapters, direct-NVML memory methods and `public_gpu_smoke` are not present here. New raw evidence stays local. The historical schema5 publication code below is documented for inspection; the source documentation refresh does not invoke it or upload an evidence package.
 
-This harness generates **golden fixture files** for the vllm-oxide project with
-**HuggingFace Transformers** BF16 SDPA as the authoritative Reference oracle and
-**vLLM** BF16 as the Baseline oracle. Transformers supplies expected correctness;
+The harness generates golden fixtures using Hugging Face Transformers BF16
+SDPA as the authoritative reference and vLLM BF16 as the baseline. Transformers supplies expected correctness;
 vLLM supplies same-prefix calibration observations and can never override a
 reference failure or select acceptance thresholds automatically.
 
@@ -93,8 +92,8 @@ for `docs/validation/layered-accuracy-cases.json` and
 not defaults. The old 28 cases are development inputs, not a fresh holdout.
 Every member is a separate numerical case; an execution group only batches them.
 
-This is a CPU-prepared measurement workflow, **not release acceptance**. No GPU
-command should run before its separate stage authorization. Use the prepared,
+Prepare the measurement workflow on CPU first. GPU execution requires its own
+stage authorization, and collection alone does not establish release acceptance. Use the prepared,
 locked runtime with `PYTHONHASHSEED=0`, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, and HF,
 Transformers, uv and Cargo offline settings established before process startup.
 All GPU owners are serial fresh processes under the 16 GiB available-RAM guard.
@@ -305,9 +304,9 @@ cd tools/golden-gen
 uv run python -m golden_gen generate --dry-run --output-dir /tmp/golden-dry-run
 ```
 
-Produces a schema-valid but uncalibrated fake manifest and synthetic
-`.safetensors` fixtures without loading any model or GPU. It exercises lifecycle
-plumbing only and is never publishable release evidence.
+The command produces a schema-valid, uncalibrated fake manifest and synthetic
+`.safetensors` fixtures without loading a model or using a GPU. Use these outputs
+to exercise the workflow; they cannot serve as release evidence.
 
 ### Testing (CPU-only)
 
@@ -402,7 +401,7 @@ Each `.safetensors` file contains the following tensors:
 | `top5_indices` (regression only) | int64 | `[n, 5]` | Top-5 token indices per step |
 | `top5_logits` (regression only) | float32 | `[n, 5]` | Top-5 logit values per step |
 
-## Known Oracle Deviations
+## Known oracle deviations
 
 ### HF Transformers `output_logits=True`
 
@@ -487,8 +486,9 @@ Prompt IDs use portable ASCII file identifiers. Inventory validation rejects
 path components, duplicate or case-colliding IDs and collisions introduced by
 batch expansion before invoking an oracle. Output directories and files cannot
 be symbolic links; hard-linked and non-regular targets are rejected. Fixture generation targets Linux/WSL2 with atomic no-replace rename support.
-A fresh fixture is published only after its complete contents have been written. Deterministic retries reuse identical bytes,
-while different existing contents require a fresh output directory.
+The generator publishes a fixture only after writing its complete contents.
+A deterministic retry can reuse identical bytes; if existing contents differ,
+choose a fresh output directory.
 
 The Transformers oracle uses the actual generation step count. Each batch
 member retains its first EOS step and excludes later padding, including when

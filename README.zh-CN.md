@@ -6,15 +6,15 @@
 [![Release](https://img.shields.io/github/v/release/RedHeartSecretMan/vllm-oxide)](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-vllm-oxide 是一个 Rust 推理引擎，支持**单 GPU、同步、离线的 Qwen3 推理**，基于 [Candle](https://github.com/huggingface/candle) 和项目自身的 CUDA 内核。架构参考 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 与 [vLLM](https://github.com/vllm-project/vllm)，提供持续批处理、前缀缓存、分页 KV 缓存和抢占重算。
+vllm-oxide 是一个 Rust 推理引擎，通过同步 API 在单张 GPU 上运行 Qwen3 离线推理。它基于 [Candle](https://github.com/huggingface/candle) 和自有 CUDA 内核，架构参考 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 与 [vLLM](https://github.com/vllm-project/vllm)，支持持续批处理、前缀缓存、分页 KV 缓存和抢占重算。
 
-**此源码对应历史实验预发布 v0.2.0.rc.1。** 面向单张 CUDA GPU 上的 **Qwen3-0.6B BF16**。原数值运行记录为 **48/66 PASS、18 FAIL**，完整性能和声明的 Rust 下限尚未验证。新用户请使用正式 [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0)。详情见[发布说明](docs/releases/v0.2.0-rc.1.md)、[历史验证](docs/validation/README.md)和 [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1)。
+此源码对应实验预发布 v0.2.0.rc.1，面向单张 CUDA GPU 上的 Qwen3-0.6B BF16。原数值运行记录为 48/66 PASS、18 FAIL；当时尚未完成完整性能测试，也未验证所声明的 Rust 版本下限。新用户请使用正式 [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0)。详情见[发布说明](docs/releases/v0.2.0-rc.1.md)、[历史验证](docs/validation/README.md)和 [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1)。
 
 [快速开始](docs/getting-started.md) · [文档索引](docs/README.md) · [架构](docs/architecture.md) · [版本发布](docs/releases/README.md) · [贡献指南](CONTRIBUTING.md)
 
 ## 可以实现什么
 
-在 Rust 应用中嵌入引擎，提交一批文本或 token ID 提示，获得完整的续写文本和 token ID。跨调用复用同一个 `LLM`，可保留模型及缓存分配。CLI 使用相同的生成路径，每次处理一条提示。
+通过 Rust 库提交一批文本或 token ID 提示，即可取得生成的文本和 token ID。多次调用时复用同一个 `LLM`，模型会保持加载，已分配的缓存也可继续使用。CLI 使用相同的生成路径，每次处理一条提示。
 
 | 领域 | RC1 实现范围 |
 |---|---|
@@ -24,11 +24,11 @@ vllm-oxide 是一个 Rust 推理引擎，支持**单 GPU、同步、离线的 Qw
 | Token 选择 | Greedy、temperature、top-k、top-p、presence/frequency/repetition penalty、EOS 与 token 上限停止 |
 | 分发形式 | 带版本标签的源码、Rust 库和 CLI；没有预编译程序或已发布的 crates.io 包 |
 
-服务接口、异步流式输出、多 GPU/TP/NCCL、其他模型族、量化、LoRA、speculative decoding 和 CUDA Graphs 均不在本版本范围内。架构参考不代表与上游 vLLM 的 API 兼容或功能相同。
+服务接口、异步流式输出、多 GPU/TP/NCCL、其他模型族、量化、LoRA、speculative decoding 和 CUDA Graphs 均不在本版本范围内。
 
 ## 快速开始
 
-GPU 推理需要 Linux 或 WSL2、记录的 **Rust 1.94.0** 工具链、计算能力 **8.9 或更高**的 NVIDIA GPU、可用的 NVIDIA 驱动，以及包含 `nvcc` 的 CUDA Toolkit。RC 记录来自 RTX 4080/WSL2；需要兼容 CUDA 驱动和完整 Toolkit。维护后的源码已固定 Rust 1.94.0；原 RC 测量与本次维护检查分别记录。
+GPU 推理需要 Linux 或 WSL2、Rust 1.94.0、计算能力 8.9 或更高的 NVIDIA GPU、兼容的 NVIDIA 驱动，以及包含 `nvcc` 的完整 CUDA Toolkit。RC 的实测环境为 RTX 4080/WSL2。维护后的源码已固定 Rust 1.94.0，原 RC 测量与后续维护检查分别记录。
 
 克隆发布源码，通过自带示例使用验收时的固定模型 revision：
 
@@ -99,7 +99,7 @@ cargo build --locked --workspace
 cargo test --locked --workspace
 ```
 
-CPU 构建用于开发与测试；**实际推理必须启用 `--features cuda` 并使用 GPU**。维护后的 CPU CI 在 Rust 1.94.0 和 stable 上检查格式、Clippy、默认及 internal-golden 测试，另运行原生依赖审计。Python 工具有独立的本地 CPU 测试；本 RC 不含 main 的 Python 或文档检查任务。模型精度、CUDA API/CLI 功能和性能通过本地 GPU 单独验证。CI 通过本身不代表模型精度已经验证。
+CPU 构建用于开发与测试。运行推理需要启用 `--features cuda` 并使用 GPU。维护后的 CPU CI 在 Rust 1.94.0 和 stable 上检查格式、Clippy、默认及 internal-golden 测试，另运行原生依赖审计。Python 工具有独立的本地 CPU 测试；本 RC 不含 main 的 Python 或文档检查任务。模型精度、CUDA API/CLI 功能和性能另有本地 GPU 检查。
 
 开发环境与完整检查见 [CONTRIBUTING.md](CONTRIBUTING.md)和[开发指南](docs/development.md)。[架构概览](docs/architecture.md)说明一次生成调用对应的当前实现，[验证指南](docs/validation/README.md)区分日常 CI 和真实模型检查。
 

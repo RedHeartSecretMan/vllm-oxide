@@ -12,7 +12,7 @@ The RC's recorded numerical result is **48 of 66 PASS, 18 FAIL**. All 487 captur
 | Layered accuracy | Fixed source/model/history, GPU collection plus CPU evaluation | Each declared operator, numerical and behavior check under frozen budgets |
 | Performance | Local GPU with original synchronized timestamps and memory telemetry | Only the fixed measured workload and environment |
 
-CPU tests and same-token smoke results cannot cancel a KL failure. Final v0.2.0 acceptance uses later source identities; it does not change this RC result. A documentation refresh is not a model measurement.
+CPU tests and same-token smoke checks passed independently of the KL failures. Final v0.2.0 acceptance used later source commits, so the RC result remains unchanged by either that release or this documentation update.
 
 ## Contracts in this tree
 

@@ -6,15 +6,15 @@
 [![Release](https://img.shields.io/github/v/release/RedHeartSecretMan/vllm-oxide)](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-vllm-oxide is a Rust engine for **single-GPU, synchronous, offline Qwen3 inference**, built on [Candle](https://github.com/huggingface/candle) and project-owned CUDA kernels. It draws on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm)'s architecture, with continuous batching, prefix caching, a paged KV cache, and recompute preemption.
+vllm-oxide runs Qwen3 offline on a single GPU through a synchronous Rust API. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm). The engine supports continuous batching, prefix caching, a paged KV cache, and recompute preemption.
 
-**This checkout is the historical experimental prerelease v0.2.0.rc.1.** It targets **Qwen3-0.6B in BF16** on one CUDA GPU. The original numerical run recorded **48/66 PASS and 18 FAIL**, with full performance and Rust-minimum validation incomplete. New users should use the final [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0). See the [release notes](docs/releases/v0.2.0-rc.1.en.md), [historical validation](docs/validation/README.md), and [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1).
+This checkout contains the experimental prerelease v0.2.0.rc.1, targeting Qwen3-0.6B in BF16 on one CUDA GPU. Its original numerical run recorded 48/66 PASS and 18 FAIL. Full performance testing and verification of the declared minimum Rust version were incomplete. New users should use the final [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0). See the [release notes](docs/releases/v0.2.0-rc.1.en.md), [historical validation](docs/validation/README.md), and [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1).
 
 [Getting started](docs/getting-started.md) · [Documentation](docs/README.md) · [Architecture](docs/architecture.md) · [Releases](docs/releases/README.md) · [Contributing](CONTRIBUTING.md)
 
 ## What you can build
 
-Embed the engine in a Rust application, submit a batch of text or token-ID prompts, and receive completed text and token IDs. Reuse one `LLM` across calls to retain its model and cache allocation. The CLI offers the same generation path for one prompt at a time.
+Use the Rust library to generate from a batch of text or token-ID prompts. Each result contains the generated text and token IDs. Reusing one `LLM` across calls keeps the model loaded and its cache allocation available. The CLI uses the same generation path for one prompt at a time.
 
 | Area | RC1 implementation |
 |---|---|
@@ -24,11 +24,11 @@ Embed the engine in a Rust application, submit a batch of text or token-ID promp
 | Token selection | Greedy, temperature, top-k, top-p, presence/frequency/repetition penalties, EOS and token-limit stopping |
 | Distribution | Tagged source, a Rust library, and a CLI; no prebuilt binary or published crates.io package |
 
-Serving, async streaming, multi-GPU/TP/NCCL, other model families, quantization, LoRA, speculative decoding, and CUDA Graphs are outside this release. Architecture inspiration does not imply API compatibility or feature parity with upstream vLLM.
+Serving, async streaming, multi-GPU/TP/NCCL, other model families, quantization, LoRA, speculative decoding, and CUDA Graphs are outside this release.
 
 ## Quick start
 
-GPU inference needs Linux or WSL2, the recorded Rust **1.94.0** toolchain, an NVIDIA GPU with compute capability **8.9 or newer**, a working NVIDIA driver, and a CUDA Toolkit containing `nvcc`. RC results were recorded on RTX 4080/WSL2. Use a compatible CUDA driver and full Toolkit containing `nvcc`; the maintained source now pins Rust 1.94.0. Original RC measurements remain separate from the maintenance checks.
+GPU inference needs Linux or WSL2, Rust 1.94.0, an NVIDIA GPU with compute capability 8.9 or newer, a compatible NVIDIA driver, and the full CUDA Toolkit containing `nvcc`. The RC was measured on RTX 4080/WSL2. Its maintained source now pins Rust 1.94.0; the original measurements and later maintenance checks have separate records.
 
 Clone the released source and run the provided example with the exact model revision used for validation:
 
@@ -39,7 +39,7 @@ cargo run --locked --release -p vllm_oxide --example generate_qwen3 --features c
     hub:Qwen/Qwen3-0.6B@7e4ae267688d671ddfca3122e4528ee980cf3234
 ```
 
-The first run builds the CUDA backend and downloads model files. The example generates a continuation of “The meaning of life is”. Later runs reuse downloaded files. A local model directory can be passed instead of the `hub:` argument.
+The first run builds the CUDA backend and downloads the model. The example continues the prompt "The meaning of life is". Later runs reuse the downloaded files. To use a local checkpoint, replace the `hub:` argument with its directory.
 
 To choose your own prompt, use the CLI with a local checkpoint:
 
@@ -99,7 +99,7 @@ cargo build --locked --workspace
 cargo test --locked --workspace
 ```
 
-A CPU build supports development and tests; **actual inference requires `--features cuda` and a GPU**. The maintained CPU CI checks formatting, Clippy, default and internal-golden tests on Rust 1.94.0 and stable, plus native dependency auditing. Python tooling has separate local CPU tests; this RC does not include main's Python or documentation jobs. Numerical accuracy, CUDA API/CLI behavior, and performance are validated separately on a local GPU. CI success alone does not establish model accuracy.
+Use CPU builds for development and tests. Inference requires `--features cuda` and a GPU. The maintained CPU CI checks formatting, Clippy, default and internal-golden tests on Rust 1.94.0 and stable, plus native dependency auditing. Python tooling has separate local CPU tests; this RC does not include main's Python or documentation jobs. Model accuracy, CUDA API/CLI behavior, and performance have separate checks on a local GPU.
 
 For contribution setup and complete checks, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development guide](docs/development.md). The [architecture overview](docs/architecture.md) maps a generation call to the current implementation, and the [validation guide](docs/validation/README.md) separates routine CI from real-model checks.
 

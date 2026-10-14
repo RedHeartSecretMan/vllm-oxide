@@ -2,7 +2,7 @@
 
 [English overview](../README.md) · [中文介绍](../README.zh-CN.md)
 
-This is the historical experimental RC source tree, refreshed to the final release's documentation format. The archive includes reviewed source maintenance; the original measurements and **18/66 numerical failures** retain their source identities. New users should use [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
+These guides cover the experimental RC source and its maintained tools. The original numerical run had 18 failures among 66 cases; later source maintenance has separate checks and does not change that result. New users should use [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
 
 | Goal | Read |
 |---|---|

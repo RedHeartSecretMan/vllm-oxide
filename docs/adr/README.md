@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Architecture](../architecture.md) · [RC results](../releases/v0.2.0-rc.1.en.md)
 
-These records retain their original checkpoint, status and source/evidence identity. They explain the design present at RC1, not the later final v0.2.0 precision or monitoring repairs. The documentation update does not change any accepted numerical budget.
+These records explain the design at RC1 and retain their original status, source, and evidence. Later v0.2.0 precision and monitoring repairs have their own records. Accepted numerical budgets are unchanged by documentation maintenance.
 
 ## Read by topic
 

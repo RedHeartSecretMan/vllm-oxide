@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Validation](../validation/README.md) · [Tooling](../../tools/golden-gen/README.md)
 
-RC1 did not complete a publishable performance result. No throughput, latency or memory figure from final v0.2.0 is attributed to this source. The benchmark executables and validation code exist for maintainer reproduction, not as a performance claim.
+RC1 has no completed release performance result. Its benchmark executables and validation code are available for reproduction; throughput, latency, and memory figures measured on final v0.2.0 belong to that later source.
 
 [ADR-0012](../adr/0012-goldens-v0.2-calibration-and-performance-protocol.md) defines two fixed workloads: one canonical request and a four-request batch, greedy decoding and 64 completion tokens, each with one discarded warmup and three measured repetitions. Collect per-repetition prefill/decode throughput, TTFT, token-to-token latency, peak device memory and original synchronized timestamps. Comparisons require the same checkpoint, settings, source and measurement boundaries.
 

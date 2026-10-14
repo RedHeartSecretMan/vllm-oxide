@@ -6,7 +6,7 @@
 
 Historical numerical protocol: [ADR-0015](0015-layered-accuracy-validation.md) replaces its layer numbering, evidence split and numerical acceptance rules for new release validation. Unreplaced identity, integrity, resource and publication constraints remain binding; old artifacts keep their original interpretation.
 
-Ticket #45 must turn GPU observations into release evidence without recreating the legacy loop of raising a tolerance until the same data passes. Its issue fixes the required outcomes, but not the exact oracle kernels, empirical approval boundary, benchmark formulas, report ownership, or candidate-bound publication order. Those choices change what counts as acceptance and therefore belong to the DAG Definition.
+Ticket #45 needs a reproducible path from GPU observations to release evidence. The legacy process raised tolerance until its own data passed; this protocol separates measurement, threshold approval, and acceptance. The issue defines the required outcomes. The DAG Definition specifies the oracle kernels, empirical approval boundary, benchmark formulas, report ownership, and candidate-bound publication order because each affects the acceptance result.
 
 ## Pinned generation environment
 
@@ -38,7 +38,7 @@ L1 accepts only an exact reference token or a near-tie whose candidate-logit gap
 
 ## Reproducible performance baseline
 
-Performance is evidence, not a cross-hardware gate or a vLLM parity claim. It runs only after the empirical tolerance Definition Revision completes and the authoritative comparison has opened and passed the sealed holdout. It measures the Rust candidate without raw-logit capture. A private release-tooling telemetry mode may be added behind the existing default-off `internal-golden` feature, but it adds no public Rust item and normal generation remains unchanged. When active, CUDA is synchronized at measured step boundaries and only small timing/identity records cross to the host.
+Performance measurements establish a baseline for the recorded configuration. They neither set a cross-hardware threshold nor establish parity with vLLM. Measurement starts only after the empirical tolerance Definition Revision and a passing authoritative comparison on the sealed holdout. It measures the Rust candidate without raw-logit capture. A private release-tooling telemetry mode may be added behind the existing default-off `internal-golden` feature, but it adds no public Rust item and normal generation remains unchanged. When active, CUDA is synchronized at measured step boundaries and only small timing/identity records cross to the host.
 
 There are two workloads: `canonical_04` as one request and the four `canonical_05` prompts as one batch. Each uses greedy sampling, `ignore_eos=true`, exactly 64 completion tokens per request, the fixed Rust `EngineOptions` above, and a cold request/prefix-cache state. One throwaway run per workload primes runtime kernels but is not reported. Each of three measured repetitions constructs a fresh `LLM`, excludes construction and its built-in warmup, then executes the workload once; all raw samples are retained and the median is the headline.
 

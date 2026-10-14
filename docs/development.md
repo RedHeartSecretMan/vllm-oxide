@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Contributing](../CONTRIBUTING.md)
 
-Use `main` for new contributions. This guide describes maintained `v0.2.0.rc.1`, including its explicit CPU workflow refresh. Original RC measurements remain bound to their original source; later production tooling is not backported into this tree.
+Use `main` for new contributions. The commands here apply to maintained `v0.2.0.rc.1`, including its updated CPU workflow. Original RC measurements still describe their original source; this tree has its own version of the validation tools.
 
 ## Environment and source layout
 
@@ -16,7 +16,7 @@ Use `main` for new contributions. This guide describes maintained `v0.2.0.rc.1`,
 | `research/prototype-candle-stack` | Independent Cargo workspace and lockfile; run directly with its own manifest |
 | `docs/adr`, `docs/validation` | Original decisions, frozen inventories, budgets and contracts |
 
-Rust CPU checks need neither CUDA nor model downloads. Installing Torch/vLLM worker dependencies for adapter tests does not imply GPU inference.
+Rust CPU checks need neither CUDA nor model downloads. Python adapter tests also run on CPU, using their own Torch/vLLM worker environment.
 
 ## Rust checks
 
@@ -61,4 +61,4 @@ Keep bilingual README scope aligned. Describe the concrete trigger, resulting be
 
 Build inference with `--features cuda`, then run the pinned example or CLI from [getting started](getting-started.md). The RC has no later `public_gpu_smoke` Python entrypoint or manual GitHub CUDA workflow. For numerical evidence use its own [layered contract](validation/layered-accuracy-contract.md) and [tool version](../tools/golden-gen/README.md). Do not substitute the final release's source or results.
 
-WSL2 is a usable local CUDA environment. The historical harness records resource and process observations; lack of a GitHub GPU runner is not a product or documentation release blocker. RC accuracy/performance limits remain those recorded in its [release notes](releases/v0.2.0-rc.1.en.md). New raw evidence and fixtures remain local; no upload is part of these instructions.
+You can run local CUDA checks on WSL2. The historical harness records resource use and process observations; routine documentation work needs no GitHub GPU runner. The RC's accuracy and performance limits are recorded in its [release notes](releases/v0.2.0-rc.1.en.md). Keep new raw evidence and fixtures local.

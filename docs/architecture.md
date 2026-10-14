@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Getting started](getting-started.md) · [Development](development.md)
 
-This page describes the shipped v0.2.0.rc.1 implementation: one in-process CUDA engine for synchronous, offline Qwen3 generation. [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm) inform the design; the supported API and execution scope are specific to this repository.
+v0.2.0.rc.1 runs synchronous, offline Qwen3 generation in one process on one CUDA GPU. Its design draws on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm). The interfaces and execution path below describe this version of vllm-oxide.
 
 ## One generation call
 
@@ -24,7 +24,7 @@ flowchart TD
     I --> J[Vec of RequestOutput]
 ```
 
-`EngineCore::step` asks the scheduler for a plan, prepares the attention state, executes the model and sampling work, and returns the result to the scheduler for application. The loop repeats internally; the public call returns completed results rather than streamed tokens.
+`EngineCore::step` obtains a scheduler plan, prepares attention state, runs the model and sampler, then gives the result back to the scheduler. The engine repeats these steps until the requests finish. The public call returns completed results; it does not stream tokens.
 
 The two internal values keep execution and request ownership separate:
 
@@ -57,7 +57,7 @@ The scheduler can execute prefill and decode work within the same token budget. 
 
 The cache uses fixed blocks of 256 tokens. Prefix caching reuses eligible complete blocks with matching token histories; shared block ownership uses reference counts and copy-on-write. The `KvCacheManager` hides physical cache details from the scheduler. Under cache pressure, recompute preemption releases a request's active cache ownership and later reconstructs the required history.
 
-Stable public request IDs belong to the accepted request, independently of internal sequence IDs or its position in a batch. `LLM` restores input order when it decodes completed outputs. A failed execution aborts active requests and releases cache ownership; the error is returned to the caller rather than converted into a successful partial batch.
+A public request ID identifies an accepted request independently of its internal sequence ID or batch position. `LLM` restores input order when decoding completed outputs. If execution fails, the engine aborts active requests, releases their cache ownership, and returns the error to the caller. A partial batch is not reported as successful.
 
 ## Model and numerical execution
 

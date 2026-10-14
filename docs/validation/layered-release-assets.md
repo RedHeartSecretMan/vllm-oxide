@@ -4,7 +4,7 @@
 
 > Original RC protocol/diagnosis record. This documentation refresh preserves all raw source identities, numerical limits and verdicts; no new GPU measurement or evidence upload is implied.
 
-This is the normative transport decision adopted by [ADR-0016](../adr/0016-layered-golden-release-assets.md). It does not change the [layered accuracy contract](layered-accuracy-contract.md), frozen cases, pending budgets, model scope or independent publication authority. It replaces incompatible schema4 transport rules, not their safeguards.
+[ADR-0016](../adr/0016-layered-golden-release-assets.md) defines the evidence transport specified here. The [layered accuracy contract](layered-accuracy-contract.md), frozen cases, pending budgets, model scope, and publication authority remain unchanged. The format replaces incompatible schema4 rules while retaining their integrity safeguards.
 
 ## 1. One release manifest and two assets
 
@@ -26,7 +26,7 @@ Model/weights/config/tokenizer identity, exact runtime, binary and kernel paths,
 
 Every `artifacts[]` record declares a unique `logical_path`, a unique root `filename`, original `sha256` and integer `size_bytes`. Logical paths are canonical relative POSIX paths beneath one evidence root. Reject absolute paths, empty or dot segments, parent traversal, backslashes, NUL, reserved Git paths, normalization aliases, duplicate paths and file/directory prefix conflicts. Paths and references must not escape the reconstructed root or depend on symlinks.
 
-Assign canonical flat ASCII filenames deterministically from the sorted logical-path inventory. The precise filename spelling is an implementation detail frozen and cross-language tested before measurement. Archive names cannot be nested paths. Each logical file remains a distinct record and archive member even if its bytes equal another file: no silent owner or reference-topology deduplication. Do not rewrite source identities, raw JSON references or original evidence bytes to fit the archive.
+Assign canonical flat ASCII filenames deterministically from the sorted logical-path inventory. The exact filename format is frozen and tested in both languages before measurement. Archive names cannot be nested paths. Each logical file remains a distinct record and archive member even if its bytes equal another file: no silent owner or reference-topology deduplication. Do not rewrite source identities, raw JSON references or original evidence bytes to fit the archive.
 
 The inventory is the complete transitive closure of the declared entrypoints and their protocol dependencies: original authoritative manifest/result/marker; calibration observation and fault evidence supporting approval; captures, controls, independent replays, setup files, public outputs, receipts and resource guards; performance samples and telemetry; CPU gate output; and frozen Definition indexes/documents for the source identities they attest. Declared extra files without an authorized evidence role, missing dependencies or cycles that violate stage provenance are invalid. Model weights, runtime installations, arbitrary workspace files and executable code to run from the archive are not release evidence.
 

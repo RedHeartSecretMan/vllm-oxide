@@ -2,9 +2,9 @@
 
 [Documentation](README.md) · [Release history](releases/README.md)
 
-The source archives include the version-specific documentation refresh and the
-2026-10-14 maintenance fixes requested for all three published versions. Each
-maintained tag selects a reviewed descendant of its original implementation.
+All three published versions received documentation updates and source fixes
+on 2026-10-14. Each maintained tag points to a reviewed descendant of its
+original implementation.
 
 | Version | Original implementation | Maintained source |
 |---|---|---|
@@ -39,10 +39,10 @@ Existing clones can retain an older local tag; use the full commit identity from
 the Release page when comparing source archives or reproducing a measurement.
 Original implementations remain reachable through their descendant histories.
 
-Ordinary behavior releases continue to use a new version. This existing-tag
-maintenance follows the user's explicit request to repair the three public
-source snapshots together. No extra backup tags or permanent work branches are
-published.
+This was an explicitly authorized maintenance update to the three existing
+source snapshots. Subsequent behavior releases continue to use new version
+numbers. Backups stay local; the repository keeps its three official tags
+without extra backup tags or permanent work branches.
 
 ## Previous maintenance checks
 
@@ -69,12 +69,11 @@ the existing engine dependency locks or Candle revision.
 
 ## Follow-up whole-project review — 2026-10-14
 
-The follow-up review includes all tracked source/configuration/documentation
-files in the main and three maintained release snapshots, plus the two retained
-accuracy research drafts on `main`. Repeated identical files are reviewed once
-with each version-specific difference checked separately. This is a source
-review and a finite regression matrix; it does not claim all possible prompts,
-parameter combinations or hardware configurations have been tested.
+The follow-up review covered tracked source, configuration, and documentation
+in all four snapshots, plus the two accuracy research drafts on `main`. Shared
+files were reviewed once, then checked for version-specific differences. The
+regression results below cover the tested inputs and hardware; they do not
+cover every possible prompt or parameter combination.
 
 The additional source fixes cover:
 
@@ -85,16 +84,16 @@ The additional source fixes cover:
   named like tensor shards, report directory errors and fetch all validated
   indexed shards for a cold v0.1.0 Hub cache.
 - Handle degenerate sampling inputs and validate CLI temperature/top-k/top-p/token
-  limits before loading a model. Fixture publication and manifest errors remain
-  explicit rather than overwriting retained output.
+  limits before loading a model. Fixture publication and manifest errors now
+  return failures while preserving retained output.
 - Make the v0.1.0 comparator reject empty or missing declared evidence, propagate
   errors, load expanded canonical and regression prompts, and compare the full
   shared causal prefix through its first divergent row. Its L1 helper now
   recognizes a reference runner-up while requiring the actual candidate argmax;
   the original `2 × atol` default and regression skip map remain unchanged.
   All four versions refuse empty/inconsistent L2 data and invalid tolerances,
-  and non-finite compared values cannot pass. Unimplemented L3 is an explicit
-  error rather than synthetic acceptance. Original measured failures remain
+  and non-finite compared values cannot pass. Requesting the unimplemented L3 comparison returns an explicit
+  error. Original measured failures remain
   separately identifiable.
 - Audit the CUDA dependency graph as metadata with all features selected; the
   audit does not compile CUDA. The maintained RC CI explicitly tests Rust 1.94.0

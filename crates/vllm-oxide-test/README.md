@@ -1,4 +1,4 @@
-# vllm-oxide-test — Golden Comparison Crate
+# vllm-oxide-test: RC comparison tools
 
 This document describes the **historical schema-v4 comparator** and its original
 L1=token/L2=logits numbering. It cannot satisfy new release acceptance under
@@ -10,17 +10,15 @@ entrypoints stay disabled. The new schema5 adapter is documented in the
 [release stages](../../tools/golden-gen/README.md#schema5-release-stages).
 Its CPU-tested transport does not imply GPU numerical acceptance.
 
-> **⚠️ Release gate — NOT a CI gate.**
->
-> This crate validates the Rust inference engine against golden fixtures on
-> a GPU. It is a **manual, pre-release action**. CI green (CPU property tests)
-> does **NOT** imply numerical correctness. See [Release Gate vs CI Gate](#release-gate-vs-ci-gate).
+Run golden model comparisons manually on a GPU before release. CPU CI tests
+code and tooling behavior; numerical correctness requires the separate GPU
+checks. See [Release Gate vs CI Gate](#release-gate-vs-ci-gate).
 
 ## Overview
 
-The golden comparison crate (`crates/vllm-oxide-test/`) implements three
-comparison tiers against golden fixtures produced by the Python golden
-generator (`tools/golden-gen/`):
+The comparison crate (`crates/vllm-oxide-test/`) reads fixtures from the Python
+generator (`tools/golden-gen/`) and supports L1 and L2 comparisons. The L3
+entrypoint remains unavailable:
 
 | Layer | What it compares | When |
 |-------|-----------------|------|
@@ -51,9 +49,9 @@ archive build is not an authoritative source receipt.
 ### Run the authoritative comparator
 
 The former `tools/validate-release.sh authoritative <run-root>` entrypoint is
-disabled. The direct commands below are historical diagnostic tooling and do not
-authorize a layered release. Direct invocation is verbose because access binds a
-Definition-approved observation and retains a second set of candidate captures:
+disabled. Use the direct commands below for historical diagnostics, with a
+Definition-approved observation and a second set of candidate captures. These
+commands do not authorize a layered release:
 
 ```bash
 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
@@ -201,7 +199,7 @@ Per-layer comparison is not implemented. The maintained shared comparator
 returns an error, so the CLI rejects `--debug` rather than printing a synthetic
 PASS. A future implementation would need its own validated contract.
 
-## Release Gate vs CI Gate
+## Release gate vs CI gate
 
 | | CI (every push) | Release gate (pre-release) |
 |---|---|---|
@@ -210,11 +208,10 @@ PASS. A future implementation would need its own validated contract.
 | **What** | Property tests | Numerical validation against goldens |
 | **Result** | "CI green" | "Numerically validated" |
 
-**CI green ≠ validated.** The repository README documents this distinction
-to prevent users from mistaking passing property tests for numerical
-correctness.
+Passing CPU checks establishes code and tooling behavior. Model numerical
+results require the separate GPU comparison described above.
 
-## Directory Structure
+## Directory structure
 
 ```
 crates/vllm-oxide-test/

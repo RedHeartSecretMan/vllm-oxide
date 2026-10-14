@@ -4,20 +4,21 @@
 
 > Historical RC checkpoint. Original status, evidence identities and budgets are preserved; later final-release results do not apply to this source.
 
-`Linear<P: ParallelStyle>` uses a type-level style tag to encode which
-projection a weight tensor IS, without runtime branching. Three v0.1 tags:
+`Linear<P: ParallelStyle>` identifies a weight tensor's projection through a
+type-level tag, without runtime branching. v0.1 has three tags:
 `QkvMerged` (3 shards, concat dim 0), `GateUpMerged` (2 shards, concat dim 0),
-`Row` (1 shard, dim 1). Plain `Column` is deferred (YAGNI — no Qwen3 consumer).
+and `Row` (1 shard, dim 1). Plain `Column` is deferred because Qwen3 has no
+consumer for it.
 
 **Decision**: Each style tag is a zero-sized marker implementing a shared
 `ParallelStyle` trait with static constants (`SHARD_DIM`, `num_shards`) and
 hooks (`slice_for_rank`, `reduce_output`, `should_fuse_bias`). The tag owns
-QKV/gate-up fusion at load time via `Linear::from_vb` — `x @ W^T + b` forward
-is style-agnostic.
+QKV/gate-up fusion at load time through `Linear::from_vb`. The
+`x @ W^T + b` forward operation is independent of the style.
 
-**R2**: `PhantomData<P>` is the documented cosmetic cost of the typestate
-pattern — accepted in exchange for compile-time checking that the model code's
-declared projection style matches the layer's expected layout.
+**R2**: `PhantomData<P>` adds a marker to the type definition. This is an
+accepted cost of checking at compile time that the model's declared projection
+style matches the layer's expected layout.
 
 **TP seam (v0.1)**: `slice_for_rank` ships the identity default
 (`Cow::Borrowed`, zero-cost). `reduce_output` is identity (no NCCL). v0.2
@@ -31,8 +32,8 @@ per-style sharding implementation is deferred beyond v0.2.0 (ADR-0006).
   duplicate forward logic across 3+ structs with no shared generic.
 
 **Consequences**:
-- Model code declares `Linear<QkvMerged>` etc. — compiler enforces style/layout
-  agreement.
+- Model code declares types such as `Linear<QkvMerged>`; the compiler checks
+  that the style and layout agree.
 - Adding TP>1 means new trait impls (or overrides), not new model code.
 - `layers/` is a leaf: no internal crate dependencies.
 
