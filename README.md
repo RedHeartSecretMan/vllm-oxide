@@ -4,7 +4,7 @@
 
 [Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0) · [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Support](SUPPORT.md)
 
-vllm-oxide runs Qwen3 offline on a single GPU through a synchronous Rust API. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm).
+vllm-oxide is a large language model inference engine written in Rust. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm).
 
 v0.1.0 is an experimental source release, retained for historical use. For a new application, start with [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) and its [getting-started guide](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/docs/getting-started.md). The original v0.1.0 evaluation found token differences in four of eight groups and skipped some comparisons. Those results remain part of this version's record.
 

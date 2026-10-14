@@ -1,8 +1,8 @@
 # vllm-oxide
 
-A Rust engine for single-GPU, synchronous, offline Qwen3 inference, drawing on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm).
+A large language model inference engine written in Rust, drawing on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm).
 
-This vocabulary describes the historical v0.1.0 source. Future work mentioned below is historical design intent, not a guarantee of v0.2.0 features. See the [architecture overview](docs/architecture.md), [validation limits](docs/validation/README.md) and [documentation maintenance record](docs/version-doc-update.md).
+The v0.1.0 implementation supports synchronous, offline Qwen3 inference on one CUDA GPU. This vocabulary describes the historical v0.1.0 source. Future work mentioned below is historical design intent, not a guarantee of v0.2.0 features. See the [architecture overview](docs/architecture.md), [validation limits](docs/validation/README.md) and [documentation maintenance record](docs/version-doc-update.md).
 
 ## Language
 
