@@ -39,18 +39,18 @@ pub(crate) fn write_atomic_json(destination: &Path, value: &impl Serialize) -> R
         .context("artifact filename missing")?;
     validate_destination_name(name)?;
     let destination = parent.join(name);
-    let stage = destination.with_extension("partial");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&stage)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::hard_link(&stage, &destination)?;
-    std::fs::remove_file(&stage)?;
-    File::open(parent)?.sync_all()?;
+    let (_, stage, mut file) = create_staging_file(&parent, "atomic-json", "artifact", name)?;
+    let result = (|| -> Result<()> {
+        serde_json::to_writer(&mut file, value)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        std::fs::hard_link(&stage, &destination)?;
+        File::open(&parent)?.sync_all()?;
+        Ok(())
+    })();
+    let cleanup = std::fs::remove_file(&stage);
+    result?;
+    cleanup.context("cleaning private JSON staging file")?;
     Ok(())
 }
 
@@ -801,6 +801,30 @@ mod tests {
             text: String::new(),
             finished: true,
         }
+    }
+
+    #[test]
+    fn atomic_json_supports_partial_suffix_and_cleans_failed_serialization() {
+        let root = private_temp();
+        let destination = root.path().join("result.partial");
+        super::write_atomic_json(&destination, &serde_json::json!({"complete":true})).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&destination).unwrap())
+                .unwrap(),
+            serde_json::json!({"complete":true})
+        );
+        std::fs::remove_file(destination).unwrap();
+        struct Reject;
+        impl serde::Serialize for Reject {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional serialization fault"))
+            }
+        }
+        assert!(super::write_atomic_json(&root.path().join("rejected.json"), &Reject).is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]

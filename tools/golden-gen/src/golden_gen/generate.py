@@ -62,6 +62,11 @@ def _validate_oracle_result(
         raise ValueError(
             f"invalid {category} oracle result for {prompt_id}.{oracle_name}: tensor shape"
         )
+    values = result.logits_per_step if category == "canonical" else result.top5_logits
+    if not np.isfinite(values).all():
+        raise ValueError(
+            f"invalid {category} oracle result for {prompt_id}.{oracle_name}: non-finite logits"
+        )
 
 
 def _save_fixture(

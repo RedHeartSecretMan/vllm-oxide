@@ -18,23 +18,12 @@
 //! are cast to the input dtype, and each multiply/add retains that dtype,
 //! matching Transformers Qwen3's BF16 materialization points.
 //!
-//! Qwen3 ships `rope_theta = 1_000_000` and no scaling; this module defaults
-//! to that and exposes no scaling knob (ADR-0003 R5 — scaling variants land
-//! in v0.2 if a model ships `rope_scaling`).
+//! Qwen3 ships `rope_theta = 1_000_000` and no scaling. Scaling
+//! variants remain unsupported (ADR-0003 R5).
 //!
-//! Diverges from `candle_nn::rotary_emb::rope` (the free function) because
-//! that API consumes cos/sin shaped against a sequential `[0..seq_len)`
-//! convention — incompatible with decode where positions are per-sequence
-//! (e.g. `[15, 42, 7]`). The nano-vllm `cos_sin_cache[positions]` lookup is
-//! the V1 parity path and survives both prefill and decode.
-//!
-//! TODO(#16 review): spec user story 37 says "use candle-nn's RotaryEmbedding"
-//! but candle-nn at rev 27f20fea exposes RoPE only as free functions (`rope`,
-//! `rope_thd`, etc.) — no struct. This module hand-rolls `inv_freq` + cos/sin
-//! cache + half-rotation to support per-token `positions` (decode). An ADR
-//! amendment should land before v0.2 to either (a) upstream a struct to
-//! candle-nn, or (b) update user story 37 to "implement V1-style RoPE with
-//! position lookup".
+//! Per-token lookup supports independent decode positions such as `[15, 42, 7]`.
+//! This is the cache and half-rotation design documented in ADR-0003; it does
+//! not rely on a sequential `[0..seq_len)` rotary function.
 
 use candle_core::{Device, Result, Tensor, D::Minus1};
 

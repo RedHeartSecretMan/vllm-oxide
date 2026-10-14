@@ -2,6 +2,13 @@
 
 日期：2026-09-06。
 
+阅读状态：本页保留设计与后续扩展的原检查点表述。数值预算已由
+[ADR-0018](../adr/0018-freeze-layered-accuracy-budgets.md)冻结；独立确认清单随后由
+[ADR-0026](../adr/0026-approve-independent-confirmation.md)和
+[ADR-0027](../adr/0027-proposed-confirmation-renewal.md)推进到 747 个必需 owner。
+下文的“待批准”和初始 487/617 计数应按其对应时点阅读。正式结果及来源见
+[发布验收摘要](../releases/goldens-v0.2.md)，不改变本页的指标定义或原历史判定。
+
 **状态：用户已批准设计与实现，数值预算和独立验收语料须后续冻结。** 本文件随 ADR-0015 的 Definition Checkpoint 生效。它不批准任何新数值阈值，不改判旧测量；预算、case 清单或必要证据未冻结时，不得输出发布验收 PASS。
 
 ## 1. 验收目标

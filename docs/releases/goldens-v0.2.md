@@ -11,7 +11,7 @@
 | 性能 producer | `e785a217af6031a1890c0e52de6f61d86f731713` |
 | 发布实现与公开 CUDA smoke | `3b1cdceb3f105713d0c71e23cab63871db03f4c5` |
 
-以上来源分工已获用户批准。数值测量、性能 producer 与发布实现的 `crates/vllm-oxide`、`crates/vllm-oxide-cli` Git 对象完全一致。文档收尾不改变这些实现对象；原结果始终绑定表中的实际来源。
+以上来源分工已获用户批准。表中原数值测量、性能 producer 与原发布实现的 `crates/vllm-oxide`、`crates/vllm-oxide-cli` Git 对象完全一致。该一致性描述原始发布；后续[源码维护](../version-doc-update.md)另有修复和回归记录，不将旧精度、smoke 或性能结果改标为维护后提交的新测量。
 
 ## 精度与行为
 

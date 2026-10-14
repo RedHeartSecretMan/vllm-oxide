@@ -280,6 +280,9 @@ fn validate_private_telemetry(
         .copied()
         .map(|request_id| (request_id, 0usize))
         .collect::<HashMap<_, _>>();
+    let mut last_sampled_at = HashMap::new();
+    let mut time_to_first = HashMap::new();
+    let mut inter_token_latency_ns = Vec::new();
     let mut previous_end = 0u64;
     let mut prefill_tokens = 0usize;
     let mut prefill_duration_ns = 0u64;
@@ -309,15 +312,24 @@ fn validate_private_telemetry(
         previous_end = step.ended_ns;
         let duration = step.ended_ns - step.started_ns;
         if step.prefill_tokens > 0 {
-            prefill_tokens += step.prefill_tokens;
-            prefill_duration_ns += duration;
+            if step.phase == "decode" {
+                bail!("decode-only telemetry step cannot contain prefill tokens");
+            }
+            prefill_tokens = prefill_tokens
+                .checked_add(step.prefill_tokens)
+                .context("prefill token count overflow")?;
+            prefill_duration_ns = prefill_duration_ns
+                .checked_add(duration)
+                .context("prefill duration overflow")?;
         }
         if step
             .emissions
             .iter()
             .any(|emission| emission.completion_step > 0)
         {
-            decode_duration_ns += duration;
+            decode_duration_ns = decode_duration_ns
+                .checked_add(duration)
+                .context("decode duration overflow")?;
         }
         for emission in &step.emissions {
             let expected = completion_steps
@@ -327,10 +339,24 @@ fn validate_private_telemetry(
                 bail!("telemetry completion steps are duplicate or non-contiguous");
             }
             *expected += 1;
-            decode_tokens += usize::from(emission.completion_step > 0);
+            if emission.completion_step == 0 {
+                time_to_first.insert(emission.request_id, emission.sampled_at_ns);
+            } else {
+                decode_tokens += 1;
+                let previous = last_sampled_at
+                    .get(&emission.request_id)
+                    .context("telemetry request is missing its previous sample")?;
+                inter_token_latency_ns
+                    .push((emission.request_id, emission.sampled_at_ns - previous));
+            }
+            last_sampled_at.insert(emission.request_id, emission.sampled_at_ns);
         }
     }
-    if completion_steps.values().any(|count| *count != 64)
+    if prefill_tokens == 0
+        || prefill_duration_ns == 0
+        || decode_tokens == 0
+        || decode_duration_ns == 0
+        || completion_steps.values().any(|count| *count != 64)
         || prefill_tokens != telemetry.prefill_tokens
         || prefill_duration_ns != telemetry.prefill_duration_ns
         || decode_tokens != telemetry.decode_tokens
@@ -342,10 +368,23 @@ fn validate_private_telemetry(
     let prefill_rate = prefill_tokens as f64 * 1_000_000_000.0 / prefill_duration_ns as f64;
     #[allow(clippy::cast_precision_loss)]
     let decode_rate = decode_tokens as f64 * 1_000_000_000.0 / decode_duration_ns as f64;
-    if (prefill_rate - telemetry.prefill_tokens_per_second).abs() > f64::EPSILON
+    let time_to_first_token_ns = artifact
+        .request_ids
+        .iter()
+        .map(|request_id| {
+            time_to_first
+                .get(request_id)
+                .copied()
+                .map(|duration| (*request_id, duration))
+                .context("benchmark request is missing its first-token sample")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !telemetry.prefill_tokens_per_second.is_finite()
+        || !telemetry.decode_tokens_per_second.is_finite()
+        || (prefill_rate - telemetry.prefill_tokens_per_second).abs() > f64::EPSILON
         || (decode_rate - telemetry.decode_tokens_per_second).abs() > f64::EPSILON
-        || telemetry.time_to_first_token_ns.len() != expected_request_count
-        || telemetry.inter_token_latency_ns.len() != expected_request_count * 63
+        || telemetry.time_to_first_token_ns != time_to_first_token_ns
+        || telemetry.inter_token_latency_ns != inter_token_latency_ns
     {
         bail!("benchmark telemetry derived metrics do not match raw synchronized samples");
     }
@@ -471,6 +510,38 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&artifact).unwrap()).unwrap();
         let error = super::validate_private_telemetry(&path, "impossible", 1).unwrap_err();
         assert!(error.to_string().contains("one token per request"));
+    }
+
+    #[test]
+    fn raw_consumer_recomputes_latency_from_synchronized_steps() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("telemetry.json");
+        let mut artifact = serde_json::json!({
+            "format": "vllm-oxide-internal-benchmark-json-v2", "schema_version": 2,
+            "call_id": "latency", "request_ids": [0], "complete": true,
+            "binding": {"fresh_request_ids": true, "cold_prefix_state": true, "device": "cuda:0"},
+            "outputs": [{"token_ids": vec![0; 64]}], "sampled_token_ids": [vec![0; 64]],
+            "telemetry": {
+                "prefill_tokens": 8, "prefill_duration_ns": 10, "prefill_tokens_per_second": 800_000_000.0,
+                "decode_tokens": 63, "decode_duration_ns": 630, "decode_tokens_per_second": 100_000_000.0,
+                "time_to_first_token_ns": [[0, 10]], "inter_token_latency_ns": vec![(0, 10); 63],
+                "steps": (0..64).map(|index| serde_json::json!({
+                    "phase": if index == 0 { "prefill" } else { "decode" },
+                    "started_ns": index * 10, "ended_ns": (index + 1) * 10,
+                    "prefill_tokens": if index == 0 { 8 } else { 0 },
+                    "emissions": [{"request_id": 0, "completion_step": index, "sampled_at_ns": (index + 1) * 10}]
+                })).collect::<Vec<_>>()
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&artifact).unwrap()).unwrap();
+        super::validate_private_telemetry(&path, "latency", 1).unwrap();
+        artifact["telemetry"]["time_to_first_token_ns"][0][1] = 0.into();
+        std::fs::write(&path, serde_json::to_vec(&artifact).unwrap()).unwrap();
+        assert!(super::validate_private_telemetry(&path, "latency", 1).is_err());
+        artifact["telemetry"]["time_to_first_token_ns"][0][1] = 10.into();
+        artifact["telemetry"]["inter_token_latency_ns"][0][1] = 0.into();
+        std::fs::write(&path, serde_json::to_vec(&artifact).unwrap()).unwrap();
+        assert!(super::validate_private_telemetry(&path, "latency", 1).is_err());
     }
 
     #[test]

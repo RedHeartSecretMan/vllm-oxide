@@ -358,6 +358,9 @@ impl Sampler {
         }
         let batch = logits.dim(0)?;
         let vocab = logits.dim(1)?;
+        if batch == 0 || vocab == 0 {
+            candle_core::bail!("sampler.forward: batch and vocabulary must be nonempty")
+        }
         if params.len() != batch {
             return Err(CandleError::msg(format!(
                 "sampler.forward: params.len() = {} but batch = {batch}",
@@ -596,9 +599,9 @@ impl Sampler {
     }
 }
 
-/// Reserve wider arithmetic only when an accepted finite F32 row can overflow
-/// during penalties or temperature scaling. The bound may be conservative,
-/// but the ordinary F32 pipeline and its seeded draws remain unchanged.
+/// Reserve wider arithmetic when an accepted finite F32 row can overflow or
+/// lose unit-scale Gumbel noise entirely in a large common logit offset.
+/// The ordinary F32 pipeline and its seeded draws remain unchanged.
 fn requires_wide_sampling(buf: &[f32], params: &SamplingParams, history: &[u32]) -> bool {
     let penalized = params.has_penalties() && !history.is_empty();
     if params.is_greedy() && !penalized {
@@ -628,7 +631,10 @@ fn requires_wide_sampling(buf: &[f32], params: &SamplingParams, history: &[u32])
         return false;
     }
     let inv_t = 1.0_f32 / params.temperature;
-    !inv_t.is_finite() || bound * f64::from(inv_t) > f64::from(f32::MAX)
+    // At 2^24, adjacent F32 scores are two units apart, enough to swallow
+    // typical Gumbel noise. The existing normalized wide path removes that
+    // common offset without changing greedy or ordinary model-logit rows.
+    !inv_t.is_finite() || bound * f64::from(inv_t) >= 16_777_216.0
 }
 
 /// Preserve the original count instead of merging additive penalties into an
@@ -837,6 +843,95 @@ mod tests {
     use super::*;
     use candle_core::Device;
 
+    #[test]
+    fn malformed_logits_and_batch_shapes_return_errors() {
+        let mut sampler = Sampler::new_with_seed(7);
+        let params = [SamplingParams::default()];
+        let histories = [Vec::<u32>::new()];
+        for shape in [vec![], vec![3], vec![1, 2, 3], vec![0, 3], vec![1, 0]] {
+            let logits = Tensor::zeros(shape, DType::F32, &Device::Cpu).unwrap();
+            assert!(sampler.forward(&logits, &params, &histories).is_err());
+        }
+        let logits = Tensor::zeros((1, 3), DType::F32, &Device::Cpu).unwrap();
+        assert!(sampler.forward(&logits, &[], &histories).is_err());
+        assert!(sampler
+            .forward(&logits, &params, &[] as &[Vec<u32>])
+            .is_err());
+    }
+
+    #[test]
+    fn finite_sampling_parameter_classes_validate_explicitly() {
+        for temperature in [0.0, -0.0, f32::from_bits(1), 1.0, f32::MAX, f32::INFINITY] {
+            for top_k in [None, Some(1), Some(2), Some(usize::MAX)] {
+                for top_p in [None, Some(f32::from_bits(1)), Some(0.9), Some(1.0)] {
+                    assert!(SamplingParams {
+                        temperature,
+                        top_k,
+                        top_p,
+                        ..SamplingParams::default()
+                    }
+                    .validate()
+                    .is_ok());
+                }
+            }
+        }
+        for value in [-2.0, 0.0, 2.0] {
+            assert!(SamplingParams {
+                presence_penalty: value,
+                frequency_penalty: value,
+                ..SamplingParams::default()
+            }
+            .validate()
+            .is_ok());
+        }
+        for repetition_penalty in [0.0, f32::from_bits(1), 0.5, 1.0, 2.0, f32::MAX] {
+            assert!(SamplingParams {
+                repetition_penalty,
+                ..SamplingParams::default()
+            }
+            .validate()
+            .is_ok());
+        }
+        for temperature in [-1.0, f32::NEG_INFINITY, f32::NAN] {
+            assert!(SamplingParams {
+                temperature,
+                ..SamplingParams::default()
+            }
+            .validate()
+            .is_err());
+        }
+        for top_p in [-1.0, 0.0, 1.1, f32::NEG_INFINITY, f32::INFINITY, f32::NAN] {
+            assert!(SamplingParams {
+                top_p: Some(top_p),
+                ..SamplingParams::default()
+            }
+            .validate()
+            .is_err());
+        }
+        for value in [-2.1, 2.1, f32::NEG_INFINITY, f32::INFINITY, f32::NAN] {
+            assert!(SamplingParams {
+                presence_penalty: value,
+                ..SamplingParams::default()
+            }
+            .validate()
+            .is_err());
+            assert!(SamplingParams {
+                frequency_penalty: value,
+                ..SamplingParams::default()
+            }
+            .validate()
+            .is_err());
+        }
+        for repetition_penalty in [-1.0, f32::NEG_INFINITY, f32::INFINITY, f32::NAN] {
+            assert!(SamplingParams {
+                repetition_penalty,
+                ..SamplingParams::default()
+            }
+            .validate()
+            .is_err());
+        }
+    }
+
     mod numerical_boundaries {
         use super::*;
 
@@ -874,6 +969,22 @@ mod tests {
                     1, 1, 3, 0, 1, 0, 1, 1, 0, 3, 1, 0
                 ]
             );
+        }
+
+        #[test]
+        fn large_common_offsets_keep_non_greedy_ties_stochastic() {
+            for logit in [1e20_f32, -1e20_f32] {
+                for (top_k, top_p) in [(None, None), (Some(2), None), (None, Some(0.9))] {
+                    let params = SamplingParams {
+                        temperature: 1.0,
+                        top_k,
+                        top_p,
+                        ..SamplingParams::default()
+                    };
+                    let selected = sample_many(&[logit, logit], &params, &[]);
+                    assert!(selected.contains(&0) && selected.contains(&1));
+                }
+            }
         }
 
         #[test]
@@ -1139,6 +1250,52 @@ mod tests {
             Device::new_cuda(0).unwrap()
         }
 
+        #[test]
+        fn gumbel_uniform_endpoint_remains_finite_on_cuda() {
+            let device = cuda();
+            let logits = Tensor::from_vec(vec![-1000.0_f32, 0.0], (1, 2), &device).unwrap();
+            let params = SamplingParams {
+                temperature: 1.0,
+                ..SamplingParams::default()
+            };
+            // Inverting splitmix64 gives this seed for output u64::MAX at
+            // token 0. Its old F64 uniform rounded to 1, so +infinity noise
+            // overrode the -1000 logit. Finite Gumbel noise preserves token 1.
+            let selected = crate::sampler::cuda::sample(
+                &logits,
+                &[params],
+                &[Vec::<u32>::new()],
+                &[3_558_559_446_808_474_027],
+                &mut None,
+            )
+            .unwrap();
+            assert_eq!(selected_token_ids_to_host(&selected).unwrap(), [1]);
+        }
+
+        #[test]
+        fn floating_input_types_and_views_preserve_selection_on_cuda() {
+            let device = cuda();
+            // Transposition plus a nonzero contiguous slice cover the adapter's
+            // copy and layout-offset handling, in addition to all model dtypes.
+            let values = Tensor::from_vec(
+                vec![9.0_f32, 3.0, 1.0, 9.0, 2.0, 4.0, 9.0, 1.0, 2.0],
+                (3, 3),
+                &device,
+            )
+            .unwrap();
+            let params = [SamplingParams::default(), SamplingParams::default()];
+            for dtype in [DType::F32, DType::F16, DType::BF16] {
+                let transposed = values.to_dtype(dtype).unwrap().t().unwrap();
+                let sliced = transposed.contiguous().unwrap().narrow(0, 1, 2).unwrap();
+                for logits in [transposed.narrow(0, 1, 2).unwrap(), sliced] {
+                    let selected = Sampler::new_with_seed(7)
+                        .forward(&logits, &params, &[Vec::<u32>::new(), Vec::new()])
+                        .unwrap();
+                    assert_eq!(selected_token_ids_to_host(&selected).unwrap(), [0, 1]);
+                }
+            }
+        }
+
         fn repeat_row(row: &[f32], draws: usize, device: &Device) -> Tensor {
             let values = (0..draws)
                 .flat_map(|_| row.iter().copied())
@@ -1164,6 +1321,18 @@ mod tests {
         #[test]
         fn numeric_boundaries_preserve_finite_logit_order_on_cuda() {
             let device = cuda();
+            for logit in [1e20_f32, -1e20_f32] {
+                for (top_k, top_p) in [(None, None), (Some(2), None), (None, Some(0.9))] {
+                    let params = SamplingParams {
+                        temperature: 1.0,
+                        top_k,
+                        top_p,
+                        ..SamplingParams::default()
+                    };
+                    let selected = boundary_draws(&[logit, logit], &params, &[], &device);
+                    assert!(selected.contains(&0) && selected.contains(&1));
+                }
+            }
             for divisor in [f32::from_bits(1), 1e-39, 1e-38, f32::MIN_POSITIVE] {
                 for (row, expected) in [
                     (&[10.0, 20.0][..], 1),

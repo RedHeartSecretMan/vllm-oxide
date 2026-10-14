@@ -5,9 +5,8 @@ use candle_core::{DType, Tensor};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use crate::engine::{SequencePhase, StepPlan, StepResult};
@@ -125,12 +124,8 @@ impl ReplaySession {
         if destination.exists() || destination.is_symlink() {
             bail!("fixed output must be fresh");
         }
-        let stage = destination.with_extension("partial");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&stage)?;
+        let (_, stage, mut file) =
+            super::create_staging_file(&parent, "fixed-prefix", "artifact", name)?;
         let header = serde_json::json!({"protocol":"layered-accuracy-v1","schema_version":1,
             "execution_group_id":plan.execution_group_id,"call_id":plan.call_id,
             "mode":if control {"collection_control"}else{"fixed_prefix"},"ignore_eos":true});

@@ -6,6 +6,11 @@ Version-specific maintenance is applied to the three existing release source
 snapshots at the user's request. It covers sampling numeric boundaries, model
 configuration validation, fixture output confinement, unaligned tensor reads,
 early EOS handling, and the research prototype's workspace and safety checks.
+The follow-up review additionally covers input/token bounds, Qwen3 configuration
+semantics, cached/indexed checkpoint discovery, CLI preflight, degenerate sampling
+and fixture publication. Version-specific comparator and CPU workflow fixes are
+detailed in the maintenance record. These changes do not relabel original model
+acceptance or performance measurements.
 Original measurements, budgets and historical verdicts retain their source
 identities. See [source maintenance](docs/version-doc-update.md) for scope and
 validation records.
