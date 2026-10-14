@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/RedHeartSecretMan/vllm-oxide)](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-vllm-oxide runs Qwen3 offline on a single GPU through a synchronous Rust API. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm). The engine supports continuous batching, prefix caching, a paged KV cache, and recompute preemption.
+vllm-oxide is a large language model inference engine written in Rust. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm). The engine supports continuous batching, prefix caching, a paged KV cache, and recompute preemption.
 
 v0.2.0 is available as a source release, validated with Qwen3-0.6B in BF16 on one CUDA GPU.
 

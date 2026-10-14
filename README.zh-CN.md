@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/RedHeartSecretMan/vllm-oxide)](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-vllm-oxide 是一个 Rust 推理引擎，通过同步 API 在单张 GPU 上运行 Qwen3 离线推理。它基于 [Candle](https://github.com/huggingface/candle) 和自有 CUDA 内核，架构参考 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 与 [vLLM](https://github.com/vllm-project/vllm)，支持持续批处理、前缀缓存、分页 KV 缓存和抢占重算。
+vllm-oxide 是一个用 Rust 编写的大语言模型推理引擎。它基于 [Candle](https://github.com/huggingface/candle) 和自有 CUDA 内核，架构参考 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 与 [vLLM](https://github.com/vllm-project/vllm)，支持持续批处理、前缀缓存、分页 KV 缓存和抢占重算。
 
 v0.2.0 已以源码形式发布，验证配置为单张 CUDA GPU 上的 Qwen3-0.6B BF16。
 
