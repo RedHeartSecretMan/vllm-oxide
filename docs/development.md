@@ -15,7 +15,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-These are CPU checks and do not require model weights, CUDA Toolkit or a GPU. They check compilation, formatting, lints and tests; they do not validate model output. The maintained archive pins Rust 1.94.0; the original Rust 1.75 declaration did not match the lockfile dependencies. This historical archive has no GitHub CI workflow, so record its local checks separately. Run and report actual results when changing it.
+These CPU checks cover compilation, formatting, lints, and tests without model weights, a CUDA Toolkit, or a GPU. Model output needs separate validation. Use the maintained archive's pinned Rust 1.94.0; the original Rust 1.75 declaration did not match its locked dependencies. This archive has no GitHub CI workflow, so run the checks locally and report their results.
 
 Enable the library CUDA backend only for GPU builds. The historical CLI needs `--features vllm_oxide/cuda`; the core and comparison packages declare `cuda` themselves. The standalone research prototype always enables CUDA and is outside workspace checks.
 
@@ -32,7 +32,7 @@ uv run --locked --extra dev ruff format --check .
 uv run --locked --extra dev mypy src
 ```
 
-The `dev` extra installs test/type/lint tools; GPU oracle packages are an optional `gpu` extra. CPU tests exercise schema, fixture I/O, prompt expansion, calibration, fake-oracle generation and CLI orchestration. They do not run actual Transformers/vLLM inference. The archived code may not satisfy newer tool versions; this guide describes check commands without inventing new passing results.
+The `dev` extra installs test/type/lint tools; GPU oracle packages are an optional `gpu` extra. CPU tests exercise schema, fixture I/O, prompt expansion, calibration, fake-oracle generation and CLI orchestration. They do not run actual Transformers/vLLM inference. Use the locked tool versions when reproducing checks, and record the results of the commands you run.
 
 ## Where changes belong
 

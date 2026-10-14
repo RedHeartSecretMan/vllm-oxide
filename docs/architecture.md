@@ -30,6 +30,6 @@ The v0.2.0 internal `StepPlan` / `StepResult` execution contract is absent from 
 
 ## Validation and experiments
 
-The [generator](../tools/golden-gen/README.md) writes schema-1 Transformers/vLLM fixtures. The [Rust tool](../crates/vllm-oxide-test/README.md) performs historical L1/L2 comparisons with known coverage and skip limitations. L3 is a stub. There is no modern layered schema-5 evaluator or validated performance/memory sampler in this archive.
+The [generator](../tools/golden-gen/README.md) writes schema-1 Transformers/vLLM fixtures. The [Rust tool](../crates/vllm-oxide-test/README.md) runs this version's L1/L2 comparisons, subject to its documented coverage and skip rules. L3 comparison is unimplemented and returns an error. This archive has no modern layered schema-5 evaluator or validated performance/memory sampler.
 
 The [research prototype](../research/prototype-candle-stack/README.md) separately checks tensor-to-CUDA FFI and a paged FlashAttention call. It loads no Qwen3 weights and does not validate engine numerical correctness. The [ADR](adr/0005-golden-generation-correctness-strategy.md) records the original golden strategy; current implementation gaps are explained in [validation](validation/README.md).

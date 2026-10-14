@@ -1,8 +1,8 @@
-# golden-gen — v0.1.0 fixture tooling
+# golden-gen: v0.1.0 fixture tooling
 
 [Tools](../README.md) · [Historical validation](../../docs/validation/README.md) · [Rust comparison](../../crates/vllm-oxide-test/README.md)
 
-This developer tool generates paired fixtures from **Transformers BF16/SDPA** and **vLLM BF16**, then calibrates the historical schema-1 absolute logit tolerance. The Rust runtime does not depend on this Python package. Real oracle inference is a manual GPU operation; CPU tests and synthetic fixtures validate tooling only.
+Generate paired fixtures from Transformers BF16/SDPA and vLLM BF16, then calibrate the historical schema-1 absolute logit tolerance. The Python package is separate from the Rust runtime. Real oracle inference runs manually on a GPU; CPU tests and synthetic fixtures check the tools.
 
 The guide describes the maintained v0.1.0 source. For new acceptance work, use the [v0.2.0 tooling](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/tools/golden-gen/README.md). Generation fails when any requested oracle/prompt or oracle cleanup fails, and publishes a manifest only after successful completion. It can reuse existing output/tolerance after success; inspect actual coverage and logs before interpreting the historical calibration as numerical acceptance.
 
@@ -137,8 +137,9 @@ Prompt IDs use portable ASCII file identifiers. Inventory validation rejects
 path components, duplicate or case-colliding IDs and collisions introduced by
 batch expansion before invoking an oracle. Output directories and files cannot
 be symbolic links; hard-linked and non-regular targets are rejected. Fixture generation targets Linux/WSL2 with atomic no-replace rename support.
-A fresh fixture is published only after its complete contents have been written. Deterministic retries reuse identical bytes,
-while different existing contents require a fresh output directory.
+The generator publishes a fixture only after writing its complete contents.
+A deterministic retry can reuse identical bytes; if existing contents differ,
+choose a fresh output directory.
 
 The Transformers oracle uses the actual generation step count. Each batch
 member retains its first EOS step and excludes later padding, including when

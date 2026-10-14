@@ -6,8 +6,8 @@ This retained [T10 / issue #11](https://github.com/RedHeartSecretMan/vllm-oxide/
 experiment checks two early [Stack A / issue #5](https://github.com/RedHeartSecretMan/vllm-oxide/issues/5)
 decisions: passing Candle tensor storage to a project CUDA kernel, and calling
 the paged FlashAttention entrypoint from [Candle PR #3655](https://github.com/huggingface/candle/pull/3655).
-It uses synthetic tensors. It loads no checkpoint, tokenizer, prompt or
-generation API; the engine lives in [`crates/vllm-oxide`](../../crates/vllm-oxide/).
+It runs on synthetic tensors without loading a checkpoint, tokenizer, prompt,
+or generation API. The engine is in [`crates/vllm-oxide`](../../crates/vllm-oxide/).
 
 ## What the executable checks
 
@@ -95,6 +95,6 @@ Building or running the full Cargo package still requires CUDA. Ordinary engine
 CI does not execute it. This prototype does not establish BF16 model accuracy,
 decoding behavior, throughput, KV-cache reuse or scheduler correctness. Its
 paged-FlashAttention call is not a specification of the released backend.
-The historical experiment's claimed result does not become a new GPU PASS when
-source or documentation is maintained. Use the [validation guide](../../docs/validation/README.md)
+Record a new run before reporting results for maintained source; the historical
+experiment describes its original revision. Use the [validation guide](../../docs/validation/README.md)
 for engine checks and the [release notes](../../docs/releases/) for version results.

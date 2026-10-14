@@ -1,8 +1,8 @@
 # Contributing to vllm-oxide
 
-Documentation, code, tests and reproducible issue reports are welcome in English or Chinese. You can contribute without a GPU.
+You can contribute documentation, code, tests, or a reproducible issue report in English or Chinese. Many tasks need no GPU.
 
-This archive documents v0.1.0. Start new contributions from the current `main` branch and its [contribution guide](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/CONTRIBUTING.md); the historical archive is useful for reproducing old behavior, not a separate active feature branch.
+Use this archive to reproduce v0.1.0 behavior. Start new contributions from the current `main` branch and follow its [contribution guide](https://github.com/RedHeartSecretMan/vllm-oxide/blob/main/CONTRIBUTING.md).
 
 ## Choose a change
 
@@ -15,6 +15,6 @@ This archive documents v0.1.0. Start new contributions from the current `main` b
 
 Use the [development guide](docs/development.md) for version-correct checks. Explain what changed and why, which checks actually ran, and any compatibility impact. CPU-only changes need no model download or GPU. Inference changes require relevant GPU validation; disclose unavailable checks and report skipped comparisons separately from passing ones.
 
-Open PRs against `main`. Use a clear commit title, keep changes focused and include reproduction details for behavior changes. Generated fixtures, model weights, raw validation packages and local working environments must stay outside git. This documentation refresh does not authorize uploading evidence packages.
+Open PRs against `main`. Use a clear commit title, keep changes focused and include reproduction details for behavior changes. Generated fixtures, model weights, raw validation packages and local working environments must stay outside git. Upload evidence packages only when explicitly requested.
 
 Contributions use the workspace's declared [Apache-2.0 license](LICENSE). Be respectful in discussion; do not post private prompts, access tokens or vulnerability details. See [support](SUPPORT.md) and [security](SECURITY.md).

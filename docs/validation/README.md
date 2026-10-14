@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Release notes](../releases/v0.1.0.en.md) · [Tooling](../../tools/README.md)
 
-The original v0.1.0 record was **not fully passing**. A documentation refresh does not rerun inference, establish current GPU performance, or replace the original outcomes.
+The original v0.1.0 validation included failed comparisons. The results below retain those outcomes; later documentation updates provide no new inference or performance measurement.
 
 | Recorded item | Historical result |
 |---|---|

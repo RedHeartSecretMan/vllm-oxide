@@ -1,4 +1,4 @@
-# vllm-oxide-test — schema-1 comparison tool
+# vllm-oxide-test: schema-1 comparison tool
 
 [Documentation](../../docs/README.md) · [Validation record](../../docs/validation/README.md) · [Fixture generator](../../tools/golden-gen/README.md)
 

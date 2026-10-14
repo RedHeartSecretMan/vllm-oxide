@@ -2,7 +2,7 @@
 
 [Project](../README.md) · [Documentation](../docs/README.md) · [Development](../docs/development.md) · [Validation](../docs/validation/README.md)
 
-These tools belong to the historical v0.1.0 source. They support fixture generation and inspection; they are not runtime dependencies of the Rust engine. Their schema, coverage and failure handling differ from the current v0.2.0 tooling.
+Use these v0.1.0 tools to generate and inspect historical fixtures. The Rust engine has no runtime dependency on them. Their schema, coverage, and failure handling differ from the current v0.2.0 tools.
 
 | Entry | Purpose | Requirements / output |
 |---|---|---|

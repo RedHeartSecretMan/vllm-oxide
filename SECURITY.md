@@ -7,7 +7,7 @@
 | Latest 0.2.x release | Best effort |
 | 0.1.x and earlier | Historical; upgrade to 0.2.x |
 
-The v0.1.0 documentation refresh does not establish a new support commitment. Security fixes target the latest published 0.2.x version, without a guaranteed response time.
+Security fixes target the latest published 0.2.x version. v0.1.0 remains a historical release; maintainers offer no guaranteed response time.
 
 ## Report a vulnerability
 

@@ -2,7 +2,7 @@
 
 [Project](../README.md) · [Documentation](../docs/README.md) · [Architecture](../docs/architecture.md)
 
-This directory contains the historical, standalone Candle/CUDA stack experiment. Its purpose is to investigate dependencies and kernel interoperability; it is not the production `LLM` API, model installation guide or release acceptance harness.
+Use this standalone Candle/CUDA experiment to investigate dependencies and kernel interoperability. It works independently of the production `LLM` API, model installation, and release acceptance tools.
 
 | Material | Purpose | Status |
 |---|---|---|

@@ -2,7 +2,7 @@
 
 [English README](../README.md) · [中文 README](../README.zh-CN.md) · [Current v0.2.0 documentation](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/docs/README.md)
 
-These guides describe the historical v0.1.0 source and tooling. The documentation layout follows the current project standard, while commands, APIs, fixture schemas and validation results remain version-specific.
+Use these guides to build and inspect v0.1.0, including its commands, APIs, fixture schemas, and original validation results.
 
 | Topic | Guide |
 |---|---|

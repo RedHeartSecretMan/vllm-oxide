@@ -4,9 +4,9 @@
 
 [Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0) · [Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Support](SUPPORT.md)
 
-vllm-oxide is a Rust engine for **single-GPU, synchronous, offline Qwen3 inference**, built on [Candle](https://github.com/huggingface/candle) and project-owned CUDA kernels. Its architecture draws on [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm).
+vllm-oxide runs Qwen3 offline on a single GPU through a synchronous Rust API. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm).
 
-This is the **historical experimental v0.1.0 source release**. New users should start with [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) and its [getting-started guide](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/docs/getting-started.md). v0.1.0 recorded token differences in four of eight evaluated groups and skipped comparisons; its original results remain unchanged.
+v0.1.0 is an experimental source release, retained for historical use. For a new application, start with [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) and its [getting-started guide](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/docs/getting-started.md). The original v0.1.0 evaluation found token differences in four of eight groups and skipped some comparisons. Those results remain part of this version's record.
 
 ## What this version contains
 
@@ -28,7 +28,7 @@ target/release/vllm_oxide_cli --model "$QWEN3_MODEL_DIR" \
     --max-tokens 16 "The meaning of life is"
 ```
 
-The historical CLI has **no `cuda` feature of its own**; the qualified `vllm_oxide/cuda` flag enables its library dependency. See the [version-specific guide](docs/getting-started.md) for model files, flags, Rust API and troubleshooting. The maintained source uses Rust 1.94.0, matching its regression checks; original historical toolchain claims remain part of the release record.
+The CLI enables CUDA through its library dependency with `vllm_oxide/cuda`; it has no `cuda` feature of its own. See the [version-specific guide](docs/getting-started.md) for model files, flags, Rust API and troubleshooting. The maintained source uses Rust 1.94.0, matching its regression checks; original historical toolchain claims remain part of the release record.
 
 ## Documentation and development
 
@@ -42,6 +42,6 @@ The historical CLI has **no `cuda` feature of its own**; the qualified `vllm_oxi
 | Inspect release scope and original assets | [Release notes](docs/releases/v0.1.0.en.md) |
 | Understand the source documentation refresh | [Documentation maintenance](docs/version-doc-update.md) |
 
-CPU test success does not establish GPU numerical correctness. The [validation guide](docs/validation/README.md) preserves the actual historical failures, comparison coverage limitations and the absence of a validated performance baseline.
+CPU tests check the development build. For GPU numerical results, see the [validation guide](docs/validation/README.md), which records the original failures, limits on comparison coverage, and the lack of a validated performance baseline.
 
 The workspace declares [Apache-2.0](LICENSE) licensing. Please follow the [security policy](SECURITY.md) when reporting vulnerabilities.

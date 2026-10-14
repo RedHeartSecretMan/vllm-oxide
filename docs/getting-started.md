@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [中文介绍](../README.zh-CN.md) · [Current v0.2.0 usage](https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0/docs/getting-started.md)
 
-This guide reproduces the historical single-GPU offline engine. v0.1.0 has known numerical differences; new applications should use v0.2.0. These commands were checked against the archived source, not rerun as new GPU acceptance.
+Use this guide to build and run the historical single-GPU offline engine. v0.1.0 has known numerical differences, so choose v0.2.0 for a new application. The commands match the archived source; they do not constitute a new GPU acceptance run.
 
 ## Requirements and source
 
@@ -83,7 +83,7 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-This version's output field is `seq_id`, not v0.2.0's `request_id`. Supply one `SamplingParams` for every prompt. `Prompt::Text` and `Prompt::TokenIds` are available; outputs contain decoded text and raw completion token IDs. The archived `LLM::generate` has known lifecycle limits, so this example deliberately demonstrates a single call rather than promising the current version's repeated-call guarantees.
+This version's output field is `seq_id`, not v0.2.0's `request_id`. Supply one `SamplingParams` for every prompt. `Prompt::Text` and `Prompt::TokenIds` are available; outputs contain decoded text and raw completion token IDs. The archived `LLM::generate` has known lifecycle limits. This example uses one call; the current version's repeated-call guarantees do not apply here.
 
 Default engine settings are 16,384 batched tokens, 512 sequences, 4,096 context tokens, `gpu_memory_utilization=0.9`, `enforce_eager=true`, and checkpoint dtype. In this source, memory utilization sizes the KV pool from available device memory after warmup; it is not a peak-memory cap. `enforce_eager=false` is rejected; CUDA Graphs are unsupported. Token/concurrency budgets and context length must be positive, and the memory fraction must be finite and in `(0, 1]`.
 
