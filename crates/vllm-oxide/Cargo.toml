@@ -8,7 +8,7 @@ repository.workspace = true
 authors.workspace = true
 # Distributed through Git source and GitHub Releases; not crates.io.
 publish = false
-description = "Rust/CUDA single-GPU offline Qwen3 inference release candidate."
+description = "A release candidate of the vllm-oxide large language model inference engine in Rust and CUDA."
 readme = "../../README.md"
 documentation = "https://github.com/RedHeartSecretMan/vllm-oxide/blob/v0.2.0.rc.1/docs/getting-started.md"
 
