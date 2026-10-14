@@ -37,4 +37,4 @@ owners cannot be reused as authoritative owners; the proposed independent scope
 still needs its own approval. No registry or numerical budget changes are part
 of this decision, and no golden tag, release or upload is authorized.
 
-The current measured snapshot is 33e0e27268285368c8c28b47df5cb1df9b2df174/tree2c7a4a1720d8695e809d150c9c53785658779195. Its saved capture/benchmark build-source identity is 45584f91845615156eb57ef48a778394c428a9c2. The supervision policy binds those original rebuilt binary digests and actual measurement identity; these are distinct from the local transport consumer binary compiled at the supervisor source.
+The measured snapshot is commit 33e0e27268285368c8c28b47df5cb1df9b2df174, tree 2c7a4a1720d8695e809d150c9c53785658779195. Its saved capture/benchmark build-source identity is 45584f91845615156eb57ef48a778394c428a9c2. The supervision policy binds those original rebuilt binary digests and actual measurement identity; these are distinct from the local transport consumer binary compiled at the supervisor source.

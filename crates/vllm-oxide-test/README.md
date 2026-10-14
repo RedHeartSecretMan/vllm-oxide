@@ -1,9 +1,9 @@
-# vllm-oxide-test — Validation tools
+# vllm-oxide-test: validation tools
 
-This workspace-only crate provides the Rust side of vllm-oxide validation:
-CUDA capture and performance producers, a CPU bundle transport reader, and the
-retained historical comparator. It is not a published crate or a supported
-application API. Normal applications use `LLM::generate` from `vllm_oxide`.
+Use this workspace-only crate to capture CUDA results, measure performance,
+read evidence bundles on CPU, or run the historical comparator. It is internal
+validation tooling and is not published as an application crate. Applications
+use `LLM::generate` from `vllm_oxide`.
 
 The current protocol is **`layered-accuracy-v1`**: L0 verifies operators and state
 invariants, L1 compares model numerics on the same frozen token history, and L2

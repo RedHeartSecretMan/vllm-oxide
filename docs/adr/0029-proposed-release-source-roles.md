@@ -4,14 +4,15 @@ status: proposed
 
 # Preserve numerical X/Y and declare a separate monitored performance R/W
 
-This is preparation only. The source-role exception has not been approved;
-the accepted Definition index, NUM, registry, original SUP and raw numerical
-evidence remain unchanged. The runtime role path requires a selected approved
+At this proposal checkpoint, the source-role exception was not yet approved.
+The accepted Definition index, NUM, registry, original SUP, and raw numerical
+evidence remain unchanged by the proposal. The runtime role path requires a selected approved
 role Definition plus an independently approved external freeze digest. Neither
 this ADR nor a proposed policy grants that authority.
 
-Keep the original X33e0e27 captures/747 owners and exact Yba5eb79 numerical
-evaluation, with original calibration2dc9445, policy and verdict bytes. A new
+Keep the original X (33e0e27) captures and all 747 owners, together with the
+exact Y (ba5eb79) numerical evaluation. Preserve calibration 2dc9445 and the
+original policy and verdict bytes. A new
 clean R performance producer uses its actual native source, binary/fingerprint
 and direct-nvml-v1 six method records. Future W separately proves its exact
 reviewed changes, CPU/source objects and R/W monitor equality; it calls exact
@@ -32,14 +33,14 @@ or approved. It never embeds W's own commit/tree in a tracked policy. Actual W,
 consumer, four-source CPU envelope, complete fixed-range reviews and user scope
 approval bind externally after the exact candidate is built and reviewed.
 
-Measured windows, API spans and real completion gaps preserve the strict50ms
-ceiling; 5ms scheduling cannot hide late samples or missing/pending records.
+Measured windows, API spans, and actual completion gaps must satisfy the
+strict 50ms ceiling. Scheduling every 5ms does not excuse late samples or
+missing/pending records.
 Exact R method/window/library/PID/projection data is revalidated with its actual
 fixed workload telemetry, producer guard and runtime. Each generate duration
 must cover its final synchronized telemetry time relative to admission inside
 that call; separate clock origins are never treated as equal absolute times.
-Mathematical/core/CLI/
-sampling/build/lock objects are protected; a general executable allowlist or
+Mathematical, core, CLI, sampling, build, and lock objects are protected; a general executable allowlist or
 historical SUP edit cannot authorize this exception.
 
 The exact reviewed W diff also includes `.github/workflows/ci.yml`: only the

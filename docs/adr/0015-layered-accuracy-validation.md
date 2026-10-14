@@ -1,6 +1,6 @@
 # Version operator, logit and token acceptance separately
 
-The user approved a redesigned accuracy contract and explicitly chose L0 for operators, L1 for model logits/distributions, and L2 for final token choices and engine behavior. We adopt the complete [layered accuracy contract](../validation/layered-accuracy-contract.md), keeping a fixed Transformers BF16 SDPA MATH reference and making paired vLLM comparison an additional numerical gate. No extra backend-isolation experiment is required.
+The approved accuracy design assigns L0 to operators, L1 to model logits and distributions, and L2 to final token choices and engine behavior. The [layered accuracy contract](../validation/layered-accuracy-contract.md) specifies these checks, using a fixed Transformers BF16 SDPA MATH reference and an additional paired comparison with vLLM. No extra backend-isolation experiment is required.
 
 This is a design-and-implementation approval, not empirical approval of any operator or model budget. All unset budgets remain pending, and new authoritative validation must fail closed until the corpus, budget provenance and independent evidence have been frozen. Historical failures, observations and reports retain their original identities and verdicts.
 

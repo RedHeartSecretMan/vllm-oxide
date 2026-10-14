@@ -1,10 +1,11 @@
-# golden-gen — Validation tooling
+# golden-gen: validation tooling
 
-This private Python package coordinates vllm-oxide's **`layered-accuracy-v1`**
-validation: **L0 operators and state invariants, L1 model numerics, and L2 decoding
-and public behavior**. Hugging Face Transformers BF16 is the reference oracle;
+Use this private Python package for `layered-accuracy-v1` validation. L0 checks
+operators and state invariants, L1 compares model numerics, and L2 checks decoding
+and public behavior. Hugging Face Transformers BF16 is the reference oracle;
 [vLLM](https://github.com/vllm-project/vllm) BF16 supplies baseline observations.
-A baseline never overrides a reference failure or automatically chooses budgets.
+Reference failures cannot be waived by the baseline, and budgets require
+explicit approval.
 
 The package also provides CPU adapter/transport tests, fixed-workload performance
 validation, local evidence packaging, and the retained historical schema-v4
@@ -44,10 +45,10 @@ uv run --project tools/golden-gen --locked --extra dev \
 cargo build --locked -p vllm_oxide_test --bin vllm-oxide-verify-bundle
 ```
 
-The module name selects the protocol; `golden-gen` / `python -m golden_gen`
-selects the retained schema-v4 CLI, not the layered workflow. Help commands
-parse arguments without loading a model. The two current CLIs use an action
-argument and shared flags rather than separate installed console commands.
+Choose the module for the protocol you need. `golden-gen` / `python -m golden_gen`
+opens the retained schema-v4 CLI. Help commands parse arguments without loading
+a model. The two current CLIs select an action through an argument and shared
+flags; they have no separate installed command for each action.
 For example, `python -m golden_gen.layered_cli collect --help` and
 `python -m golden_gen.release_cli verify --help` show their parser's complete
 flag set; stage-specific requirements are checked when the selected action runs.
@@ -268,10 +269,10 @@ unselected proposal supplies no authority.
 
 ## Golden asset bundle contract
 
-The local schema5 pair is exactly **`manifest.json`** and
-**`goldens-v0.2.tar.gz`**, preserving all raw evidence and source topology. Keep
-both on durable local storage, together with the original evidence, rather than
-relying on a temporary run directory. No GitHub evidence upload or archive
+The local schema5 bundle contains exactly `manifest.json` and
+`goldens-v0.2.tar.gz`, preserving all raw evidence and source relationships. Keep
+both files and the original evidence on durable local storage; temporary run
+directories can disappear. No GitHub evidence upload or archive
 splitting is required. See [ADR-0028](../../docs/adr/0028-local-release-evidence.md)
 and the [asset specification](../../docs/validation/layered-release-assets.md).
 
@@ -309,8 +310,8 @@ these golden API assets.
 ## Historical schema-v4 reference
 
 The retained `python -m golden_gen` CLI and `tools/validate-release.sh` implement
-the earlier `same-prefix-v1` corpus, with L1=token, L2=logits and a debug L3
-skeleton. The original corpus had 28 cases / 56 oracle assets. Its manifests,
+the earlier `same-prefix-v1` corpus, with L1=token, L2=logits, and an unimplemented
+debug L3 entrypoint. The original corpus had 28 cases / 56 oracle assets. Its manifests,
 tolerances, markers and verdicts keep their old meanings; they do not satisfy
 the current L0/L1/L2 protocol. The shell's `authoritative` and `publish` actions
 and the old direct publication preparation are disabled.
@@ -352,7 +353,7 @@ The following field and tensor tables describe **schema-v4 only** and retain
 that format's exact definitions. Schema5 uses opaque raw artifact records and
 the layered protocol described above.
 
-## Manifest Schema
+## Manifest schema
 
 `manifest.json` is the provenance record for a set of golden fixtures.
 
@@ -423,7 +424,7 @@ Each `FixtureMetadata` entry:
 | `sha256` | str | SHA-256 hex digest of the `.safetensors` file |
 | `filename` | str | Fixture filename (`{prompt_id}.{oracle}.safetensors`) |
 
-## Fixture File Format
+## Fixture file format
 
 Each `.safetensors` file contains the following tensors:
 
@@ -435,7 +436,7 @@ Each `.safetensors` file contains the following tensors:
 | `top5_indices` (regression only) | int64 | `[n, 5]` | Top-5 token indices per step |
 | `top5_logits` (regression only) | float32 | `[n, 5]` | Top-5 logit values per step |
 
-## Known Oracle Deviations
+## Known oracle deviations
 
 ### HF Transformers `output_logits=True`
 
@@ -501,8 +502,9 @@ Prompt IDs use portable ASCII file identifiers. Inventory validation rejects
 path components, duplicate or case-colliding IDs and collisions introduced by
 batch expansion before invoking an oracle. Output directories and files cannot
 be symbolic links; hard-linked and non-regular targets are rejected. Fixture generation targets Linux/WSL2 with atomic no-replace rename support.
-A fresh fixture is published only after its complete contents have been written. Deterministic retries reuse identical bytes,
-while different existing contents require a fresh output directory.
+The generator publishes a fixture only after writing its complete contents.
+A deterministic retry can reuse identical bytes; if existing contents differ,
+choose a fresh output directory.
 
 The Transformers oracle uses the actual generation step count. Each batch
 member retains its first EOS step and excludes later padding, including when

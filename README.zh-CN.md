@@ -6,15 +6,15 @@
 [![Release](https://img.shields.io/github/v/release/RedHeartSecretMan/vllm-oxide)](https://github.com/RedHeartSecretMan/vllm-oxide/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-vllm-oxide 是一个 Rust 推理引擎，支持**单 GPU、同步、离线的 Qwen3 推理**，基于 [Candle](https://github.com/huggingface/candle) 和项目自身的 CUDA 内核。架构参考 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 与 [vLLM](https://github.com/vllm-project/vllm)，提供持续批处理、前缀缓存、分页 KV 缓存和抢占重算。
+vllm-oxide 是一个 Rust 推理引擎，通过同步 API 在单张 GPU 上运行 Qwen3 离线推理。它基于 [Candle](https://github.com/huggingface/candle) 和自有 CUDA 内核，架构参考 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 与 [vLLM](https://github.com/vllm-project/vllm)，支持持续批处理、前缀缓存、分页 KV 缓存和抢占重算。
 
-**v0.2.0 已以源码形式发布。** 本版本验证范围为单张 CUDA GPU 上的 **Qwen3-0.6B BF16**。详情见[发布说明](docs/releases/v0.2.0.md)、[验收摘要](docs/releases/goldens-v0.2.md)和 [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0)。
+v0.2.0 已以源码形式发布，验证配置为单张 CUDA GPU 上的 Qwen3-0.6B BF16。详情见[发布说明](docs/releases/v0.2.0.md)、[验收摘要](docs/releases/goldens-v0.2.md)和 [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0)。
 
 [快速开始](docs/getting-started.md) · [文档索引](docs/README.md) · [架构](docs/architecture.md) · [版本发布](docs/releases/README.md) · [贡献指南](CONTRIBUTING.md)
 
 ## 可以实现什么
 
-在 Rust 应用中嵌入引擎，提交一批文本或 token ID 提示，获得完整的续写文本和 token ID。跨调用复用同一个 `LLM`，可保留模型及缓存分配。CLI 使用相同的生成路径，每次处理一条提示。
+通过 Rust 库提交一批文本或 token ID 提示，即可取得生成的文本和 token ID。多次调用时复用同一个 `LLM`，模型会保持加载，已分配的缓存也可继续使用。CLI 使用相同的生成路径，每次处理一条提示。
 
 | 领域 | v0.2.0 支持范围 |
 |---|---|
@@ -24,7 +24,7 @@ vllm-oxide 是一个 Rust 推理引擎，支持**单 GPU、同步、离线的 Qw
 | Token 选择 | Greedy、temperature、top-k、top-p、presence/frequency/repetition penalty、EOS 与 token 上限停止 |
 | 分发形式 | 带版本标签的源码、Rust 库和 CLI；没有预编译程序或已发布的 crates.io 包 |
 
-服务接口、异步流式输出、多 GPU/TP/NCCL、其他模型族、量化、LoRA、speculative decoding 和 CUDA Graphs 均不在本版本范围内。架构参考不代表与上游 vLLM 的 API 兼容或功能相同。
+服务接口、异步流式输出、多 GPU/TP/NCCL、其他模型族、量化、LoRA、speculative decoding 和 CUDA Graphs 均不在本版本范围内。
 
 ## 快速开始
 
@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
 
 ## 支持范围与性能
 
-当前实现优先保证数值正确性。[发布验收摘要](docs/releases/goldens-v0.2.md)记录已完成的数值、行为和公开 CUDA 检查。在固定 RTX 4080/WSL2 工作负载中，decode 吞吐中位数为**单请求 29.7601 token/s**、**四请求合计 115.8207 token/s**。工作负载、测量边界和显存用量见[基准测试](docs/benchmarks/README.md)。这些观测不构成跨硬件保证，也不代表与 vLLM 性能相同。
+[发布验收摘要](docs/releases/goldens-v0.2.md)记录了本版本的数值、行为和公开 CUDA 检查结果。在固定 RTX 4080/WSL2 工作负载中，decode 吞吐中位数为**单请求 29.7601 token/s**、**四请求合计 115.8207 token/s**。工作负载、测量边界和显存用量见[基准测试](docs/benchmarks/README.md)。这些结果只适用于实测的工作负载与硬件，不能据此认定与 vLLM 的性能相同。
 
 ## 开发与验证
 
@@ -99,7 +99,7 @@ cargo build --locked --workspace
 cargo test --locked --workspace
 ```
 
-CPU 构建用于开发与测试；**实际推理必须启用 `--features cuda` 并使用 GPU**。自动 GitHub CI 检查编译、格式、Clippy、Rust 测试、Python CPU 验证工具及依赖。模型精度、CUDA API/CLI 功能和性能通过本地 GPU 单独验证。CI 通过本身不代表模型精度已经验证。
+CPU 构建用于开发与测试。运行推理需要启用 `--features cuda` 并使用 GPU。GitHub CI 检查编译、格式、Clippy、Rust 测试、Python CPU 验证工具及依赖；模型精度、CUDA API/CLI 功能和性能另有本地 GPU 检查。
 
 开发环境与完整检查见 [CONTRIBUTING.md](CONTRIBUTING.md)和[开发指南](docs/development.md)。[架构概览](docs/architecture.md)说明一次生成调用对应的当前实现，[验证指南](docs/validation/README.md)区分日常 CI 和真实模型检查。
 

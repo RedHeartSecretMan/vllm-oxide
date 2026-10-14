@@ -77,10 +77,10 @@ Published tags normally identify immutable source snapshots. Improve wording wit
 
 ## Authorized documentation refresh of an existing version
 
-The user explicitly requested that all three existing source archives include
-the improved version-specific documentation, including their `research` and
-`tools` directories. This is a documentation-maintenance exception, not a
-backport of v0.2.0 behavior into older releases.
+An explicitly authorized refresh updated the documentation in all three
+existing source archives, including `research` and `tools`. The documentation
+phase preserved each version's executable behavior and API. Later code fixes
+follow the separate source-maintenance scope below.
 
 For this operation:
 
@@ -151,18 +151,20 @@ original failed or diagnostic records keep their verdicts.
 
 ## Authorized source maintenance of existing versions
 
-The 2026-10-14 maintenance explicitly includes code fixes in the three existing
-source snapshots, including `research` and `tools`. Use version-specific
-regression checks and review the executable diff. Preserve the original model
-validation definitions, budgets, measurement identities and historical verdicts.
-Record new checks separately; old PASS reports are not new measurements.
+The authorized 2026-10-14 maintenance includes code fixes in all three source
+snapshots, including `research` and `tools`. Review the executable diff and run
+regression checks for each version. Keep the original model definitions,
+numerical budgets, measurement identities, and historical verdicts. Record new
+checks against their actual source commits.
 
 Before updating a tag, record its exact object locally. Publish a reviewed
 maintenance descendant with an exact old-object force-with-lease check. Preserve
 Release IDs, original dates, status and attached assets, and synchronize the
 source identity and reviewed notes. Download each new archive and compare every
-tracked file with the reviewed commit. Remove temporary remote work branches;
-retain the three official tags without additional backup tags. See the
+tracked file with the reviewed commit. Before removing a temporary remote work
+branch, confirm its maintained release commits and documented historical sources
+are ancestors of the remote default branch. Keep the three official tags and
+store any backup refs locally. See the
 [source maintenance record](../version-doc-update.md).
 
 Before removing any temporary remote branch, verify every maintained tag and

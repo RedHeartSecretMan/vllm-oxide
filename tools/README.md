@@ -2,10 +2,10 @@
 
 [Project overview](../README.md) · [Documentation](../docs/README.md) · [Development](../docs/development.md)
 
-These utilities maintain documentation and collect or inspect validation
-evidence. They are developer tools; the inference library and CLI do not import
-the Python package. Run the commands below from the **repository root** unless
-the linked guide specifies otherwise.
+Use these utilities to check documentation and collect or inspect validation
+evidence. The Python package is for development; the inference library and CLI
+do not import it. Run commands from the repository root unless a linked guide
+specifies another directory.
 
 ## Choose the task
 
@@ -64,5 +64,5 @@ Use fresh evidence paths outside the reviewed source checkout and keep complete
 raw evidence on durable local storage. `golden-gen/output/` is ignored working
 state, must not be committed, and is not accepted release evidence. Model
 weights, diagnostic captures and full evidence packages are not uploaded as part
-of the current source releases. Historical failed runs remain unchanged;
-improving a tool's documentation does not change any historical verdict.
+of the current source releases. Earlier runs keep their original source
+identities and verdicts.

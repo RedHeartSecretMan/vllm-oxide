@@ -43,7 +43,7 @@ Only after empirical approval may the candidate open `canonical_04`, `canonical_
 
 ADR-0012's model/tokenizer/weights identities, versions, BF16 dtype, MATH reference, fixed FA candidate and baseline paths, deterministic fresh-process replays, complete fixture accounting, same-prefix comparison, zero missing/skipped/failed release cases, performance prerequisites, evidence/source binding, resource guards, and separately authorized publication remain unchanged. The public API, Tickets #29 through #47, native dependency edges, and non-numerical acceptance obligations do not change.
 
-The trade-off is explicit: this revision permits larger empirically justified absolute differences within the existing kernel scope. It does not replace the production attention path to seek bitwise parity, relax a threshold after viewing holdout results, or accept the failed historical calibration. Independent holdout and the fail-closed release workflow remain the tests of the revised policy's adequacy.
+This revision permits larger empirically justified absolute differences within the existing kernel scope. It does not replace the production attention path to seek bitwise parity, relax a threshold after viewing holdout results, or accept the failed historical calibration. Independent holdout and the fail-closed release workflow remain the tests of the revised policy's adequacy.
 
 **Supersedes**: only ADR-0012's initial numerical ladder upper endpoints and calibration ceilings.
 

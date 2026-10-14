@@ -6,7 +6,7 @@ supported behavior. This repository uses GitHub Issues for public questions and
 reports. English and Chinese are both welcome. There is no separate chat,
 discussion forum or support service.
 
-| You need to… | Use |
+| Task | Where to go |
 | --- | --- |
 | Ask a usage or development question | Search [GitHub Issues](https://github.com/RedHeartSecretMan/vllm-oxide/issues), then open a [question](https://github.com/RedHeartSecretMan/vllm-oxide/issues/new?template=question.yml) if needed |
 | Report an error or unexpected behavior | [Bug report](https://github.com/RedHeartSecretMan/vllm-oxide/issues/new?template=bug_report.yml) |
@@ -18,8 +18,7 @@ discussion forum or support service.
 For an inference problem, include the version or commit, minimal command or Rust
 example, model ID and revision, operating system, GPU/driver/CUDA details,
 generation settings, expected result and actual result. For CPU or documentation
-issues, GPU fields can be marked as not applicable. Short, relevant logs usually
-help more than a large archive.
+issues, GPU fields can be marked as not applicable. Include the relevant log excerpt so others can find the failure quickly.
 
 Remove access tokens, private prompts and other sensitive information from
 public reports. Model weights and raw validation packages are not needed to

@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Getting started](../getting-started.md) · [Validation](../validation/README.md)
 
-Measure the complete workload before drawing a conclusion about application speed. End-to-end generation includes model forward execution, scheduling, cache operations, sampling, and token transfers; a faster isolated kernel does not imply the same improvement in total inference throughput.
+Measure the complete workload when evaluating application speed. Generation includes model execution, scheduling, cache operations, sampling, and token transfers, so an isolated kernel speedup accounts for only part of the total.
 
 ## v0.2.0 end-to-end baseline
 
@@ -21,7 +21,7 @@ Prefill throughput counts newly executed, uncached prompt tokens over synchroniz
 
 All six repetitions passed their sample/config/output and memory-record checks. The 5 ms memory-sampling target retained a strict 50 ms timing limit; the largest observed completion interval was 13.359862 ms. The [original protocol](../adr/0012-goldens-v0.2-calibration-and-performance-protocol.md) describes the metric definitions, and the final summary supplies the actual sources and hashes.
 
-These numbers describe one fixed environment and workload. They are not a cross-hardware performance guarantee, a general-purpose model benchmark, or a comparison claiming parity with Python vLLM. GPU exclusivity was not asserted.
+These measurements apply to one fixed environment and workload. They establish neither cross-hardware throughput nor parity with Python vLLM, and they are not a general-purpose model benchmark. The run did not assert exclusive GPU use.
 
 ## Focused microbenchmarks
 

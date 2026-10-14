@@ -2,17 +2,15 @@
 
 ## Source maintenance — 2026-10-14
 
-Version-specific maintenance is applied to the three existing release source
-snapshots at the user's request. It covers sampling numeric boundaries, model
+The three existing release snapshots received version-specific source
+maintenance. It covers sampling numeric boundaries, model
 configuration validation, fixture output confinement, unaligned tensor reads,
 early EOS handling, and the research prototype's workspace and safety checks.
 The follow-up review additionally covers input/token bounds, Qwen3 configuration
 semantics, cached/indexed checkpoint discovery, CLI preflight, degenerate sampling
 and fixture publication. Version-specific comparator and CPU workflow fixes are
-detailed in the maintenance record. These changes do not relabel original model
-acceptance or performance measurements.
-Original measurements, budgets and historical verdicts retain their source
-identities. See [source maintenance](docs/version-doc-update.md) for scope and
+detailed in the maintenance record. Original measurements, budgets, and
+historical verdicts remain tied to the source that produced them. See [source maintenance](docs/version-doc-update.md) for scope and
 validation records.
 
 
@@ -127,16 +125,12 @@ package version. This candidate was superseded by v0.2.0.
 - Library API: `LLM::new` + `LLM::generate` with per-prompt `SamplingParams`
 - Golden comparison harness (`vllm-oxide-test`): L1 token-sequence match, L2 logits comparison
 - Python golden fixture generator (`tools/golden-gen/`): transformers + vLLM oracle triangle
-- CI pipeline: fmt, clippy (12 lints), test, cargo-deny audit
-- Cargo-deny: advisory, license, ban, and source audits (deny.toml)
 - Weight loader: HuggingFace sharded safetensors, local directory support
 - TP seam: `ParallelStyle` trait + `TpConfig` enum (v0.2 contract, Single-only in v0.1)
 
 ### Documentation
 
-- README with architecture overview, quick start, library usage, testing tiers
 - CONTEXT.md: domain vocabulary and ubiquitous language
-- ADR-0001 through ADR-0004: parametric parallel layers, weight loader seam, model registry + RoPE, engine dependency DAG
 - ADR-0005: golden generation correctness strategy
 
 [Unreleased]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.2.0...HEAD

@@ -84,7 +84,7 @@ Supply one complete `SamplingParams` value per prompt. v0.2 validates sampling p
 
 Default sampling is still greedy. `ignore_eos` ignores EOS stopping but never removes the completion-token limit. See the [sampling guide](getting-started.md#sampling-and-input-constraints) for the complete supported combinations and corner cases.
 
-The model source is resolved once per `LLM` construction so configuration, tokenizer, weights, dtype, and special tokens share one model identity. Checkpoint dtype metadata is required unless an explicit override is supplied; malformed or missing metadata no longer silently falls back to BF16. Keep checkpoint directories complete rather than combining unrelated tokenizer/configuration/weight revisions.
+Each `LLM` resolves one model source at construction, keeping configuration, tokenizer, weights, dtype, and special tokens together. Supply checkpoint dtype metadata or an explicit override; malformed or missing metadata no longer silently falls back to BF16. Use a complete checkpoint directory whose tokenizer, configuration, and weights come from the same revision.
 
 ## Check behavior after upgrading
 

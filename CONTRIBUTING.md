@@ -1,8 +1,8 @@
 # Contributing to vllm-oxide
 
-Code, tests, documentation and reproducible issue reports are welcome. You can
-contribute without a GPU. English and Chinese are both welcome in issues and
-pull requests.
+You can contribute code, tests, documentation, or a reproducible issue report.
+Many tasks need no GPU. Feel free to use English or Chinese in issues and pull
+requests.
 
 Follow the [community standards](CODE_OF_CONDUCT.md) in discussions and reviews.
 
@@ -13,23 +13,23 @@ Start with the [documentation index](docs/README.md) and the
 
 ## Choose a contribution
 
-- **Documentation:** send small corrections directly as a PR. Check links and
+- Send small documentation corrections directly as a PR. Check links and
   examples; a wording or link fix needs no GPU validation.
-- **Bug fix:** search [existing issues](https://github.com/RedHeartSecretMan/vllm-oxide/issues),
+- For a bug fix, search [existing issues](https://github.com/RedHeartSecretMan/vllm-oxide/issues),
   include a minimal reproduction, and add a regression test when behavior changes.
-- **Feature or API change:** describe the use case and proposed behavior in an
+- For a feature or API change, describe the use case and proposed behavior in an
   issue before a large implementation. Capabilities outside the current release
   scope require their own design and validation.
-- **Ready ticket:** follow its acceptance criteria and use
+- For a ready ticket, follow its acceptance criteria and use
   `feat/t<NN>-<slug>` for the branch. The [triage guide](docs/agents/triage-labels.md)
   explains readiness; the [issue workflow](docs/agents/issue-tracker.md) explains
   dependencies.
 
 ## Develop and validate
 
-The [development guide](docs/development.md) covers Rust 1.94.0, local CPU checks,
-the locked Python environments, code conventions and the distinction between
-CPU CI and GPU validation. It also explains which checks apply to each change.
+Follow the [development guide](docs/development.md) to set up Rust 1.94.0 and the
+locked Python environments. It explains the code conventions and which CPU or
+GPU checks to run for your change.
 
 Ordinary PR CI runs automatically on GitHub-hosted CPU runners. No runner setup,
 CUDA Toolkit or model download is needed for Rust and documentation checks.

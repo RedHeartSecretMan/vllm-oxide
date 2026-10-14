@@ -2,9 +2,8 @@
 
 [Documentation index](README.md) · [Contributing](../CONTRIBUTING.md)
 
-Run the commands below from the repository root. These checks use the source
-checkout and its lockfiles. CPU development verifies executable behavior and
-tooling without providing CPU inference.
+Run these commands from the repository root, using the checkout's lockfiles.
+CPU checks cover code and tooling; inference requires a CUDA build.
 
 ## Environment
 
@@ -67,14 +66,13 @@ has not changed.
 
 ## Python tooling and CPU adapter tests
 
-The complete suite uses two separate locked environments:
+The complete suite uses two locked environments. The development environment
+contains pytest, Ruff, mypy, and the validation package. Worker subprocesses use
+a separate environment with the locked Torch/vLLM dependencies.
 
-- **Development:** pytest, Ruff, mypy and the validation package.
-- **Worker:** the locked Torch/vLLM dependencies needed by CPU adapter subprocesses.
-
-The tests also need a Rust CPU transport reader. Installing worker dependencies
-does not mean GPU inference runs in CI. The complete CI job rejects skipped
-cases, missing adapters and empty test results.
+The tests also need a Rust CPU transport reader. These adapters run on CPU,
+including when the worker has GPU-capable dependencies installed. The complete
+CI job rejects skipped cases, missing adapters, and empty test results.
 
 These Bash commands mirror that job:
 
@@ -131,7 +129,7 @@ appropriate version and measured environment.
   generation contract and engine/cache ownership terms.
 - Record significant architecture or public API decisions in
   [ADRs](adr/). Read their status and scope: older proposals and superseded
-  decisions are historical context, rather than promises of current behavior.
+  decisions describe their original implementation and scope.
 
 Use commit prefixes such as `feat`, `fix`, `docs`, `test`, `ci` and `chore`.
 For PRs, describe the concrete behavior and compatibility impact; the size of

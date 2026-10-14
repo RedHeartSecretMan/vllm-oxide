@@ -2,7 +2,7 @@
 
 [English project overview](../README.md) · [中文项目介绍](../README.zh-CN.md)
 
-vllm-oxide v0.2.0 supports synchronous, offline [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) BF16 generation on one CUDA GPU. It is distributed as source. Start with a first generation, then choose the guide for your application or contribution.
+vllm-oxide v0.2.0 runs synchronous, offline [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) BF16 generation on one CUDA GPU. It is available as source. Start with Getting started to build the engine and run your first prompt, then use the guides below for API details, development, or validation.
 
 ## Use the engine
 

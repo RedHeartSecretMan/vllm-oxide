@@ -8,11 +8,11 @@
 实际发布结果见 [v0.2.0 验收摘要](../docs/releases/goldens-v0.2.md)。外部证据保留
 研究日固定的源码版本，不能直接提供本项目的数值阈值或验收结论。
 
-研究日期：2026-09-06。本文是研究建议，不批准新门槛，不改判既有失败，不修改代码、DAG Definition 或发布结论。检索限定于官方文档和官方源码，外部库文档先经 Context7 解析与查询；未运行外部源码、GPU 实验或编译。
+研究日期：2026-09-06。以下建议基于官方文档和固定版本的官方源码审阅，未执行外部代码、GPU 实验或编译。建议本身不批准新门槛，也不改变既有失败、代码、DAG Definition 或发布结论。
 
 ## 研究结论
 
-当前方案的基本方向合理：固定模型与运行身份、固定参考实现、区分基线、比较同前缀输出、完整计数、独立重放和校准/验收隔离，都服务于可审计的推理实现验收。但它不能仅凭八个 canonical 的 L2 通过，就宣称整个引擎数值正确；二十个只有 token/top-5 的 regression 无法参与完整分布审查，exact-token 规则也会把数值近似导致的近似并列与实现错误混在同一失败类别。
+当时的方案已经固定模型、运行配置和参考实现，并通过同前缀比较、完整计数、独立重放及校准/验收隔离保留可复查的证据。覆盖仍有两处缺口：八个 canonical 的 L2 结果不足以代表整个引擎，二十个只保存 token/top-5 的 regression 也无法参与完整分布比较。此外，exact-token 规则会把数值近似造成的近似并列与实现错误放进同一失败类别。
 
 讨论中的“所有 case 保存完整参考 logits、固定前缀回放、KL 为主、TV 和参考侧选词损失辅助”有明确工程价值。行业支持使用这些不同层面的证据，但没有检索到与本提案完全对应的“逐 case，KL mean/max 对 MATH 绝对上限，并相对 vLLM 加固定余量”的行业标准。它是可辩护、仍需验证的项目设计，不能从 llama.cpp 的量化排行榜、某个 `atol` 或 MLPerf 的 99% 规则直接获得批准值。“KL 主门槛是最佳行业方案”这一表述过强；本次证据支持多层验收和场景化验证，不支持统一的最佳指标或统一阈值。
 
@@ -20,9 +20,9 @@ KL 衡量指定输入下的输出分布偏离，不能单独证明各算子正�
 
 ## 研究时生效规则与待讨论方案
 
-当时规则以 [ADR-0012](../docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md) 和 [ADR-0014](../docs/adr/0014-goldens-v0.2-empirical-tolerance-policy.md) 为准。评审上下文中的 Base P 为 `e67f040`，candidate 为 `a297024`；正式测量状态由主线程核对，本文未重新运行测量。
+当时规则以 [ADR-0012](../docs/adr/0012-goldens-v0.2-calibration-and-performance-protocol.md) 和 [ADR-0014](../docs/adr/0014-goldens-v0.2-empirical-tolerance-policy.md) 为准。评审使用的 Base P 为 `e67f040`，candidate 为 `a297024`；正式测量状态沿用当时核对的记录，此次未重新运行测量。
 
-| 项目 | 当前生效 | 讨论中，尚未实施或批准 |
+| 项目 | 当时生效的规则 | 讨论中，尚未实施或批准 |
 | --- | --- | --- |
 | 参考 | Transformers 4.57.6、PyTorch 2.10.0、BF16、SDPA MATH 唯一参考；vLLM 0.18.1 FA2 为校准/调查；Rust 为固定 Candle FA 路径 | 保留 MATH 参考；考虑让相对 vLLM 的表现成为第二门槛 |
 | 覆盖 | 28 reference + 28 baseline；8 个 canonical/batch case 有完整参考 logits，20 个 regression 只有 reference token/top-5 | 所有 case 保存完整参考 logits |
@@ -41,35 +41,35 @@ ADR-0014 明确当前容差只适用于固定 BF16/内核范围；校准来自�
 
 [`log_softmax` 与 KL 汇总源码](https://github.com/ggml-org/llama.cpp/blob/74a7c897f049c17e7080423aa2111776eff6ebbf/tools/perplexity/perplexity.cpp#L191) 以基线概率加权，方向对应 `KL(P_base || P_candidate)`；输出 mean、max 和分位数。不过此版本缓存的是压缩为 `uint16` 的 log-prob，累计 KL 时只保留 `p_log_base > -16` 的项。不能把这些报告值当作本项目无截断全词表 KL 的可直接移植阈值。
 
-**能支持：**同一 token 历史上保存基线分布、相对比较、同时保留尾部统计与 top-1 诊断。**不能支持：**“KL 小于某个统一常数便证明实现正确”，或把量化质量取舍直接作为 BF16 移植验收标准。该工具的统计输出本身不是本项目的发布契约。
+这个例子支持在相同 token 历史上保存基线分布、开展相对比较，并同时报告尾部统计和 top-1 诊断。它没有给出能证明实现正确的统一 KL 常数，量化场景的质量取舍也不能直接作为 BF16 移植的验收标准。本项目仍需定义自己的发布契约。
 
 ### 2. NVIDIA：张量正确性与任务精度分别测试
 
-TensorRT-LLM 固定 commit `15580f8ddd085499a9e73d58cebc2295060d62a8`，于研究日解析。[`test_llama_allclose_to_hf`](https://github.com/NVIDIA/TensorRT-LLM/blob/15580f8ddd085499a9e73d58cebc2295060d62a8/tests/unittest/_torch/modeling/test_modeling_llama.py#L210) 在相同输入上比较 HF 与实现的 prefill/decode logits。主线程进一步核验：它构造随机权重 HF 模型并复制权重，按设备内存缩小配置，使用八个输入 token 加一步 decode；这是局部模型路径单测，不是训练好 8B 模型的发布质量门槛。同文件的缓存回退相关测试还同时比较 logits 与 greedy token。该测试的 `atol=0.4, rtol=0.4` 不能移植到其他模型/内核，也不能为本项目 `atol=1.0` 背书。
+TensorRT-LLM 固定 commit `15580f8ddd085499a9e73d58cebc2295060d62a8`，于研究日解析。[`test_llama_allclose_to_hf`](https://github.com/NVIDIA/TensorRT-LLM/blob/15580f8ddd085499a9e73d58cebc2295060d62a8/tests/unittest/_torch/modeling/test_modeling_llama.py#L210) 在相同输入上比较 HF 与实现的 prefill/decode logits。源码核验表明，该测试构造随机权重的 HF 模型并复制权重，根据设备内存缩小配置，使用八个输入 token 加一步 decode。它检查局部模型路径，并未给出训练好 8B 模型的发布质量门槛。同文件的缓存回退相关测试还同时比较 logits 与 greedy token。该测试的 `atol=0.4, rtol=0.4` 不能移植到其他模型/内核，也不能为本项目 `atol=1.0` 背书。
 
 任务层面的 [`accuracy_core.py`](https://github.com/NVIDIA/TensorRT-LLM/blob/15580f8ddd085499a9e73d58cebc2295060d62a8/tests/integration/defs/accuracy/accuracy_core.py#L42) 则通过模型、dtype、量化等配置匹配数据集 reference，并使用样本数、标准差、显著性参数计算单侧阈值，报告最小可检测效应。它覆盖 ROUGE、MMLU 等任务。这个例子支持讨论“阈值能发现多大的退化”，并没有为 KL 给出通用检验公式。
 
 Model Optimizer 固定 commit `a7f339ed08fe663ed5cf78d5fedf9ceaeb7c7c8b`；其 [Native Fake-Quantized Evaluation](https://github.com/NVIDIA/Model-Optimizer/blob/a7f339ed08fe663ed5cf78d5fedf9ceaeb7c7c8b/examples/llm_qat/README.md#L335) 用 MMLU、WikiText 等 benchmark 快速评估量化模型。由于这是 fake-quantized 路径，它也不能替代部署后的实际 kernel 验收。
 
-**能支持：**数值测试和任务测试并存，门槛绑定模型/配置，考虑样本数与故障检测能力。**不能支持：**任务分数良好即可豁免张量错误，或照搬 NVIDIA 某个局部 `atol`、统计参数。
+这组测试分别检查数值和任务质量，将门槛绑定到模型与配置，并考虑样本数和故障检测能力。任务分数通过仍不能豁免张量错误，NVIDIA 局部测试中的 `atol` 和统计参数也需要在本项目中另行论证。
 
 ### 3. MLPerf：99% 是指定任务的质量门槛
 
 采用有明确发布日期的 MLCommons 官方文章：[MLPerf Inference v5.0，2025-04-02](https://mlcommons.org/2025/04/llm-inference-v5/)。其中 Llama 3.1 405B Instruct 使用摘要 ROUGE-L，以及检索/文档问答的 exact match；closed division 的质量门槛为 FP16 reference 对应分数的 99%。该版本的 reference 实现采用 vLLM。
 
-**能支持：**指定模型、语料、任务指标相对于指定 reference 的质量下限，以及任务需要时使用 exact match。**不能支持：**99% token 一致、99% 算子正确、`KL ≤ 0.01`，或 MATH/vLLM/Rust 三方误差预算。任务答案 exact match 与逐 token 跨引擎 exact match 也不是同一种判定。本文引用的是 v5.0 的具体先例，不声称它代表所有 MLPerf 版本与模型。
+这里的质量下限适用于指定模型、语料和任务指标，并按任务需要使用 exact match。它不表示 99% token 一致或 99% 算子正确，也不能推出 `KL ≤ 0.01` 或 MATH/vLLM/Rust 三方误差预算。任务答案的 exact match 与跨引擎逐 token 比较是不同判定，以上结论仅对应所引 v5.0 示例。
 
 ### 4. vLLM：严格相等与 top-N 容差用于不同测试
 
-主线程核验的版本为 vLLM v0.18.1，commit `a26e8dc7ff2111a005144d775ecf9cebf56c45b2`。[`tests/models/utils.py`](https://github.com/vllm-project/vllm/blob/a26e8dc7ff2111a005144d775ecf9cebf56c45b2/tests/models/utils.py#L225) 中，`check_outputs_equal` 检查文本/token 相等；`check_logprobs_close` 的生成输出分支在首个 token 不一致时，检查双方实际所选 token 是否都在对方保存的 top-N logprob 字典中，然后停止比较该分叉后的序列。
+核验版本为 vLLM v0.18.1，commit `a26e8dc7ff2111a005144d775ecf9cebf56c45b2`。[`tests/models/utils.py`](https://github.com/vllm-project/vllm/blob/a26e8dc7ff2111a005144d775ecf9cebf56c45b2/tests/models/utils.py#L225) 中，`check_outputs_equal` 检查文本/token 相等；`check_logprobs_close` 的生成输出分支在首个 token 不一致时，检查双方实际所选 token 是否都在对方保存的 top-N logprob 字典中，然后停止比较该分叉后的序列。
 
-**能支持：**对跨实现数值差异采用有限 top-N 兼容规则有实际先例，exact token 并非所有测试的唯一准则。**不能支持：**“双方 top-2 集合必须完全相同”、全词表 KL 已经过验收，或 top-N 兼容足以证明整个模型精度。`prompt_logprobs` 分支的字典 key 检查与上述生成分支必须区分。[官方模型测试说明](https://github.com/vllm-project/vllm/blob/a26e8dc7ff2111a005144d775ecf9cebf56c45b2/docs/contributing/model/tests.md) 将这部分放在 Optional Tests；不能描述为 vLLM 全项目强制 GPU 发布规范。
+这些函数展示了有限 top-N 兼容规则在跨实现测试中的用法；exact token 并非唯一判据。这一规则既不要求双方 top-2 集合完全相同，也没有验证全词表 KL，因此不能单独证明整个模型的精度。`prompt_logprobs` 分支的字典 key 检查与上述生成分支必须区分。[官方模型测试说明](https://github.com/vllm-project/vllm/blob/a26e8dc7ff2111a005144d775ecf9cebf56c45b2/docs/contributing/model/tests.md) 将这部分放在 Optional Tests；不能描述为 vLLM 全项目强制 GPU 发布规范。
 
 ### 5. FlashAttention：相对误差预算有算子级先例
 
-主线程核验的 commit 为 `ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820`。[`test_flash_attn.py`](https://github.com/Dao-AILab/flash-attention/blob/ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820/tests/test_flash_attn.py#L640) 对同一 Q/K/V 使用高精度 reference 与低精度、重排运算的对照；[具体断言](https://github.com/Dao-AILab/flash-attention/blob/ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820/tests/test_flash_attn.py#L702) 中存在“FA 对 reference 的最大误差不超过低精度对照误差的两倍”。
+核验的 commit 为 `ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820`。[`test_flash_attn.py`](https://github.com/Dao-AILab/flash-attention/blob/ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820/tests/test_flash_attn.py#L640) 对同一 Q/K/V 使用高精度 reference 与低精度、重排运算的对照；[具体断言](https://github.com/Dao-AILab/flash-attention/blob/ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820/tests/test_flash_attn.py#L702) 中存在“FA 对 reference 的最大误差不超过低精度对照误差的两倍”。
 
-**能支持：**相对一个已知低精度实现的数值预算，并非没有行业先例。**不能支持：**把单个 attention、相同 Q/K/V、特定 dtype/shape 的逐元素误差规则直接换成整模型对 vLLM 的 KL mean/max 规则。换指标、换计算层级后，原来的倍数没有自动延续的依据。
+这里的相对误差预算以已知低精度实现为对照，适用于单个 attention、相同 Q/K/V 以及指定 dtype/shape。改为整模型对 vLLM 的 KL mean/max 后，指标和计算层级都发生了变化，原来的倍数需要重新论证。
 
 ## 对新方案的具体判断
 
@@ -97,7 +97,7 @@ greedy exact-match 适合验证合同明确要求相同离散行为的路径，�
 
 保留 MATH 硬上限，可避免 vLLM 在某 case 误差很大时把 Rust 也自动放行；将相对 vLLM 门槛作为额外约束，则可表达“相对同一 reference，Rust 不应明显弱于选定成熟实现”。这是合理的工程目标。
 
-MATH 仍是固定有限精度参考实现，并非理论真值。主线程核验的 [PyTorch 2.10 数值精度说明](https://docs.pytorch.org/docs/2.10/notes/numerical_accuracy.html) 明确浮点运算不满足结合律，数学等价的批处理/逐条执行、CPU/GPU 结果不保证 bitwise 相同；MATH 对 BF16/FP16 输入默认上转 FP32 中间计算，然后回到原 dtype。更高精度的中间计算不等于精确实数计算，BF16 权重与模型其余运算的误差也不会因 attention 选 MATH 而消失。
+MATH 仍是固定有限精度参考实现，并非理论真值。[PyTorch 2.10 数值精度说明](https://docs.pytorch.org/docs/2.10/notes/numerical_accuracy.html) 明确浮点运算不满足结合律，数学等价的批处理/逐条执行、CPU/GPU 结果不保证 bitwise 相同；MATH 对 BF16/FP16 输入默认上转 FP32 中间计算，然后回到原 dtype。更高精度的中间计算不等于精确实数计算，BF16 权重与模型其余运算的误差也不会因 attention 选 MATH 而消失。
 
 截至本次有限检索，未找到上述**整模型、KL、逐 case mean/max、加法余量、同时有绝对上限**这一完整组合的直接行业 precedent。FlashAttention 提供的是相近思想的算子测试；MLPerf 提供的是任务分数门槛。二者都不确定本项目应采用的常数。
 
@@ -121,4 +121,4 @@ MATH 仍是固定有限精度参考实现，并非理论真值。主线程核验
 
 本次只做官方资料和源码审阅，未测出 Rust/vLLM/MATH 的新 KL、TV、任务分数或故障检测率，因此不能判断新门槛会让多少 case 通过。外部 commit 固定的是研究日读取的版本，MLPerf 采用明确标注的 v5.0 历史先例；没有声称覆盖行业全部实现或最新所有 benchmark。
 
-vLLM、FlashAttention 和 PyTorch 的具体证据由同一研究任务主线程核验后合入；本子任务直接核验了 llama.cpp、NVIDIA、MLCommons 来源以及 t45 ADR0012/0014，主线程还交叉核验了 NVIDIA 单测的随机权重与缩小模型范围。既有测量计数由主线程提供，本文没有重新生成 golden 或重放正式测量。未提出额外的 Transformers MATH 对 Transformers FA 后端隔离实验。
+核验范围包括 vLLM、FlashAttention、PyTorch、llama.cpp、NVIDIA 和 MLCommons 的上述来源，以及 t45 ADR0012/0014。NVIDIA 单测使用随机权重和缩小模型配置这一点也经过交叉核对。既有计数沿用原测量记录，此次没有重新生成 golden、重放正式测量，或增加 Transformers MATH 与 Transformers FA 的后端隔离实验。

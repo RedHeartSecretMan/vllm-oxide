@@ -1,8 +1,8 @@
-# vLLM 社区做法与 vllm-oxide 公开展示建设
+# vLLM 文档与社区实践参考
 
 核实日期：2026-10-13。此次范围覆盖 README、用户与开发文档、社区入口、仓库元数据和全部已发布版本的说明。功能边界仍以 [v0.2.0](../docs/releases/v0.2.0.md) 为准：单 GPU、Qwen3-0.6B、BF16、同步离线生成。
 
-以下建议依据研究日的 vLLM 官方文档、仓库源码和 Release 页面。本文保留最初文档建设阶段的建议；2026-10-14 进一步授权的源码维护及检查另见[维护记录](../docs/version-doc-update.md)。这里的上游做法不用于推导本项目尚未实现的能力。
+以下建议来自研究日的 vLLM 官方文档、仓库源码和 Release 页面，记录了最初文档建设阶段的考虑。2026-10-14 后续源码维护及检查见[维护记录](../docs/version-doc-update.md)。项目支持哪些能力，仍以自身实现和发布记录为准。
 
 ## 建议落实的六项
 
@@ -17,12 +17,12 @@
 
 ## 明确的取舍
 
-- **保留 CPU CI 与 GPU 验收的职责分工。** vLLM 的贡献文档承认部分测试依赖 GPU，其 PR 模板允许说明 CI 资源限制及 CI 外验证。本项目普通 CI 继续验证编译、测试和工具质量；真实模型输出与性能由本地 GPU 检查完成。参考这一原则不等于照搬 vLLM 的 GPU 集群或增加 GPU runner 发布门槛。[测试说明](https://docs.vllm.ai/en/latest/contributing/#testing)、[PR 模板](https://github.com/vllm-project/vllm/blob/main/.github/PULL_REQUEST_TEMPLATE.md)
-- **先补齐可发现性和可复现性。** vLLM 有专门的 forum、Slack、多种 issue 表单及治理文档。本项目目前用 GitHub Issues 和少量模板即可，不新建论坛、Slack、委员会、区域负责人体系或复杂 RFC 程序。[README 社区入口](https://github.com/vllm-project/vllm/blob/main/README.md#contact-us)、[Issue 模板目录](https://github.com/vllm-project/vllm/tree/main/.github/ISSUE_TEMPLATE)
-- **发布流程按本项目规模执行。** 可以借鉴 vLLM 的变更分类、发行物标注和固定提交验证；不照搬双周发布频率、多平台 wheel/Docker 矩阵、强制 DCO 或上游的 PR 标题标签。现有约定由本仓库贡献指南保持一致。[发布流程](https://docs.vllm.ai/en/latest/contributing/release_process/)、[贡献规范](https://docs.vllm.ai/en/latest/contributing/)
-- **文档建设不扩大功能承诺。** 当前支持边界以 [v0.2.0 发布说明](../docs/releases/v0.2.0.md) 为准；仓库外观改善不表示新增服务、多 GPU、其他模型或量化能力。
+- 普通 CI 负责本项目的编译、测试和工具质量，真实模型输出与性能由本地 GPU 检查。vLLM 的贡献文档也区分 GPU 测试，并允许在 PR 中说明 CI 资源限制及外部验证。沿用这项分工即可，本项目无需部署 vLLM 规模的 GPU 集群，也不将 GitHub GPU runner 作为发布条件。[测试说明](https://docs.vllm.ai/en/latest/contributing/#testing)、[PR 模板](https://github.com/vllm-project/vllm/blob/main/.github/PULL_REQUEST_TEMPLATE.md)
+- 求助和贡献入口应容易找到，问题也应能复现。vLLM 提供 forum、Slack、多种 issue 表单及治理文档；本项目目前使用 GitHub Issues 和少量模板即可，暂不另设论坛、Slack、委员会、区域负责人或复杂 RFC 程序。[README 社区入口](https://github.com/vllm-project/vllm/blob/main/README.md#contact-us)、[Issue 模板目录](https://github.com/vllm-project/vllm/tree/main/.github/ISSUE_TEMPLATE)
+- 发布流程可采用 vLLM 的变更分类、发行物标注和固定提交验证。发布频率、wheel/Docker 平台矩阵、DCO 要求和 PR 标题标签则按本仓库贡献指南执行，无需随上游采用双周发布或扩展构建矩阵。[发布流程](https://docs.vllm.ai/en/latest/contributing/release_process/)、[贡献规范](https://docs.vllm.ai/en/latest/contributing/)
+- 支持范围以 [v0.2.0 发布说明](../docs/releases/v0.2.0.md) 为准。服务、多 GPU、其他模型和量化仍需各自的实现与验证，文档调整不改变这一范围。
 
-这六项均为适配建议。vLLM 的源码和官方文档是参考来源，其规则不会自动成为 vllm-oxide 的贡献或发布要求。
+这些建议用于完善本仓库的文档和工作流程，具体贡献与发布要求由本项目的指南规定。
 
 ## 整个公开展示层的补充
 
@@ -58,12 +58,12 @@ vLLM 将版本重点、兼容性、变化类别与发行物集中呈现，并将
 - `v0.2.0` 保持当前正式版本身份和原验证来源；基准数字继续绑定硬件、模型、dtype 与工作负载。
 - 三个 Release 的标题、正文、目录导航和工具说明采用同一结构，能力与命令仍按各版代码填写。原发布日期、prerelease/Latest 状态及附件保持历史事实。旧附件的适用版本和是否属于完整验收凭证写清。
 
-在 2026-10-13 的文档维护阶段，用户进一步要求三个版本的**源码归档内文档**也达到相同标准，且补齐
-`research/` 与 `tools/` 的内容细节。这比前一轮只更新 `main` 和 Release 页面
-的范围更广。该阶段的文档修订从各自原始发布提交派生，仅修改文档；若同步调整
-发布标签，应明确记录原代码提交、文档修订提交与新标签目标，并保留原提交可追溯。
-旧精度、性能与实验结果继续指向原受测源码，不能将文档提交宣称为重新跑过 GPU
-验收。此范围来自本项目用户的明确要求，不是 vLLM 的历史标签处理规定。
+2026-10-13 的文档维护从 `main` 和 Release 页面扩展到三个版本的源码归档，
+包括 `research/` 与 `tools/` 的详细说明。该阶段从各自原始发布提交派生，
+只修改文档。同步标签时需要记录原代码提交、文档修订提交和新标签目标，
+并保留原提交的可追溯性。旧精度、性能和实验结果继续对应原受测源码，
+文档修订本身不构成新一轮 GPU 验收。这次既有标签修订来自本仓库的明确授权，
+vLLM 的历史标签处理方式未作为操作依据。
 
 三个快照的工具说明应逐个核对已有源码：原型是否属于 Cargo workspace、依赖与
 CUDA 特性、CLI 参数、模型来源、输入/输出、CPU/GPU 条件，以及结果是否仅为诊断。

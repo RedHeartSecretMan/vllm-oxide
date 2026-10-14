@@ -2,7 +2,7 @@
 
 [Documentation index](README.md) · [中文项目介绍](../README.zh-CN.md)
 
-This guide uses the **v0.2.0 source release** and the validated **Qwen3-0.6B BF16** checkpoint. It covers offline generation through the Rust API and CLI. There is no inference server or streaming API in this release.
+Build v0.2.0 from source and generate with the validated Qwen3-0.6B BF16 checkpoint. This guide covers the offline Rust API and CLI; the release has no inference server or streaming API.
 
 [Requirements](#requirements) · [Install](#install-the-released-source) · [Model sources](#load-a-model) · [CLI](#cli) · [Rust API](#rust-api) · [Troubleshooting](#common-errors)
 
@@ -25,7 +25,7 @@ This guide uses the **v0.2.0 source release** and the validated **Qwen3-0.6B BF1
 
 Release validation used RTX 4080, driver 595.71, and CUDA Toolkit 13.2.51 on WSL2. These versions describe the tested configuration, not a minimum-version promise. The fixed release benchmark peaked at approximately 10.5 GiB of device memory, including its allocated KV cache, with `gpu_memory_utilization=0.50`. The API and CLI default to `0.9`, so that benchmark is not a memory bound for the default configuration. Smaller-memory configurations have not received the same release validation.
 
-CPU development and tests do not require a GPU or CUDA Toolkit. A default CPU build does **not** provide CPU inference.
+You can build and test the project without a GPU or CUDA Toolkit. Running inference requires the CUDA build.
 
 ## Install the released source
 
@@ -94,14 +94,14 @@ printf '%s' 'The meaning of life is' | \
 | `--top-p` | Nucleus probability threshold | Disabled |
 | `--max-tokens` | Maximum number of completion tokens | `16` |
 
-The CLI treats an existing directory as local and every other model argument as a Hub repo ID. It has **no revision flag**, and it does not parse the example's `hub:` or `@revision` syntax. To pin a revision, use the example, the Rust `Source::Hub` API, or an existing local checkpoint from that revision.
+The CLI loads an existing directory locally and treats any other model argument as a Hub repo ID. To pin a revision, use a local checkpoint, the example, or the Rust `Source::Hub` API. The CLI has no revision flag and does not accept the example's `hub:` or `@revision` syntax.
 
 CLI option parsing rejects NaN or negative temperature, zero `top-k` or
 `max-tokens`, and non-finite or out-of-range `top-p` before loading a model.
 Positive-infinity temperature remains accepted, matching the Rust sampling
 contract.
 
-Prompts are raw completion text. The CLI does not apply a chat template; format chat conversations before calling the engine if your application needs them.
+The CLI takes raw completion text. Format chat conversations with the appropriate template before passing them to the engine.
 
 The CLI emits completion text to stdout and propagates construction/generation errors as a failed process. It submits one request, uses default engine settings, and has no switches for batch input, token-ID prompts, penalties, `ignore_eos`, cache budgets, dtype, GPU selection, or random seed. Use the Rust API for the supported controls it exposes.
 
@@ -191,7 +191,7 @@ Model loading and CUDA warmup happen in `LLM::new`. Construction and generation 
 accepts `candle_core::DType::BF16` or `F16`; the release validation scope
 remains BF16. Invalid engine options fail before model resolution.
 
-Do not infer low memory use from the 0.6B parameter count: default cache sizing deliberately uses much of the remaining GPU memory. To leave more free memory for other applications, reduce `gpu_memory_utilization` in the Rust API. Reducing concurrency or prefill token budgets can also reduce workload pressure; no minimum-memory configuration is certified by this release. The CLI uses `EngineOptions::default()` and does not expose these settings.
+The default KV cache uses much of the GPU memory left after loading the model, even for a 0.6B checkpoint. Reduce `gpu_memory_utilization` in the Rust API to leave room for other applications. Lower concurrency or prefill token budgets can also reduce memory pressure. This release has no validated minimum-memory configuration. The CLI uses `EngineOptions::default()` and does not expose these settings.
 
 ### Sampling and input constraints
 

@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Architecture](../architecture.md) · [Benchmarks](../benchmarks/README.md)
 
-The shipped v0.2.0 release has completed numerical, behavior, public CUDA, and performance validation. The [release validation summary](../releases/goldens-v0.2.md) records the results, source commits, model revision, environment, and report hashes. This index explains what each check establishes and where the underlying protocols are documented.
+v0.2.0 completed numerical, behavior, public CUDA, and performance validation. The [release validation summary](../releases/goldens-v0.2.md) contains the results and their source commits, model revision, environment, and report hashes. Use the checks below according to the behavior you are changing.
 
 ## Choose the check for the change
 
@@ -13,7 +13,7 @@ The shipped v0.2.0 release has completed numerical, behavior, public CUDA, and p
 | Layered numerical and behavior checks | Pinned GPU model and oracle environments | Operator invariants, same-prefix prediction distributions, reference-relative token choices, and generation behavior | [Layered accuracy contract](layered-accuracy-contract.md), [golden-gen tooling](../../tools/golden-gen/README.md) |
 | Performance measurements | Fixed GPU environment | Throughput, first-token and inter-token timings, and sampled device memory for declared workloads | [Benchmarks](../benchmarks/README.md) |
 
-CPU test success does not establish model accuracy. A short generation smoke check also does not replace full numerical comparison. For a contribution, run the checks relevant to the changed behavior and report what actually executed.
+CPU tests, generation smoke checks, and numerical comparisons answer different questions. Run the checks relevant to your change and report which ones executed; model accuracy requires the numerical comparisons.
 
 ## Completed v0.2.0 results
 
@@ -24,7 +24,7 @@ CPU test success does not establish model accuracy. A short generation smoke che
 | Performance | Two fixed workloads, three measured repetitions each; all six sample/config/output and memory records validated |
 | CPU CI | Rust 1.94.0/stable, Python quality and complete CPU adapters, and dependency audit passed for the integrated implementation |
 
-The release scope is Qwen3-0.6B at revision `7e4ae267688d671ddfca3122e4528ee980cf3234`, BF16, single GPU. Measurements were made on RTX 4080/SM 8.9 with WSL2. WSL2 is a supported runtime environment, and the absence of a hosted GitHub GPU runner is not a separate release blocker.
+The release scope is Qwen3-0.6B at revision `7e4ae267688d671ddfca3122e4528ee980cf3234`, BF16, on one GPU. Measurements used RTX 4080/SM 8.9 with WSL2, which is a supported runtime environment. Local GPU checks supply the release evidence; a hosted GitHub GPU runner is optional.
 
 Results remain bound to their actual measurement and evaluation sources. The summary does not reclassify older failures, certify every model/hardware configuration, or claim GPU exclusivity. Full raw captures and logs are local; the source release does not provide a downloadable golden evidence package.
 
@@ -54,4 +54,4 @@ The following records explain how the final implementation and approval develope
 | [Performance and calibration protocol](../adr/0012-goldens-v0.2-calibration-and-performance-protocol.md) | Original workloads and release-stage design before later revisions |
 | [Source-role proposal](../adr/0029-proposed-release-source-roles.md) | Historical proposal to retain original numerical and performance identities |
 
-An earlier document's pending checkpoint or planned evidence publication is not a new requirement for the already shipped source release. It remains useful as a dated record of the validation method.
+Read pending checkpoints and publication plans as records of the protocol at that time. The completed release summary gives the shipped source release's results.

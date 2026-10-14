@@ -29,7 +29,7 @@ The engine-facing contract for causal text generation. New task families use ind
 _Avoid_: model interface, Model trait, CausalLM struct.
 
 **Model registry (inventory)**:
-The map from HF architecture strings (`"Qwen3ForCausalLM"`) to factory functions producing `Box<dyn CausalLM>`. Implemented as an `inventory`-distributed static registry: each model file self-registers via `inventory::submit! { ModelEntry { arch, factory } }`, and `registry.rs` is a pure query function with no model-specific knowledge. Keyed off `config.json["architectures"][0]`. Adding an architecture is purely additive (new file + `mod xxx;`), zero edits to existing files.
+The map from HF architecture strings (`"Qwen3ForCausalLM"`) to factory functions producing `Box<dyn CausalLM>`. Implemented as an `inventory`-distributed static registry: each model file self-registers via `inventory::submit! { ModelEntry { arch, factory } }`, and `registry.rs` is a pure query function with no model-specific knowledge. Keyed off `config.json["architectures"][0]`. Adding an architecture requires a new model file and a `mod xxx;` declaration; existing model implementations and registry lookup stay unchanged.
 _Avoid_: dispatcher, factory table.
 
 **Weight loader**:
@@ -41,7 +41,7 @@ The immutable construction identity that binds one source revision, configuratio
 _Avoid_: resolved source, model snapshot, artifact bundle.
 
 **LinearSpec**:
-The neutral geometry parameter struct that `Linear<P>::from_vb` consumes — `{ in_features, out_features_per_shard, bias }`. Model code unpacks its own `Config` (e.g. `Qwen3Config`) into `LinearSpec`. Closes the ADR-0002 seam: `Linear<P>` (in shared `layers/`) stays fully model-agnostic — it never imports `models::qwen3::Qwen3Config` or any architecture-specific type.
+The neutral geometry struct consumed by `Linear<P>::from_vb`: `{ in_features, out_features_per_shard, bias }`. Model code converts its own `Config`, such as `Qwen3Config`, into `LinearSpec`. This implements the ADR-0002 boundary: `Linear<P>` in shared `layers/` is model-agnostic and imports neither `models::qwen3::Qwen3Config` nor any other architecture-specific type.
 _Avoid_: layer config, linear config, projection shape.
 
 ## Engine (single-GPU, offline)
@@ -101,11 +101,11 @@ The supported v0.2.0 crate-root surface: `LLM`, `EngineOptions`, `Prompt`, `Samp
 _Avoid_: public engine API, public model API, compatibility exports.
 
 **LLM::generate**:
-The authoritative supported generation method — `generate(&mut self, prompts: &[Prompt], sampling_params: &[SamplingParams]) -> Result<Vec<RequestOutput>>`. `LLM::new` is the composition-root constructor; raw logits and internal execution controls are not part of this contract.
+The public generation method: `generate(&mut self, prompts: &[Prompt], sampling_params: &[SamplingParams]) -> Result<Vec<RequestOutput>>`. `LLM::new` is the composition-root constructor; raw logits and internal execution controls are not part of this contract.
 _Avoid_: run, infer, complete, __call__.
 
 **Prompt**:
-Input enum: `Text(String)` for natural-language prompts, `TokenIds(Vec<u32>)` for pre-tokenized fixtures. Both are accepted in the same batch.
+Input enum: `Text(String)` for natural-language prompts and `TokenIds(Vec<u32>)` for pre-tokenized prompts. Both are accepted in the same batch.
 _Avoid_: input, query, user message.
 
 **RequestOutput**:
@@ -211,5 +211,5 @@ The frozen continuation token appended to the logical history during fixed-prefi
 _Avoid_: predicted token, raw argmax.
 
 **Release gate vs CI gate**:
-CI (every push, CPU-only) runs property tests → "CI green". Release gate (pre-release, manual, GPU) runs golden comparison → "numerically validated". These are explicitly different — the repo README must document that CI green ≠ validated.
+CPU CI runs project checks on every push. Manual GPU release checks validate model results through golden comparison. The README must distinguish passing CI from completed numerical validation.
 _Avoid_: CI vs release check.

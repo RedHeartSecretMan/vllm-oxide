@@ -6,8 +6,8 @@
 零 retained owner；下文末段的 schema 2 / ledger 指旧流程。实际发布结果见
 [v0.2.0 摘要](../releases/goldens-v0.2.md)。
 
-旧监督政策用于按原始源码和 binary 身份保留、补齐既有采集记录。它不应把修复后的
-源码重标为旧源码。`golden_gen.layered_cli collect/collect-aux --fresh-observation`
+旧监督政策按原始源码和 binary 身份保留、补齐既有采集记录。修复后的源码需要
+新的来源记录，不能沿用旧源码标识。`golden_gen.layered_cli collect/collect-aux --fresh-observation`
 提供独立的新观察入口；已有监督采集的默认行为保持不变。
 
 这个入口只允许冻结 observation inventory 中的 calibration 数值组、calibration

@@ -24,8 +24,8 @@ to submit a private report in English or Chinese. Include:
 - Platform and relevant model identity, revision and source
 - Suggested fix (if any)
 
-Reports are reviewed on a best-effort basis. Please keep vulnerability details
-private while a fix and disclosure plan are discussed.
+Maintainers review reports on a best-effort basis. Keep vulnerability details
+private while discussing a fix and disclosure plan.
 
 ## Scope
 
