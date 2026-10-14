@@ -45,8 +45,10 @@ RELEASE_VERSION=0.2.1
 RELEASE_COMMIT=replace-with-full-reviewed-commit
 RELEASE_NOTES=/absolute/path/to/reviewed-release-notes.md
 
-git tag -a "v$RELEASE_VERSION" "$RELEASE_COMMIT" -m "vllm-oxide v$RELEASE_VERSION"
-git push origin "refs/tags/v$RELEASE_VERSION"
+git fetch origin main &&
+git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main &&
+git tag -a "v$RELEASE_VERSION" "$RELEASE_COMMIT" -m "vllm-oxide v$RELEASE_VERSION" &&
+git push origin "refs/tags/v$RELEASE_VERSION" &&
 gh release create "v$RELEASE_VERSION" \
   --repo RedHeartSecretMan/vllm-oxide \
   --verify-tag --target "$RELEASE_COMMIT" \
@@ -56,11 +58,17 @@ gh release create "v$RELEASE_VERSION" \
 
 For a prerelease, use its prerelease version, add `--prerelease` and set `--latest=false`. Publishing follows the user's existing authorization; this guide does not itself authorize a new publication.
 
+The ancestry check must pass before publishing. A tag alone keeps its objects
+available but does not give its commit a branch association on GitHub.
+
 GitHub supplies source `.tar.gz` and `.zip` archives. Full golden captures, logits, raw logs and acceptance bundles remain local by default, outside git. Evidence uploads require an explicit request for those assets. A source Release must not imply that an unpublished evidence archive or a separate consumer gate completed.
 
 ## Verify and maintain
 
 - Verify the remote tag resolves to the intended commit and the Release is non-draft, with the intended prerelease/Latest status.
+- Confirm the release commit is an ancestor of the remote default branch. Check
+  repository-local measurement and diagnostic commit references as well: deleting their
+  last work branch can leave a warning or make an unretained commit unavailable.
 - Download a source archive and confirm its version, examples and release notes match the tag. Check any explicitly published asset names and checksums.
 - Link the migration guide, complete changelog, supported environment, validation summary and known limitations in the Release description.
 - Close only the release work completed under the agreed scope; record deferred work separately from a passing product check.
@@ -84,7 +92,8 @@ For this operation:
    complete source-file diff. Record the original implementation commit and
    annotated tag object locally for provenance and rollback; do not publish
    additional backup tags.
-3. Publish the reviewed maintenance commits on named branches. Update existing
+3. Use temporary named branches to review the maintenance commits. Retain the
+   reviewed commits in `main` history before deleting those branches. Update existing
    release tags only under the user's explicit authority, with a force-with-lease
    check against each original remote tag object. A changed remote ref stops the
    update; it must be inspected rather than overwritten.
@@ -102,18 +111,43 @@ maintenance revision. It does not claim new GPU measurements or change a
 historical failure into PASS. Regular releases continue to use new version tags
 for behavior changes.
 
-Each `*.en.md` file is the maintained source of that version's English GitHub Release description. Synchronize a reviewed wording change after its documentation PR lands:
+Each `*.en.md` file is the maintained source of that version's English GitHub
+Release description. Prepare a separate GitHub-ready notes file after its
+documentation PR lands:
+
+- Omit the document's H1 when it duplicates the Release title.
+- Expand relative Markdown links against `docs/releases/` in the selected tag;
+  use complete GitHub URLs so they work on the Release page.
+- Include the full maintained source commit, verified against the peeled tag,
+  while retaining the original implementation and measurement identities.
+- Review the prepared body before uploading it. Passing the repository Markdown
+  directly to `--notes-file` can restore broken relative links or omit the exact
+  maintained source identity.
+
+| Tag | English source |
+|---|---|
+| `v0.1.0` | `docs/releases/v0.1.0.en.md` |
+| `v0.2.0.rc.1` | `docs/releases/v0.2.0-rc.1.en.md` |
+| `v0.2.0` | `docs/releases/v0.2.0.en.md` |
+
+Select the intended tag and prepared file, then update the existing description:
 
 ```bash
-gh release edit v0.1.0 --repo RedHeartSecretMan/vllm-oxide \
-  --notes-file docs/releases/v0.1.0.en.md
-gh release edit v0.2.0.rc.1 --repo RedHeartSecretMan/vllm-oxide \
-  --notes-file docs/releases/v0.2.0-rc.1.en.md
-gh release edit v0.2.0 --repo RedHeartSecretMan/vllm-oxide \
-  --notes-file docs/releases/v0.2.0.en.md
+RELEASE_TAG=v0.2.0
+RELEASE_NOTES=/absolute/path/to/reviewed-github-release-notes.md
+gh release edit "$RELEASE_TAG" --repo RedHeartSecretMan/vllm-oxide \
+  --notes-file "$RELEASE_NOTES"
 ```
 
-Before and after editing, compare the Release ID, tag, target commit, original publication timestamp, draft/prerelease/Latest status and asset identities. Description and title improvements preserve all of them; original failed or diagnostic records keep their verdicts.
+Before and after editing, compare the Release ID, actual peeled tag commit,
+original `published_at`, draft/prerelease/Latest status and asset identities.
+Compare assets by ID, not API list order. As documented in the
+[Release API](https://docs.github.com/en/rest/releases/releases#update-a-release),
+`target_commitish` is a tag-creation hint; an existing tag selects the source.
+A tag update can also change the API's
+`created_at`; keep it separate from the original publication timestamp.
+Description and title improvements preserve the source and publication state;
+original failed or diagnostic records keep their verdicts.
 
 ## Authorized source maintenance of existing versions
 
@@ -130,6 +164,25 @@ source identity and reviewed notes. Download each new archive and compare every
 tracked file with the reviewed commit. Remove temporary remote work branches;
 retain the three official tags without additional backup tags. See the
 [source maintenance record](../version-doc-update.md).
+
+Before removing any temporary remote branch, verify every maintained tag and
+every linked repository-local historical source commit is reachable from `origin/main`:
+
+```bash
+git fetch origin main
+for RELEASE_TAG in v0.1.0 v0.2.0.rc.1 v0.2.0; do
+  git merge-base --is-ancestor "$RELEASE_TAG^{commit}" origin/main || exit 1
+done
+```
+
+Confirm local tag objects match the remote tags before this check. For linked
+historical sources, run the same ancestry check with each original full commit
+ID. If version-specific maintenance or a diagnostic source has a separate
+history, review that history before retaining it on `main`. An ancestry-only
+merge with `-s ours` can preserve those sources while keeping the current file
+tree unchanged. Verify the tree IDs and each required ancestor before pushing;
+do not substitute `-X ours`, which can still merge old file contents. Recheck
+the remote default branch and original tag objects after publication.
 
 ## Validation records
 
