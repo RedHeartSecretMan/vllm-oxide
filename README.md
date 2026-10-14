@@ -8,7 +8,7 @@
 
 vllm-oxide runs Qwen3 offline on a single GPU through a synchronous Rust API. It uses [Candle](https://github.com/huggingface/candle) and custom CUDA kernels, with an architecture informed by [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) and [vLLM](https://github.com/vllm-project/vllm). The engine supports continuous batching, prefix caching, a paged KV cache, and recompute preemption.
 
-This checkout contains the experimental prerelease v0.2.0.rc.1, targeting Qwen3-0.6B in BF16 on one CUDA GPU. Its original numerical run recorded 48/66 PASS and 18 FAIL. Full performance testing and verification of the declared minimum Rust version were incomplete. New users should use the final [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0). See the [release notes](docs/releases/v0.2.0-rc.1.en.md), [historical validation](docs/validation/README.md), and [GitHub Release](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1).
+This checkout contains the experimental prerelease v0.2.0.rc.1, targeting Qwen3-0.6B in BF16 on one CUDA GPU. Its original numerical run recorded 48/66 PASS and 18 FAIL. Full performance testing and verification of the declared minimum Rust version were incomplete. New users should use the final [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
 
 [Getting started](docs/getting-started.md) · [Documentation](docs/README.md) · [Architecture](docs/architecture.md) · [Releases](docs/releases/README.md) · [Contributing](CONTRIBUTING.md)
 
