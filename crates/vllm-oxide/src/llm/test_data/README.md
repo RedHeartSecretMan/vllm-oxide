@@ -27,7 +27,7 @@ The workspace operands isolate the same model revision's layer-0 down projection
 in the observed confirmation mixed-batch failure: one 3072-value SwiGLU input
 and weight row 50 (6144 bytes each, little-endian BF16). The CUDA test embeds
 those operands in the original 1024-output geometry. With FP32 accumulation,
-258 rows yield 0xb954 and514 rows yield 0xb955 on the validated GPU. Zero workspace
+258 rows yield 0xb954 and 514 rows yield 0xb955 on the validated GPU. Zero workspace
 reproduces 0xb955 for the multi-request matrix path. The exact dot is approximately
 -0.00020244751249265391; the original 258-row value is mathematically closer.
 This is reference-layout compatibility, not a higher-accuracy theorem. The test

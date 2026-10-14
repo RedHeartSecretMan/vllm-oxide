@@ -41,7 +41,22 @@ pub fn compare_l2(
     };
 
     let n_steps = fixture.num_tokens as usize;
-    let vocab_size = fixture.model_vocab_size(generated_logits);
+    let vocab_size = fixture.logits_shape.1;
+
+    if n_steps == 0
+        || vocab_size == 0
+        || fixture.logits_shape.0 != n_steps
+        || fixture.token_ids.len() != n_steps
+        || n_steps.checked_mul(vocab_size) != Some(logits_flat.len())
+        || generated_tokens.is_empty()
+        || generated_tokens.len().checked_mul(vocab_size) != Some(generated_logits.len())
+        || !policy.l2_atol.is_finite()
+        || policy.l2_atol < 0.0
+    {
+        anyhow::bail!(
+            "L2 requires non-empty, consistent logit geometry and a finite non-negative tolerance"
+        );
+    }
 
     let min_steps = n_steps
         .min(generated_tokens.len())
@@ -284,5 +299,25 @@ mod tests {
         assert_eq!(result.excluded_steps, 1);
         assert_eq!(result.total_elements, 6);
         assert_eq!(result.elements_exceeding_tol, 0);
+    }
+    #[test]
+    fn malformed_or_empty_logit_arrays_are_errors() {
+        let fixture = FixtureData {
+            prompt_id: "invalid".into(),
+            category: crate::types::PromptCategory::Canonical,
+            oracle: crate::types::OracleName::Transformers,
+            num_tokens: 1,
+            token_ids: vec![1],
+            n_prompt_tokens: 1,
+            logits: Some(vec![0.0, 1.0]),
+            logits_shape: (1, 2),
+            top5_indices: None,
+            top5_logits: None,
+        };
+        assert!(compare_l2(&fixture, &[], &[], &make_policy()).is_err());
+        assert!(compare_l2(&fixture, &[0.0], &[1], &make_policy()).is_err());
+        let mut invalid_policy = make_policy();
+        invalid_policy.l2_atol = f64::NAN;
+        assert!(compare_l2(&fixture, &[0.0, 1.0], &[1], &invalid_policy).is_err());
     }
 }

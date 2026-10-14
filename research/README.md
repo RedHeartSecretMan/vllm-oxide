@@ -2,8 +2,8 @@
 
 [Project overview](../README.md) · [Documentation](../docs/README.md) · [Architecture](../docs/architecture.md)
 
-This directory keeps two kinds of development material: a retained executable
-stack experiment, and a source-backed repository-design note. Choose the
+This directory keeps a retained executable stack experiment, dated accuracy
+research and a source-backed repository-design note. Choose the
 material according to the question you want to answer. The supported engine and
 installation path are described in the [getting-started guide](../docs/getting-started.md).
 
@@ -11,6 +11,8 @@ installation path are described in the [getting-started guide](../docs/getting-s
 |---|---|---|
 | [Candle stack prototype](prototype-candle-stack/README.md) | Inspect a raw tensor-pointer/stream CUDA call and a concrete paged-FlashAttention call using synthetic tensors | Retained T10 experiment; its detailed guide explains the standalone build, dependencies, checks and limits |
 | [vLLM community practices](vllm-community-practices.md) | Source-backed comparison of user documentation, contribution paths, and release presentation | Repository design reference; upstream rules do not automatically apply here |
+| [Accuracy proposal](inference-accuracy-acceptance-proposal.md) | Preserve the 2026-09-06 design before the adopted layered protocol | Historical draft; current budgets and acceptance come from the linked ADRs and release summary |
+| [Accuracy industry review](inference-accuracy-validation-industry-review.md) | Compare fixed primary-source examples and explain their limits | Dated research; no universal KL tolerance or independent release approval |
 
 ## Reproduce or inspect an experiment
 

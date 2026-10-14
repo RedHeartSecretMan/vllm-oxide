@@ -44,6 +44,10 @@ ordinary CI.
   paths outside the source checkout. Preserve the full original evidence locally.
 
 CPU tests and the transport reader require neither CUDA nor model weights.
+A source archive without `.git` can compile the CPU tools, but its build receipt
+is `unavailable-without-git`. Formal capture, observation and performance
+validation still require the reviewed Git checkout and a matching source-bound
+binary; an archive build cannot provide those source identities.
 See the [GPU smoke guide](../../docs/validation/public-gpu-smoke.md) and the
 [Python setup guide](../../tools/golden-gen/README.md#setup-and-cpu-tests) for
 runtime preparation and resource guards.
@@ -203,10 +207,10 @@ cargo run --locked --release -p vllm_oxide_test --features cuda \
 | `--manifest` | Local schema-v4 manifest and fixtures |
 | `--release-tag`, `--repo`, `--cache-dir` | Alternative historical golden download source; repository defaults to `RedHeartSecretMan/vllm-oxide` |
 | `--capture-dir` | Fresh private directory for replay-audited candidate captures |
-| `--prompts-dir` | Historical prompt definitions; defaults to `tools/golden-gen/prompts` |
+| `--prompts-dir` | Must resolve to the reviewed checkout's `tools/golden-gen/prompts` directory |
 | `--json` | JSON report on stdout; diagnostics go to stderr |
 | `--l1-only`, `--l2-only` | Exploratory partial comparisons; omitted declared coverage cannot pass the old release gate |
-| `--debug` | Historical L3 per-layer activation skeleton |
+| `--debug` | Rejected: legacy L3 per-layer comparison is not implemented |
 
 ### Manifest and comparison semantics
 
@@ -222,13 +226,15 @@ retain every field.
 |---|---|
 | L1 | Greedy token IDs. The first mismatch is an explicit near tie only if the expected/actual candidate-logit gap is within `l1_near_tie_max_abs_logit_gap`. |
 | L2 | Same-prefix full FP32 logits with `abs(actual - expected) <= l2_atol`; include the first divergence row and exclude later rows with different histories. |
-| L3 | Per-layer activations: a debug-only skeleton, not implemented release coverage. |
+| L3 | Unavailable; the CLI returns an error rather than a placeholder PASS. |
 
 CPU preflight verifies canonical, flattened batch and regression prompt
 inventories, names, tensor shapes/dtypes and hashes. Reports retain exact
 `expected`, `discovered`, `generated`, `compared`, `missing`, `unexpected`,
 `skipped` and `failed` totals. Empty, malformed, missing, unexpected, skipped or
 failed coverage rejects acceptance; a supplied summary cannot replace comparisons.
+L2 also refuses empty or inconsistent tensor/token geometry and invalid
+tolerances; non-finite compared values cannot pass.
 
 Capture rows bind call, input position, stable request identity, chosen token,
 completion step, request-major order and agreement with `RequestOutput`.

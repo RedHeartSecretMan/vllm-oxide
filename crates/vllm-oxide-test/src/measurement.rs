@@ -17,6 +17,21 @@ pub fn validate_deterministic_environment() -> Result<()> {
     Ok(())
 }
 
+/// Bind the corpus to the same reviewed checkout as the executable inputs.
+pub fn validate_reviewed_prompts(repo_root: &Path, prompts_dir: &Path) -> Result<()> {
+    if prompts_dir
+        .canonicalize()
+        .context("canonicalizing prompt corpus")?
+        != repo_root
+            .join("tools/golden-gen/prompts")
+            .canonicalize()
+            .context("canonicalizing reviewed prompt corpus")?
+    {
+        bail!("release prompts must come from the reviewed source checkout");
+    }
+    Ok(())
+}
+
 /// Rehash the actual local source before every GPU owner's model initialization.
 pub fn validate_release_model(model_path: &Path) -> Result<()> {
     for (filename, expected) in [
@@ -338,5 +353,14 @@ mod tests {
         );
         let error = validate_measurement_identity(repo, &commit, &tree).unwrap_err();
         assert!(error.to_string().contains("unreviewed bytes"));
+    }
+    #[test]
+    fn reviewed_corpus_cannot_be_replaced_with_external_prompts() {
+        let repo = tempfile::tempdir().unwrap();
+        let reviewed = repo.path().join("tools/golden-gen/prompts");
+        fs::create_dir_all(&reviewed).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        super::validate_reviewed_prompts(repo.path(), &reviewed).unwrap();
+        assert!(super::validate_reviewed_prompts(repo.path(), external.path()).is_err());
     }
 }

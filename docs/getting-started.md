@@ -96,6 +96,11 @@ printf '%s' 'The meaning of life is' | \
 
 The CLI treats an existing directory as local and every other model argument as a Hub repo ID. It has **no revision flag**, and it does not parse the example's `hub:` or `@revision` syntax. To pin a revision, use the example, the Rust `Source::Hub` API, or an existing local checkpoint from that revision.
 
+CLI option parsing rejects NaN or negative temperature, zero `top-k` or
+`max-tokens`, and non-finite or out-of-range `top-p` before loading a model.
+Positive-infinity temperature remains accepted, matching the Rust sampling
+contract.
+
 Prompts are raw completion text. The CLI does not apply a chat template; format chat conversations before calling the engine if your application needs them.
 
 The CLI emits completion text to stdout and propagates construction/generation errors as a failed process. It submits one request, uses default engine settings, and has no switches for batch input, token-ID prompts, penalties, `ignore_eos`, cache budgets, dtype, GPU selection, or random seed. Use the Rust API for the supported controls it exposes.
@@ -179,6 +184,12 @@ Model loading and CUDA warmup happen in `LLM::new`. Construction and generation 
 | `gpu_memory_utilization` | `0.9` | Fraction of remaining free GPU memory assigned to the KV cache |
 | `enforce_eager` | `true` | Must stay true; CUDA Graphs are unsupported |
 | `dtype` | `None` | Read dtype from checkpoint metadata; release validation uses BF16 |
+
+`max_num_batched_tokens` and `max_num_seqs` must be positive;
+`max_model_len` must be at least 2 and within the checkpoint context limit.
+`gpu_memory_utilization` must be finite and in `(0, 1]`. A dtype override
+accepts `candle_core::DType::BF16` or `F16`; the release validation scope
+remains BF16. Invalid engine options fail before model resolution.
 
 Do not infer low memory use from the 0.6B parameter count: default cache sizing deliberately uses much of the remaining GPU memory. To leave more free memory for other applications, reduce `gpu_memory_utilization` in the Rust API. Reducing concurrency or prefill token budgets can also reduce workload pressure; no minimum-memory configuration is certified by this release. The CLI uses `EngineOptions::default()` and does not expose these settings.
 

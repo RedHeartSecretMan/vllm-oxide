@@ -112,7 +112,7 @@ uv run --project tools/golden-gen --locked --extra gpu \
     --manifest /absolute/path/to/original-reference/manifest.json
 
 # After the separately retained matching Rust capture and traces are present:
-uv run --project tools/golden-gen --locked \
+uv run --project tools/golden-gen --locked --extra gpu \
     python tools/golden-gen/scripts/canonical03_layer_probe.py compare \
     --repo-root "$PWD" \
     --output-dir /absolute/path/to/fresh-canonical03-diagnostic \

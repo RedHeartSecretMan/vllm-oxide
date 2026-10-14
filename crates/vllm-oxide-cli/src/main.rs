@@ -21,19 +21,19 @@ struct Cli {
     prompt: Option<String>,
 
     /// Sampling temperature. 0 = greedy (default).
-    #[arg(long, default_value = "0")]
+    #[arg(long, default_value = "0", value_parser = parse_temperature)]
     temperature: f32,
 
     /// Top-k sampling: keep only the k highest-logit tokens.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_positive_count)]
     top_k: Option<usize>,
 
     /// Top-p (nucleus) sampling: keep smallest token set with cumulative prob ≥ p.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_top_p)]
     top_p: Option<f32>,
 
     /// Maximum tokens to generate. Defaults to 16.
-    #[arg(long, default_value = "16")]
+    #[arg(long, default_value = "16", value_parser = parse_positive_count)]
     max_tokens: usize,
 }
 
@@ -76,6 +76,31 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// Reject malformed CLI values during argv parsing, before stdin, model I/O or CUDA setup.
+fn parse_temperature(raw: &str) -> std::result::Result<f32, String> {
+    let value = raw.parse::<f32>().map_err(|error| error.to_string())?;
+    if value.is_nan() || value < 0.0 {
+        return Err("temperature must be nonnegative and not NaN".to_string());
+    }
+    Ok(value)
+}
+
+fn parse_top_p(raw: &str) -> std::result::Result<f32, String> {
+    let value = raw.parse::<f32>().map_err(|error| error.to_string())?;
+    if !(value.is_finite() && 0.0 < value && value <= 1.0) {
+        return Err("top_p must be finite and in (0, 1]".to_string());
+    }
+    Ok(value)
+}
+
+fn parse_positive_count(raw: &str) -> std::result::Result<usize, String> {
+    let value = raw.parse::<usize>().map_err(|error| error.to_string())?;
+    if value == 0 {
+        return Err("token count must be at least 1".to_string());
+    }
+    Ok(value)
+}
+
 fn parse_model_arg(raw: &str) -> Source {
     let path = PathBuf::from(raw);
     if path.is_dir() {
@@ -92,6 +117,48 @@ fn parse_model_arg(raw: &str) -> Source {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_sampling_values_fail_at_argument_parsing() {
+        for argument in [
+            "--temperature=-1",
+            "--temperature=NaN",
+            "--temperature=-inf",
+            "--top-k=0",
+            "--top-p=0",
+            "--top-p=1.1",
+            "--top-p=NaN",
+            "--top-p=inf",
+            "--max-tokens=0",
+        ] {
+            let error = Cli::try_parse_from(["vllm-oxide", "--model", "missing-model", argument])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "unexpected parser result for {argument}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn supported_sampling_boundaries_parse_without_a_model() {
+        for arguments in [
+            vec![
+                "--temperature=0",
+                "--top-p=1",
+                "--top-k=1",
+                "--max-tokens=1",
+            ],
+            vec!["--temperature=inf"],
+            vec!["--temperature=1e-45", "--top-p=1e-45"],
+        ] {
+            let mut command = vec!["vllm-oxide", "--model", "missing-model"];
+            command.extend(arguments);
+            Cli::try_parse_from(command).unwrap();
+        }
+    }
 
     #[test]
     fn model_local_directory() {

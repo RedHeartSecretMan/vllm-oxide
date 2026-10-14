@@ -13,7 +13,7 @@
 - 测量日期：2026-10-09；RTX 4080，驱动 595.71，CUDA 13.2.51。
 - Linux 6.18.33.2-microsoft-standard-WSL2；Rust 1.94.0；release 构建。
 - 基线：`0e9b766b9faf9e51ff142b7f8132bcf06c1dfd94`，包含相同的微基准和原逐行 kernel。
-- 优化版本：本报告所在提交；kernel SHA-256 记录于原始样本文件。
+- 优化版本：`33d5bf583129178882d0950df05d6cffd7e42128`；其 kernel SHA-256 与原始样本文件一致。
 - 固定 F32 logits，词表 151,936，默认 greedy，无 penalty，空历史；不加载模型。
 - 每个 batch 预热 32 次并核对输出，然后测 7 轮，每轮连续调用 128 次。
 - 每轮前后同步，CUDA adapter 每次返回前也同步。包含 Rust 参数准备、输出 tensor
@@ -39,11 +39,11 @@ batch=1 未显示稳定收益。批量场景的改善来自减少 launch 和让�
 
 ## 复现
 
-在本报告所在的优化提交上创建两个独立 checkout，避免修改当前工作目录：
+从保留完整 Git 历史的仓库创建两个独立 checkout；浅克隆应先获取以下固定提交：
 
 ```bash
 git worktree add --detach /tmp/vllm-greedy-baseline 0e9b766b9faf9e51ff142b7f8132bcf06c1dfd94
-git worktree add --detach /tmp/vllm-greedy-optimized HEAD
+git worktree add --detach /tmp/vllm-greedy-optimized 33d5bf583129178882d0950df05d6cffd7e42128
 
 for checkout in /tmp/vllm-greedy-baseline /tmp/vllm-greedy-optimized /tmp/vllm-greedy-optimized /tmp/vllm-greedy-baseline; do
     CARGO_TARGET_DIR=/tmp/vllm-greedy-target cargo test \

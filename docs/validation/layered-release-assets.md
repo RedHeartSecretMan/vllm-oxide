@@ -1,6 +1,8 @@
 # Layered golden release asset contract
 
-This is the normative transport decision adopted by [ADR-0016](../adr/0016-layered-golden-release-assets.md), with local retention and bounded transport separated from optional GitHub publication by [ADR-0028](../adr/0028-local-release-evidence.md). It does not change the [layered accuracy contract](layered-accuracy-contract.md), frozen cases, pending budgets, model scope or independent publication authority. It replaces incompatible schema4 transport rules, not their safeguards.
+This is the normative transport decision adopted by [ADR-0016](../adr/0016-layered-golden-release-assets.md), with local retention and bounded transport separated from optional GitHub publication by [ADR-0028](../adr/0028-local-release-evidence.md). It does not change the [layered accuracy contract](layered-accuracy-contract.md), frozen cases, numerical-budget approval, model scope or independent publication authority. It replaces incompatible schema4 transport rules, not their safeguards.
+
+This document specifies evidence transport. The [product validation summary](../releases/goldens-v0.2.md) records the source release separately and does not claim that the historical combined bundle completed full consumer acceptance.
 
 ## 1. One release manifest and one archive
 

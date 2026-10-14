@@ -325,6 +325,7 @@ impl LLM {
         for (position, (tokens, params)) in
             tokenized_prompts.iter().zip(sampling_params).enumerate()
         {
+            validate_prompt_token_ids(tokens, self.engine.vocab_size(), position)?;
             if tokens.is_empty() {
                 bail!("generate: prompt[{position}] must not be empty");
             }
@@ -650,6 +651,19 @@ impl Drop for LLM {
     }
 }
 
+fn validate_prompt_token_ids(tokens: &[u32], vocab_size: usize, position: usize) -> Result<()> {
+    if let Some((offset, token)) = tokens
+        .iter()
+        .enumerate()
+        .find(|(_, token)| u64::from(**token) >= vocab_size as u64)
+    {
+        bail!(
+            "generate: prompt[{position}] token_ids[{offset}]={token} is outside model vocabulary 0..{vocab_size}"
+        );
+    }
+    Ok(())
+}
+
 /// Tokenize a `Prompt` into `Vec<u32>` token IDs.
 fn tokenize_prompt(prompt: &Prompt, tokenizer: &HFTokenizer) -> Result<Vec<u32>> {
     match prompt {
@@ -678,15 +692,16 @@ fn read_max_position_embeddings(config_json: &[u8]) -> Result<usize> {
 
 /// Validate CUDA device compute capability ≥ sm_89.
 ///
-/// Flash-attention paged kernels and Qwen3 BF16 matmuls require Hopper (sm_90)
-/// or Ada Lovelace (sm_89) or newer. Older GPUs will hit opaque kernel launch
-/// failures — this check gives a clear error before loading weights.
+/// The supported CUDA kernel target is Ada Lovelace (sm_89), Hopper (sm_90),
+/// or newer. This check rejects older devices before loading weights.
 #[cfg(feature = "cuda")]
 #[allow(unsafe_code)]
 fn validate_sm_version(_device: &Device) -> Result<()> {
     use candle_core::cuda::cudarc::driver::sys;
 
     let mut cu_device: sys::CUdevice = 0;
+    // SAFETY: the output points to a live CUdevice; CUDA was initialized by
+    // Device construction, and the status is checked before using the value.
     let result = unsafe { sys::cuDeviceGet(&mut cu_device, 0) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!(
@@ -697,6 +712,8 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
 
     let mut major: i32 = 0;
     let mut minor: i32 = 0;
+    // SAFETY: both output pointers are valid stack i32 values, and cu_device
+    // came from the successful driver query above. The status is checked.
     let result = unsafe { sys::cuDeviceComputeCapability(&mut major, &mut minor, cu_device) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!(
@@ -710,7 +727,7 @@ fn validate_sm_version(_device: &Device) -> Result<()> {
     if sm < 89 {
         bail!(
             "GPU compute capability sm_{major}{minor} (sm_{sm}) is below the minimum \
-             required sm_89. vllm-oxide v0.2.0 flash-attention kernels and Qwen3 BF16 \
+             required sm_89. vllm-oxide v0.2.0 CUDA kernels and Qwen3 BF16 \
              matmuls require Ada Lovelace (sm_89) or Hopper (sm_90) architecture. \
              Supported GPUs: RTX 40-series (Ada), H100/H200 (Hopper), and newer."
         );
@@ -735,6 +752,8 @@ fn cuda_mem_info() -> Result<(usize, usize)> {
 
     let mut free: usize = 0;
     let mut total: usize = 0;
+    // SAFETY: initialization has established the current CUDA context; both
+    // outputs are live size_t-compatible usize values. The status is checked.
     let result = unsafe { sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize) };
     if result != sys::CUresult::CUDA_SUCCESS {
         bail!("cuMemGetInfo_v2 failed with error code {}", result as i32);
@@ -1560,8 +1579,8 @@ mod tests {
             let block_size = u32::try_from(BLOCK_SIZE).unwrap();
             let recovery_len = u32::try_from(BLOCK_SIZE + 1).unwrap();
             let prompts = [
-                Prompt::TokenIds((0..block_size).collect()),
-                Prompt::TokenIds((1_000..1_000 + block_size).collect()),
+                Prompt::TokenIds((0..block_size).map(|id| id % 97).collect()),
+                Prompt::TokenIds((1_000..1_000 + block_size).map(|id| id % 97).collect()),
                 Prompt::TokenIds(vec![7, 11, 13]),
             ];
             let params = [
@@ -1603,7 +1622,7 @@ mod tests {
 
         #[test]
         fn cache_enabled_and_disabled_match_for_the_same_request_output() {
-            let target = Prompt::TokenIds((0..513).collect());
+            let target = Prompt::TokenIds((0..513).map(|id| id % 97).collect());
             let params = deterministic_causal_params(3);
             let (mut cache_enabled, enabled_controls) =
                 causal_fingerprint_test_harness(1_024, 16, true);
@@ -1644,16 +1663,22 @@ mod tests {
         #[test]
         fn mixed_full_partial_and_miss_match_isolated_cache_misses() {
             let block_size = u32::try_from(BLOCK_SIZE).unwrap();
-            let first_block = (0..block_size).collect::<Vec<_>>();
-            let second_block = (1_000..1_000 + block_size).collect::<Vec<_>>();
-            let alternate_second = (2_000..2_000 + block_size).collect::<Vec<_>>();
+            let first_block = (0..block_size).map(|id| id % 97).collect::<Vec<_>>();
+            let second_block = (1_000..1_000 + block_size)
+                .map(|id| id % 97)
+                .collect::<Vec<_>>();
+            let alternate_second = (2_000..2_000 + block_size)
+                .map(|id| id % 97)
+                .collect::<Vec<_>>();
             let mut full_prompt = first_block.clone();
             full_prompt.extend_from_slice(&second_block);
             full_prompt.push(9);
             let mut partial_prompt = first_block;
             partial_prompt.extend_from_slice(&alternate_second);
             partial_prompt.push(10);
-            let mut miss_prompt = (3_000..3_000 + block_size).collect::<Vec<_>>();
+            let mut miss_prompt = (3_000..3_000 + block_size)
+                .map(|id| id % 97)
+                .collect::<Vec<_>>();
             miss_prompt.push(11);
             let prompts = [
                 Prompt::TokenIds(full_prompt.clone()),
@@ -1692,7 +1717,7 @@ mod tests {
         #[test]
         fn rejected_request_does_not_borrow_or_discard_cached_prefix_ownership() {
             let (mut llm, controls) = causal_fingerprint_test_harness(1_024, 16, true);
-            let prompt = [Prompt::TokenIds((0..513).collect())];
+            let prompt = [Prompt::TokenIds((0..513).map(|id| id % 97).collect())];
             let valid = [deterministic_causal_params(1)];
             llm.generate(&prompt, &valid).unwrap();
             let ownership_before = llm.engine.kv_cache_manager.ownership_snapshot();
@@ -2251,6 +2276,32 @@ mod tests {
         }
 
         #[test]
+        fn invalid_token_ids_reject_the_entire_batch_before_admission() {
+            let mut llm = test_llm();
+            for token in [100, 101, u32::MAX] {
+                let error = llm
+                    .generate(
+                        &[Prompt::TokenIds(vec![99]), Prompt::TokenIds(vec![1, token])],
+                        &vec![deterministic_causal_params(1); 2],
+                    )
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("prompt[1] token_ids[1]"),
+                    "{error}"
+                );
+                assert!(error.to_string().contains("outside model vocabulary"));
+                assert!(!llm.engine.is_running());
+            }
+            let output = llm
+                .generate(
+                    &[Prompt::TokenIds(vec![99])],
+                    &[deterministic_causal_params(1)],
+                )
+                .unwrap();
+            assert_eq!(output[0].request_id, 0);
+        }
+
+        #[test]
         fn empty_prompt_is_rejected_without_consuming_request_identity() {
             let mut llm = test_llm();
             assert!(llm
@@ -2548,7 +2599,7 @@ mod tests {
         #[test]
         fn prefix_hit_execution_failure_releases_all_ownership_and_allows_retry() {
             let (mut llm, controls) = causal_fingerprint_test_harness(1_024, 16, true);
-            let prompt = Prompt::TokenIds((0..513).collect());
+            let prompt = Prompt::TokenIds((0..513).map(|id| id % 97).collect());
             let params = deterministic_causal_params(1);
             let warmup = llm
                 .generate(std::slice::from_ref(&prompt), std::slice::from_ref(&params))
