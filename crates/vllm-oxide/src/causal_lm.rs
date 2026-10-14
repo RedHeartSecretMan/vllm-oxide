@@ -5,8 +5,8 @@
 //! (ADR-0004 dependency rule). The composition root (`llm.rs`) wires a
 //! `Box<dyn CausalLM>` from the registry into `EngineCore`.
 //!
-//! v0.2 adds new task traits (`SequenceClassifier`, `Embedder`) as sibling
-//! traits in this module — not by overloading `CausalLM`.
+//! Future task families can add sibling traits here; this release supports
+//! causal generation through `CausalLM` only.
 
 use candle_core::{Result, Tensor};
 

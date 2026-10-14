@@ -44,7 +44,7 @@ A partial prefill chunk advances the cached prompt history without selecting a c
 | Model registry and `CausalLM` | Construct the declared architecture and expose the internal forward/logits contract | [models](../crates/vllm-oxide/src/models/), [causal_lm.rs](../crates/vllm-oxide/src/causal_lm.rs) |
 | `Scheduler` and `Sequence` | Admission, request identity/lifecycle, fairness, token limits, preemption, and completion | [scheduler.rs](../crates/vllm-oxide/src/engine/scheduler.rs), [sequence.rs](../crates/vllm-oxide/src/engine/sequence.rs) |
 | `EngineCore` | Execute one plan, prepare shared attention state, invoke model/sampler, and clean up a failed step | [engine/mod.rs](../crates/vllm-oxide/src/engine/mod.rs), [step.rs](../crates/vllm-oxide/src/engine/step.rs) |
-| `KVCacheManager` | Scheduler-facing allocation/release and logical-to-physical slot mapping | [kv_cache_manager.rs](../crates/vllm-oxide/src/engine/kv_cache_manager.rs) |
+| `KvCacheManager` | Scheduler-facing allocation/release and logical-to-physical slot mapping | [kv_cache_manager.rs](../crates/vllm-oxide/src/engine/kv_cache_manager.rs) |
 | `BlockPool` | Physical block ownership, free list, reference counts, prefix hashes, and copy-on-write | [block_pool.rs](../crates/vllm-oxide/src/engine/block_pool.rs) |
 | `PagedKVCache` and `AttentionContext` | GPU K/V storage and step-scoped, device-ready attention metadata shared across layers | [attention](../crates/vllm-oxide/src/attention/) |
 | `Sampler` | Per-request penalties, greedy or stochastic token selection, and compact selected-token transfer | [sampler.rs](../crates/vllm-oxide/src/sampler.rs), [sampler/cuda.rs](../crates/vllm-oxide/src/sampler/cuda.rs) |
@@ -55,7 +55,7 @@ These components are internal. Applications use the six exported types: `LLM`, `
 
 The scheduler can execute prefill and decode work within the same token budget. Long prompts are processed in chunks so prompt work can coexist with decode progress. Requests waiting for sequence or cache capacity remain queued within the current call.
 
-The cache uses fixed blocks of 256 tokens. Prefix caching reuses eligible complete blocks with matching token histories; shared block ownership uses reference counts and copy-on-write. The `KVCacheManager` hides physical cache details from the scheduler. Under cache pressure, recompute preemption releases a request's active cache ownership and later reconstructs the required history.
+The cache uses fixed blocks of 256 tokens. Prefix caching reuses eligible complete blocks with matching token histories; shared block ownership uses reference counts and copy-on-write. The `KvCacheManager` hides physical cache details from the scheduler. Under cache pressure, recompute preemption releases a request's active cache ownership and later reconstructs the required history.
 
 Stable public request IDs belong to the accepted request, independently of internal sequence IDs or its position in a batch. `LLM` restores input order when it decodes completed outputs. A failed execution aborts active requests and releases cache ownership; the error is returned to the caller rather than converted into a successful partial batch.
 

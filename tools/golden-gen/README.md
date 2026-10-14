@@ -19,16 +19,21 @@ From the repository root, create separate locked development and worker environm
 ```bash
 export GOLDEN_DEV_ENV=/tmp/vllm-oxide-rc-golden-dev
 export GOLDEN_WORKER_ENV=/tmp/vllm-oxide-rc-golden-worker
-UV_PROJECT_ENVIRONMENT="$GOLDEN_DEV_ENV"     uv sync --project tools/golden-gen --locked --extra dev
-UV_PROJECT_ENVIRONMENT="$GOLDEN_WORKER_ENV"     uv sync --project tools/golden-gen --locked --all-extras
+UV_PROJECT_ENVIRONMENT="$GOLDEN_DEV_ENV" \
+    uv sync --project tools/golden-gen --locked --extra dev
+UV_PROJECT_ENVIRONMENT="$GOLDEN_WORKER_ENV" \
+    uv sync --project tools/golden-gen --locked --all-extras
 cargo +1.94.0 build --locked -p vllm_oxide_test --bin vllm-oxide-verify-bundle
 export GOLDEN_WORKER_TEST_PYTHON="$GOLDEN_WORKER_ENV/bin/python"
 export GOLDEN_TRANSPORT_TEST_BINARY="$PWD/target/debug/vllm-oxide-verify-bundle"
 export PYTHONNOUSERSITE=1
 export PYTEST_ADDOPTS=""
 "$GOLDEN_DEV_ENV/bin/python" -m pytest tools/golden-gen/tests -q
-"$GOLDEN_DEV_ENV/bin/python" -m ruff check     tools/golden-gen/src tools/golden-gen/tests tools/golden-gen/scripts
-"$GOLDEN_DEV_ENV/bin/python" -m mypy     --config-file tools/golden-gen/pyproject.toml     tools/golden-gen/src tools/golden-gen/scripts
+"$GOLDEN_DEV_ENV/bin/python" -m ruff check \
+    tools/golden-gen/src tools/golden-gen/tests tools/golden-gen/scripts
+"$GOLDEN_DEV_ENV/bin/python" -m mypy \
+    --config-file tools/golden-gen/pyproject.toml \
+    tools/golden-gen/src tools/golden-gen/scripts
 ```
 
 If `CARGO_TARGET_DIR` is configured, use its actual binary path. Both environment paths must be unused or intentionally dedicated to this checkout. A focused or skipped suite does not establish the complete nine-gate result. The historical `release_cpu.py` defines exact offline commands and checks for missing/skipped/empty results; prepare its dependency cache before invoking that producer. Installing dependencies or a green CPU suite does not mean numerical/model acceptance.
@@ -44,7 +49,8 @@ Inspect the three actual CLI parsers without loading a model:
 A synthetic lifecycle smoke produces an external fake corpus:
 
 ```bash
-"$GOLDEN_DEV_ENV/bin/python" -m golden_gen generate --dry-run     --output-dir /tmp/vllm-oxide-rc-golden-dry-run
+"$GOLDEN_DEV_ENV/bin/python" -m golden_gen generate --dry-run \
+    --output-dir /tmp/vllm-oxide-rc-golden-dry-run
 ```
 
 That command loads no GPU/model and is not publishable evidence. Use a new path for every attempt. Generated artifacts under `output/`, local logs/environments and retained evidence do not belong in git.

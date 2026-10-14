@@ -3,7 +3,7 @@
 This checkout documents historical `v0.2.0.rc.1`. New users should upgrade to [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0).
 
 Start with the [README](README.md), [documentation index](docs/README.md) and
-[v0.2.0 release notes](docs/releases/v0.2.0-rc.1.md) for installation, examples and
+[RC release notes](docs/releases/v0.2.0-rc.1.md) for installation, examples and
 supported behavior. This repository uses GitHub Issues for public questions and
 reports. English and Chinese are both welcome. There is no separate chat,
 discussion forum or support service.

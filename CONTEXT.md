@@ -54,18 +54,13 @@ _Avoid_: model runner (collapsed into EngineCore for single-GPU scope).
 Owns physical `Block`s (`block_id`, `ref_count`, `hash`, `token_ids`), the free-list deque, the used-set, and the prefix-cache hashtable (`hash_to_block_id`). Mirrors nano-vllm's xxhash-chained prefix-cache algorithm. CoW semantics for shared prefix blocks. `kvcache_block_size = 256` (constant).
 _Avoid_: block manager (V0 term; V1 split BlockPool from KVCacheManager).
 
-**KVCacheManager**:
-Deliberate information-hiding adapter at the scheduler-facing seam.
-The **only** Scheduler-facing seam over `BlockPool` + the physical
-`PagedKVCache`. The Scheduler never imports `BlockPool` or
-`attention::PagedKVCache` directly. Its value is what the Scheduler
-cannot see — `BlockPool`, `BlockPoolError`, physical `PagedKVCache`
-internals — not behavioural depth: 6 methods are one-line delegations
-by design; `compute_slot_mapping` is the sole logic-carrying bridge.
-Owns the mapping from logical block tables to physical block ids and
-paged-cache slot indices.
-_Avoid_: block-to-slot mapper (undersells the seam — the value is what
-it hides, not what it maps).
+**KvCacheManager**:
+The scheduler-facing boundary over `BlockPool` and the physical `PagedKVCache`.
+It owns allocation/release operations and translates logical block tables into
+physical cache slots. The Scheduler uses this boundary without importing
+`BlockPool` or `attention::PagedKVCache` directly. Older design records spell
+the conceptual name `KVCacheManager`; the Rust type is `KvCacheManager`.
+_Avoid_: block-to-slot mapper (omits allocation and ownership responsibilities).
 
 **Scheduler**:
 The sole owner of request lifecycle, admission, fairness, token and cache budgets, preemption, progress detection, and application of `StepResult`. It expresses executable work as immutable `StepPlan` values.

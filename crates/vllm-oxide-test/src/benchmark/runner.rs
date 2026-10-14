@@ -31,16 +31,31 @@ fn ensure_no_unrelated_compute_processes() -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let pids = String::from_utf8(output.stdout)
-        .context("nvidia-smi process output is not UTF-8")?
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| *pid != std::process::id())
-        .collect::<Vec<_>>();
+    let pids = parse_compute_processes(
+        &String::from_utf8(output.stdout).context("nvidia-smi process output is not UTF-8")?,
+        std::process::id(),
+    )?;
     if !pids.is_empty() {
         bail!("unrelated CUDA compute processes are active: {pids:?}");
     }
     Ok(())
+}
+
+fn parse_compute_processes(output: &str, own_pid: u32) -> Result<Vec<u32>> {
+    let mut others = Vec::new();
+    for line in output.lines() {
+        let pid = line
+            .trim()
+            .parse::<u32>()
+            .context("malformed CUDA compute-process identity")?;
+        if pid == 0 {
+            bail!("CUDA compute-process identity must be positive");
+        }
+        if pid != own_pid {
+            others.push(pid);
+        }
+    }
+    Ok(others)
 }
 
 struct ActiveMemoryMonitor {
@@ -226,8 +241,16 @@ pub fn run_release_benchmark(
             let guard = BenchmarkEnvironmentGuard::install(output_dir, &destination, &call_id)?;
             let outputs = llm.generate(&workload_inputs, &params);
             drop(guard);
-            let memory = monitor.finish()?;
-            let outputs = outputs?;
+            let memory = monitor.finish();
+            let (outputs, memory) = match (outputs, memory) {
+                (Ok(outputs), Ok(memory)) => (outputs, memory),
+                (Err(primary), Err(secondary)) => {
+                    return Err(primary.context(format!(
+                        "generate primary failure; monitor secondary failure: {secondary:#}"
+                    )))
+                }
+                (Err(error), _) | (_, Err(error)) => return Err(error),
+            };
             if outputs.len() != workload_inputs.len()
                 || outputs
                     .iter()
@@ -282,4 +305,17 @@ pub fn run_release_benchmark(
     output.write_all(b"\n")?;
     output.sync_all()?;
     Ok(evidence)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn malformed_process_queries_never_disappear_as_an_empty_owner_set() -> anyhow::Result<()> {
+        assert!(super::parse_compute_processes("N/A\n", 10).is_err());
+        assert!(super::parse_compute_processes("10\nbad PID\n", 10).is_err());
+        assert!(super::parse_compute_processes("0\n", 10).is_err());
+        assert_eq!(super::parse_compute_processes("10\n20\n", 10)?, [20]);
+        assert!(super::parse_compute_processes("", 10)?.is_empty());
+        Ok(())
+    }
 }

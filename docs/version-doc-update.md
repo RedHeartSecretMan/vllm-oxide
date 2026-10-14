@@ -44,9 +44,9 @@ maintenance follows the user's explicit request to repair the three public
 source snapshots together. No extra backup tags or permanent work branches are
 published.
 
-## Verified maintenance checks
+## Previous maintenance checks
 
-The 2026-10-14 maintenance was checked separately from the original full-model
+The earlier focused 2026-10-14 maintenance was checked separately from the original full-model
 acceptance records. Complete Rust workspace tests passed for all four source
 checkouts, including internal release-tooling tests where that version has the
 feature. Complete Python CPU suites had no failures or skipped cases:
@@ -66,3 +66,78 @@ These are regression and interoperability checks, not a new 747-item numerical
 measurement or a new performance baseline. The maintained snapshots pin Rust
 1.94.0; early unverified Rust 1.75 declarations are corrected without changing
 the existing engine dependency locks or Candle revision.
+
+## Follow-up whole-project review — 2026-10-14
+
+The follow-up review includes all tracked source/configuration/documentation
+files in the main and three maintained release snapshots, plus the two retained
+accuracy research drafts on `main`. Repeated identical files are reviewed once
+with each version-specific difference checked separately. This is a source
+review and a finite regression matrix; it does not claim all possible prompts,
+parameter combinations or hardware configurations have been tested.
+
+The additional source fixes cover:
+
+- Reject out-of-vocabulary prompt token IDs before request admission, unsupported
+  Qwen3 computation modes, and malformed normalization/model settings; respect
+  declared attention bias and Q/K normalization.
+- Avoid directory-symlink cycles during cached Hub discovery, ignore directories
+  named like tensor shards, report directory errors and fetch all validated
+  indexed shards for a cold v0.1.0 Hub cache.
+- Handle degenerate sampling inputs and validate CLI temperature/top-k/top-p/token
+  limits before loading a model. Fixture publication and manifest errors remain
+  explicit rather than overwriting retained output.
+- Make the v0.1.0 comparator reject empty or missing declared evidence, propagate
+  errors, load expanded canonical and regression prompts, and compare the full
+  shared causal prefix through its first divergent row. Its L1 helper now
+  recognizes a reference runner-up while requiring the actual candidate argmax;
+  the original `2 × atol` default and regression skip map remain unchanged.
+  All four versions refuse empty/inconsistent L2 data and invalid tolerances,
+  and non-finite compared values cannot pass. Unimplemented L3 is an explicit
+  error rather than synthetic acceptance. Original measured failures remain
+  separately identifiable.
+- Audit the CUDA dependency graph as metadata with all features selected; the
+  audit does not compile CUDA. The maintained RC CI explicitly tests Rust 1.94.0
+  and stable with default and internal-golden suites, plus native cargo-deny.
+  The v0.1.0 source now also contains the project's Apache-2.0 `LICENSE` file.
+  RC/final/main CPU validation tools build from source archives without `.git`,
+  with an explicitly unavailable receipt; authoritative stages still need a
+  reviewed Git checkout and matching source-bound binaries.
+
+Historical fixture assets, original model/policy/registry bytes, numerical
+budgets and all original PASS/FAIL sources retain their identities. This review
+adds no 747-item model-accuracy rerun or new performance baseline. Research
+prototype and source regression results are reported only for the paths that
+actually ran.
+
+### Follow-up verification status
+
+The actual CUDA sampler regressions completed independently of the historical
+full-model acceptance:
+
+| Source checkout | Executed CUDA sampler tests | Ignored tests |
+|---|---:|---:|
+| Maintained v0.1.0 | 1 | 0 |
+| Maintained RC | 9 | 0 |
+| Maintained v0.2.0 | 11 | 1 manual microbenchmark |
+| Main review candidate | 11 | 1 manual microbenchmark |
+
+The new required CUDA boundary cases executed; only the explicitly manual
+microbenchmark stays ignored. CLI parser regressions also ran successfully in
+all four checkouts. Complete default Rust workspace tests and Clippy passed
+for all four sources; internal-golden tests also passed where the feature exists.
+All four source archives built the CPU workspace without Git metadata. Ruff,
+mypy and local documentation links passed, as did the main public Rust API docs.
+
+| Source checkout | Complete Python CPU tests | Failures / errors / skips |
+|---|---:|---:|
+| Maintained v0.1.0 | 147 | 0 / 0 / 0 |
+| Maintained RC | 368 | 0 / 0 / 0 |
+| Maintained v0.2.0 | 473 | 0 / 0 / 0 |
+| Main review candidate | 473 | 0 / 0 / 0 |
+
+The legacy v0.1.0 generator now returns failure without publishing an incomplete
+manifest when an oracle fails. Its validation wrapper uses fresh local fixtures,
+a locked GPU environment and the CUDA build feature, retaining local logs without
+automatic Release publication. These are source-maintenance regression results,
+not a new full-model numerical verdict or performance measurement.

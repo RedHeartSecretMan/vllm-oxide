@@ -49,7 +49,10 @@ This required `--device` also accepts `cpu` or `cuda`. Fixed inputs are BF16 gat
 A prepared canonical reference capture can be invoked as follows; paths must point to the retained original inputs and a new output:
 
 ```bash
-"$GOLDEN_WORKER_PYTHON" tools/golden-gen/scripts/canonical03_layer_probe.py reference     --repo-root "$PWD" --output-dir /tmp/vllm-oxide-rc-canonical03-new     --model-path /absolute/path/to/Qwen3-0.6B     --manifest /absolute/path/to/original/manifest.json
+"$GOLDEN_WORKER_PYTHON" tools/golden-gen/scripts/canonical03_layer_probe.py reference \
+    --repo-root "$PWD" --output-dir /tmp/vllm-oxide-rc-canonical03-new \
+    --model-path /absolute/path/to/Qwen3-0.6B \
+    --manifest /absolute/path/to/original/manifest.json
 ```
 
 Reference mode validates exact manifest/fixture hashes and original token history before loading Transformers on CUDA. It captures embedding, layer-zero normalization/projection/rotary/attention checkpoints, all 28 layer outputs and final normalization for the fixed two-step `canonical_03` history. Outputs include request/setup data, Torch JSONL/attention records, `logits.npz` and a `reference.json` with checksums and original identities; inspect the source's actual metadata rather than inferring acceptance from files being present.
@@ -57,7 +60,10 @@ Reference mode validates exact manifest/fixture hashes and original token histor
 After the corresponding original candidate capture is available, comparison runs on CPU:
 
 ```bash
-"$GOLDEN_WORKER_PYTHON" tools/golden-gen/scripts/canonical03_layer_probe.py compare     --repo-root "$PWD" --output-dir /absolute/path/to/new/reference-capture     --previous-dir /absolute/path/to/original/candidate-capture     --manifest /absolute/path/to/original/manifest.json
+"$GOLDEN_WORKER_PYTHON" tools/golden-gen/scripts/canonical03_layer_probe.py compare \
+    --repo-root "$PWD" --output-dir /absolute/path/to/new/reference-capture \
+    --previous-dir /absolute/path/to/original/candidate-capture \
+    --manifest /absolute/path/to/original/manifest.json
 ```
 
 The comparison checks capture provenance, shapes/dtypes and bit-equivalence of the fixed prefix before printing a diagnostic JSON summary. It does not manufacture candidate traces or new full-model acceptance. `--regression11` is narrower: the original reference fixture has token/top-5 data only, so the checker establishes collection equivalence rather than a full-logit reference L1 comparison. Preserve all original IDs and never use these opened diagnostic cases as a fresh holdout.

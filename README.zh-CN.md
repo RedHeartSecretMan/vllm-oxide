@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
 
 ## 验证与性能
 
-RC1 保留历史实验候选状态：487 个采集项、153 个采集组、7 项算子 profile 与 22 项公开行为检查已核验，但有 **18 项数值失败**。没有完整性能结论或生产精度保证。详见[原始结果及来源](docs/releases/v0.2.0-rc.1.md#验证与性能)。本次文档维护不改变实现、数值预算、证据身份和判定，见[维护记录](docs/version-doc-update.md)。
+RC1 保留历史实验候选状态：487 个采集项、153 个采集组、7 项算子 profile 与 22 项公开行为检查已核验，但有 **18 项数值失败**。没有完整性能结论或生产精度保证。详见[原始结果及来源](docs/releases/v0.2.0-rc.1.md#验证与性能)。本次源码维护包含针对性代码修复，原数值预算、证据身份和判定保持不变，见[维护记录](docs/version-doc-update.md)。
 
 ## 开发与验证
 
@@ -99,7 +99,7 @@ cargo build --locked --workspace
 cargo test --locked --workspace
 ```
 
-CPU 构建用于开发与测试；**实际推理必须启用 `--features cuda` 并使用 GPU**。此历史源码的自动 GitHub CI 在 CPU 上检查格式、Clippy、Rust 测试与依赖；Python 工具有独立的本地 CPU 测试。当前 `main` 的后续 CI 不属于此源码快照。模型精度、CUDA API/CLI 功能和性能通过本地 GPU 单独验证。CI 通过本身不代表模型精度已经验证。
+CPU 构建用于开发与测试；**实际推理必须启用 `--features cuda` 并使用 GPU**。维护后的 CPU CI 在 Rust 1.94.0 和 stable 上检查格式、Clippy、默认及 internal-golden 测试，另运行原生依赖审计。Python 工具有独立的本地 CPU 测试；本 RC 不含 main 的 Python 或文档检查任务。模型精度、CUDA API/CLI 功能和性能通过本地 GPU 单独验证。CI 通过本身不代表模型精度已经验证。
 
 开发环境与完整检查见 [CONTRIBUTING.md](CONTRIBUTING.md)和[开发指南](docs/development.md)。[架构概览](docs/architecture.md)说明一次生成调用对应的当前实现，[验证指南](docs/validation/README.md)区分日常 CI 和真实模型检查。
 

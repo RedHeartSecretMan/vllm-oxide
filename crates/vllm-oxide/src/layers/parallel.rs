@@ -3,9 +3,8 @@
 //! The TP (tensor-parallel) seam: each style tag is a zero-sized marker encoding
 //! which projection this `Linear<P>` IS (QKV-fused / gate-up-fused / row-parallel).
 //! The trait carries per-style constants (`SHARD_DIM`, `num_shards`) and the
-//! `slice_for_rank` weight-slicing hook — v0.2.0 ships the identity default
-//! (`Cow::Borrowed`, zero-cost); v0.2 overrides per style with real GQA math
-//! for `QkvMerged`, 2-way split for `GateUpMerged`, dim-1 narrow for `Row`.
+//! `slice_for_rank` weight-slicing hook. Execution is single-GPU: the hook
+//! returns `Cow::Borrowed`, with rank slicing and collective reduction deferred.
 
 use candle_core::{Result, Tensor};
 use std::borrow::Cow;
@@ -20,7 +19,7 @@ pub enum ShardId {
 
 /// Type-level marker for a parallel-style tag.
 ///
-/// Three v0.1 style tags implement this: [`QkvMerged`], [`GateUpMerged`],
+/// Three projection style tags implement this: [`QkvMerged`], [`GateUpMerged`],
 /// [`Row`]. Plain `Column` is deferred (YAGNI — no Qwen3 consumer). Each impl
 /// encodes static projection geometry:
 ///
@@ -30,10 +29,10 @@ pub enum ShardId {
 /// - [`ParallelStyle::num_shards`] — how many sub-projections the style fuses.
 ///   `Row=1`, `GateUpMerged=2`, `QkvMerged=3`.
 ///
-/// `slice_for_rank` is the weight-loader TP seam (ADR-0002). v0.2.0 ships the
+/// `slice_for_rank` is the weight-loader TP seam (ADR-0002). It uses the
 /// identity default (`Cow::Borrowed`, zero-cost), suitable for hardcoded TP=1.
-/// v0.2 overrides it per style with the real rank-slicing math (GQA replica
-/// for `QkvMerged`, dim-0 chunk for `GateUpMerged`, dim-1 narrow for `Row`).
+/// A future implementation would need GQA replication for `QkvMerged`, dim-0
+/// slicing for `GateUpMerged`, and dim-1 slicing plus reduction for `Row`.
 /// The seam lives here, on the trait, so model code never branches on rank —
 /// adding TP>1 means new trait impls, not new model code.
 pub trait ParallelStyle: Send + Sync + 'static {
@@ -47,11 +46,11 @@ pub trait ParallelStyle: Send + Sync + 'static {
     /// Whether bias should be fused into the matmul on this rank. Column-parallel
     /// styles always fuse (their bias slice is owned by this rank). Row-parallel
     /// styles fuse only on rank 0 at TP>1 — bias is replicated, so summing it
-    /// across `world_size` ranks via all-reduce would multiply it. v0.1: always
+    /// across `world_size` ranks via all-reduce would multiply it. Currently always
     /// `true` (single-rank), so [`crate::layers::linear::Linear::forward`]
     /// unconditionally adds bias when present.
     ///
-    /// v0.2 overrides per style with the rank-aware check (`tp.rank == 0`).
+    /// Rank-aware bias handling is deferred with tensor-parallel execution.
     fn should_fuse_bias(_tp: &TpConfig) -> bool {
         true
     }
@@ -61,16 +60,15 @@ pub trait ParallelStyle: Send + Sync + 'static {
     /// for the rank's owned output slice; the caller concatenates slices to
     /// reconstruct the full output dim. Row-parallel styles all-reduce (sum)
     /// partial-in-input results into the complete output at TP>1.
-    /// v0.1: identity (single rank, no NCCL comms).
+    /// Current implementation: identity (single rank, no NCCL comms).
     ///
-    /// v0.2 overrides per style: column stays identity, row injects the
-    /// all-reduce primitive.
+    /// Row all-reduce requires a future tensor-parallel implementation.
     fn reduce_output(output: Tensor, _tp: &TpConfig) -> Result<Tensor> {
         Ok(output)
     }
 
-    /// TP-seam weight slicing. v0.1 identity (`Cow::Borrowed`, zero clone);
-    /// v0.2 overrides per style with real per-rank math.
+    /// TP-seam weight slicing. Currently identity (`Cow::Borrowed`, zero clone);
+    /// per-rank slicing is deferred with tensor-parallel execution.
     ///
     /// `rank` / `world_size` pass directly — weight-load math has no need for
     /// NCCL comms (comms are for runtime all-reduce, not weight loading).
@@ -120,19 +118,19 @@ impl ParallelStyle for Row {
     }
 }
 
-/// Internal tensor-parallel feasibility seam. v0.2.0 executes
+/// Internal tensor-parallel feasibility seam. Execution supports
 /// [`TpConfig::Single`] only; [`TpConfig::Sharded`] is non-constructible.
 ///
 /// `Sharded`'s inner type is crate-private and cannot be built outside this
-/// internal module graph. Runtime NCCL support is deferred beyond v0.2.0.
+/// internal module graph. Runtime NCCL support is deferred.
 ///
-/// Model code does not read `TpConfig` at runtime in v0.2.0; the field remains
+/// Model code does not read `TpConfig` at runtime; the field remains
 /// only as an internal feasibility anchor.
 #[derive(Debug, Clone)]
 pub enum TpConfig {
-    /// Single-GPU (TP=1). The only constructible variant in v0.2.0.
+    /// Single-GPU (TP=1). The only constructible variant.
     Single,
-    /// Future tensor-parallel feasibility shape; not supported in v0.2.0.
+    /// Future tensor-parallel feasibility shape; execution is unsupported.
     Sharded(ShardedParams),
 }
 
@@ -143,7 +141,7 @@ pub(crate) struct ShardedParams {
 }
 
 impl TpConfig {
-    /// The only public constructor in v0.1. Returns [`TpConfig::Single`].
+    /// Returns the supported single-GPU configuration [`TpConfig::Single`].
     pub const fn single() -> Self {
         TpConfig::Single
     }

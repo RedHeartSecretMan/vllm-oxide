@@ -13,11 +13,10 @@
 targets = [
     "x86_64-unknown-linux-gnu",
 ]
-# Do NOT enable all-features: `cuda` feature is GPU-only and pulls in
-# candle-flash-attn from git + kernel compilation metadata that is irrelevant
-# for a supply-chain audit. The default (CPU-only) feature set is the correct
-# scope for CI.
-all-features = false
+# Audit optional production dependencies, including the CUDA backend. Cargo
+# metadata resolves their manifests without compiling kernels or using a GPU.
+# Keep this default aligned with CI's explicit `--all-features` invocation.
+all-features = true
 no-default-features = false
 
 [output]
@@ -61,8 +60,7 @@ allow = [
     # NOTE: MPL-2.0 is a weak file-level copyleft. It is not GPL/AGPL/LGPL.
     # option-ext@0.2.0 is the only dep using it. Accepted because MPL-2.0 is
     # standard in the Rust ecosystem and not in the project's prohibited set.
-    # See deny.toml inline comment for rationale.
-    #
+        #
     # NOT allowed (copyleft):
     # LGPL-2.1-or-later — used by r-efi@5.3.0, r-efi@6.0.0. FLAGGED below.
 ]
@@ -70,7 +68,7 @@ confidence-threshold = 0.8
 
 # No per-crate exceptions needed. r-efi (LGPL-2.1-or-later) exists in the
 # Cargo.lock but is filtered out on x86_64-unknown-linux-gnu target.
-# See the full findings report for details on copyleft license analysis.
+# The target filter keeps dependencies for unrelated platforms out of the graph.
 # exceptions = []
 
 # License clarifications for crates whose license metadata is ambiguous

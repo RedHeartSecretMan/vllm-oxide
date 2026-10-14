@@ -8,7 +8,7 @@
 | v0.2.0.rc.1: [English](v0.2.0-rc.1.en.md) / [中文](v0.2.0-rc.1.md) | Historical experimental candidate, 18/66 numerical failures |
 | [v0.1.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0) | Initial source release; original wider Rust API |
 
-This checkout belongs to RC1. [Documentation maintenance](../version-doc-update.md) updates the historical archive while retaining the original implementation, result, release date, status and attached checksums. Final release results do not apply retrospectively to earlier versions.
+This checkout belongs to RC1. [Documentation maintenance](../version-doc-update.md) updates the historical archive with version-specific fixes while retaining original implementation and measurement identities, release date, status and attached checksums. Final release results do not apply retrospectively to earlier versions.
 
 ## Shared release format
 
@@ -19,7 +19,7 @@ Use [the template](template.md) for English and Chinese descriptions: highlights
 | Source | Exact implementation and documentation commits, clean intended changes |
 | Scope | Version-specific model, API and execution boundaries |
 | Checks | Actual CPU results; relevant local GPU results for implementation changes |
-| Historical maintenance | Documentation-only diff, original measurement identities and verdicts retained |
+| Historical maintenance | Review the version-specific source diff and regressions; retain original measurement identities and verdicts |
 | Artifacts | Source archives, existing asset purpose/size/SHA and no invented binaries |
 | Publication | Correct tag, release date/status and bilingual body; preserve original attached assets |
 

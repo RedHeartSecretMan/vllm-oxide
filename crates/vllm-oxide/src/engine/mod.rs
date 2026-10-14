@@ -346,6 +346,11 @@ impl EngineCore {
         ))
     }
 
+    /// Vocabulary bound for validating model inputs before request admission.
+    pub(crate) fn vocab_size(&self) -> usize {
+        self.model.vocab_size()
+    }
+
     /// Whether there are any pending or running sequences.
     pub(crate) fn is_running(&self) -> bool {
         self.scheduler.is_running()

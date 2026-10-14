@@ -31,8 +31,10 @@ expects. No remap table. `from_vb` for `QkvMerged` reads `q_proj.weight` /
 - `HF_HUB_OFFLINE=1`: the cached ref is resolved to one
   `snapshots/<commit>` root before artifacts are read.
 
-**Lazy mmap**: Tensors are not materialised until `vb.get(..)` is called.
-Loading a multi-GB checkpoint is O(1); only touched tensors cost memory.
+**Lazy mmap**: Mapping the safetensors files avoids eagerly copying all tensor
+data. Header parsing still scales with metadata, and `vb.get(..)` materializes
+requested tensors, including device transfer and dtype conversion when needed.
+Constructing the full model therefore still reads and allocates its weights.
 
 **`slice_for_rank` seam** (v0.1 identity): The weight-loader TP hook lives on
 the `ParallelStyle` trait (ADR-0001), not the loader. v0.1 returns

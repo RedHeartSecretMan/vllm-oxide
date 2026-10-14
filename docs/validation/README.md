@@ -6,7 +6,7 @@ The RC's recorded numerical result is **48 of 66 PASS, 18 FAIL**. All 487 captur
 
 | Check | Execution | Establishes |
 |---|---|---|
-| Rust checks and dependency audit | Ordinary CPU CI | Compilation, structural and tested state-machine behavior |
+| Rust 1.94.0/stable checks and native dependency audit | Maintained CPU CI | Default/internal-golden compilation and tested structural behavior |
 | Python unit/adapter and transport tests | Local CPU | Evidence-reader, producer, failure and archive contracts |
 | CUDA CLI/example | Local GPU, including WSL2 | Build and selected public generation behavior |
 | Layered accuracy | Fixed source/model/history, GPU collection plus CPU evaluation | Each declared operator, numerical and behavior check under frozen budgets |

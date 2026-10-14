@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Contributing](../CONTRIBUTING.md)
 
-Use `main` for new contributions. This guide describes the actual historical `v0.2.0.rc.1` tree when reproducing or inspecting it; later CI jobs and source tools are not included here.
+Use `main` for new contributions. This guide describes maintained `v0.2.0.rc.1`, including its explicit CPU workflow refresh. Original RC measurements remain bound to their original source; later production tooling is not backported into this tree.
 
 ## Environment and source layout
 
@@ -13,7 +13,7 @@ Use `main` for new contributions. This guide describes the actual historical `v0
 | `crates/vllm-oxide-cli` | One raw-text prompt via the library API |
 | `crates/vllm-oxide-test` | Unsupported numerical capture, benchmark and transport executables |
 | `tools/golden-gen` | Python 3.12 validation package, locked CPU/GPU dependencies, fixtures and CPU tests |
-| `research/prototype-candle-stack` | Separate experimental Cargo project; not a workspace member, run from an isolated copy |
+| `research/prototype-candle-stack` | Independent Cargo workspace and lockfile; run directly with its own manifest |
 | `docs/adr`, `docs/validation` | Original decisions, frozen inventories, budgets and contracts |
 
 Rust CPU checks need neither CUDA nor model downloads. Installing Torch/vLLM worker dependencies for adapter tests does not imply GPU inference.
@@ -29,10 +29,11 @@ cargo +1.94.0 clippy --locked --workspace --all-targets --features internal-gold
 cargo +1.94.0 test --locked --workspace
 cargo +1.94.0 test --locked --workspace --features internal-golden
 cargo +1.94.0 doc --locked -p vllm_oxide --no-deps
-cargo deny --frozen check
+cargo install --locked --version 0.20.2 cargo-deny
+cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
 ```
 
-The historical [GitHub workflow](../.github/workflows/ci.yml) runs current stable format, Clippy, default tests and cargo-deny on `ubuntu-latest`; it has no Python job, Rust-version matrix or documentation checker. The additional local commands above exercise the internal harness as well. Report exactly which commands ran. The nine-gate producer in `golden_gen.release_cpu` also requires a complete prepared dependency cache for its `--offline` commands.
+The maintained [GitHub workflow](../.github/workflows/ci.yml) runs Rust 1.94.0 and stable on `ubuntu-latest`: formatting, Clippy, default tests/doc tests and internal-golden tests. A separate native cargo-deny job uses pinned 0.20.2 and all-feature dependency metadata; metadata auditing does not compile CUDA. This RC workflow has no Python job or documentation checker. Report exactly which commands ran. The nine-gate producer in `golden_gen.release_cpu` also requires a complete prepared dependency cache for its `--offline` commands.
 
 ## Python checks
 

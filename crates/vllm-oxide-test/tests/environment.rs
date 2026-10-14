@@ -80,3 +80,47 @@ fn benchmark_cli_rejects_missing_deterministic_environment() -> anyhow::Result<(
     assert!(!directory.path().join("benchmark.json").exists());
     Ok(())
 }
+
+#[test]
+fn release_archive_builds_without_a_git_evidence_receipt() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let crate_root = directory.path().join("crates/vllm-oxide-test");
+    std::fs::create_dir_all(&crate_root)?;
+    std::fs::write(crate_root.join("build.rs"), include_str!("../build.rs"))?;
+    std::fs::write(
+        crate_root.join("source_identity.rs"),
+        include_str!("../source_identity.rs"),
+    )?;
+    let executable = directory.path().join("archive-build-script");
+    let compiled = Command::new("rustc")
+        .arg("--edition=2021")
+        .arg(crate_root.join("build.rs"))
+        .arg("-o")
+        .arg(&executable)
+        .output()?;
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let output = Command::new(&executable)
+        .env("CARGO_MANIFEST_DIR", &crate_root)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8(output.stdout)?
+        .contains("VLLM_OXIDE_BUILD_SOURCE_ID=unavailable-without-git"));
+    // Compilable archives still cannot be mistaken for an authoritative Git checkout.
+    let Err(error) = vllm_oxide_test::measurement::validate_measurement_identity(
+        directory.path(),
+        &"0".repeat(40),
+        &"0".repeat(40),
+    ) else {
+        anyhow::bail!("an archive without Git metadata supplied an authoritative identity")
+    };
+    assert!(error.to_string().contains("git rev-parse"));
+    Ok(())
+}

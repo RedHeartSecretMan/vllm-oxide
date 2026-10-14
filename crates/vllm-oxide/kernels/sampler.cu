@@ -49,9 +49,12 @@ __device__ inline uint64_t splitmix64(uint64_t value) {
 __device__ inline float gumbel_noise(uint64_t row_seed, uint32_t token) {
     const uint64_t bits = splitmix64(
         row_seed ^ (static_cast<uint64_t>(token) * 0xd6e8feb86659fd93ULL));
-    // Strictly inside (0, 1), including at both integer endpoints.
-    constexpr double denominator = 9007199254740993.0;  // 2^53 + 1
-    const double uniform = static_cast<double>((bits >> 11) + 1ULL) / denominator;
+    // 2^53 + 1 rounds to 2^53 in F64. Preserve existing draws, but clamp
+    // the single upper endpoint so log(-log(u)) cannot produce infinity.
+    constexpr double denominator = 9007199254740993.0;
+    const double uniform = fmin(
+        static_cast<double>((bits >> 11) + 1ULL) / denominator,
+        0x1.fffffffffffffp-1);
     return static_cast<float>(-log(-log(uniform)));
 }
 
@@ -340,7 +343,7 @@ __global__ void scale_temperature_kernel(
     // ADR-0009 keeps +inf valid as a uniform pre-filter distribution.
     const float value = input[index];
     const float scaled = isinf(temperature) ? 0.0f : value / temperature;
-    if (isfinite(value) && !isfinite(scaled)) {
+    if (isfinite(value) && (!isfinite(scaled) || fabsf(scaled) >= 0x1p24f)) {
         atomicExch(wide_required, 1U);
     }
     output[index] = scaled;
@@ -505,7 +508,8 @@ __global__ void categorical_gumbel_kernel(
         const float scaled = already_scaled
             ? logits[index]
             : (isinf(temperature) ? 0.0f : logits[index] / temperature);
-        if (!already_scaled && isfinite(logits[index]) && !isfinite(scaled)) {
+        if (!already_scaled && isfinite(logits[index]) &&
+            (!isfinite(scaled) || fabsf(scaled) >= 0x1p24f)) {
             atomicExch(wide_required, 1U);
         }
         const float score = scaled + gumbel_noise(row_seed, token);

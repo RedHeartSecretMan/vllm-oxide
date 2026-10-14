@@ -19,14 +19,14 @@ Its CPU-tested transport does not imply GPU numerical acceptance.
 ## Overview
 
 The golden comparison crate (`crates/vllm-oxide-test/`) implements three
-layers of comparison against golden fixtures produced by the Python golden
+comparison tiers against golden fixtures produced by the Python golden
 generator (`tools/golden-gen/`):
 
 | Layer | What it compares | When |
 |-------|-----------------|------|
 | **L1** | Greedy token reference match or explicit candidate-logit near tie | Always |
 | **L2** | Same-prefix logits tensor comparison (absolute tolerance) | Always |
-| **L3** | Per-layer activations (debug only) | `--debug` flag |
+| **L3** | Unavailable; requesting it returns an error | `--debug` is rejected |
 
 Before any GPU comparison, a CPU preflight matches the schema-v4 manifest to
 all canonical, flattened batch, and regression prompts; verifies asset names,
@@ -39,20 +39,25 @@ vLLM artifacts count only after the manifest records successful calibration.
 ### Prerequisites
 
 - Linux or WSL2 with the recorded RTX 4080 / SM 8.9 reproduction profile; source-bound validation uses its exact pinned environment.
-- Recorded Rust toolchain 1.94.0. The historical manifest declares 1.75, but that minimum was not validated.
-- Model weights for Qwen3-0.6B (local directory or HF Hub)
+- The maintained manifest and toolchain require Rust 1.94.0. The original 1.75 minimum was not validated and did not satisfy the locked dependencies.
+- Complete local Qwen3-0.6B weights; `--model-path` does not accept a Hub repository ID
 - Golden fixtures (local directory or GitHub Release)
+
+A source archive without `.git` can compile CPU tools. Its build receipt is
+`unavailable-without-git`, so formal capture, observation and performance still
+require a reviewed Git checkout and a matching source-bound binary. A successful
+archive build is not an authoritative source receipt.
 
 ### Run the authoritative comparator
 
 The former `tools/validate-release.sh authoritative <run-root>` entrypoint is
 disabled. The direct commands below are historical diagnostic tooling and do not
 authorize a layered release. Direct invocation is verbose because access binds a
-Definition-approved observation and retain a second set of candidate captures:
+Definition-approved observation and retains a second set of candidate captures:
 
 ```bash
 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
-cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
+cargo run --locked --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
     --mode authoritative \
     --repo-root /path/to/reviewed-checkout \
     --measurement-commit "$VLLM_OXIDE_MEASUREMENT_COMMIT" \
@@ -67,7 +72,7 @@ cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- 
 
 ```bash
 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
-cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
+cargo run --locked --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- \
     --mode authoritative \
     --repo-root /path/to/reviewed-checkout \
     --measurement-commit "$VLLM_OXIDE_MEASUREMENT_COMMIT" \
@@ -83,7 +88,7 @@ cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- 
 
 | Flag | Description |
 |------|-------------|
-| `--mode authoritative` | The only accepting comparator mode |
+| `--mode authoritative` | Historical comparator mode; it does not accept a layered release |
 | `--repo-root PATH` | Clean reviewed source checkout, matching the binary build fingerprint |
 | `--measurement-commit SHA` / `--measurement-tree SHA` | Frozen measured source identities |
 | `--approved-observation PATH` | Definition-tracked observation that unlocks holdout access |
@@ -93,7 +98,7 @@ cargo run --release -p vllm_oxide_test --features cuda --bin vllm-oxide-test -- 
 | `--repo OWNER/REPO` | GitHub repo (default: `RedHeartSecretMan/vllm-oxide`) |
 | `--cache-dir PATH` | Cache directory for downloaded goldens (default: `/tmp/vllm-oxide-goldens`) |
 | `--capture-dir PATH` | Fresh private destination for replay-audited candidate captures |
-| `--debug` | Enable L3 per-layer activations comparison |
+| `--debug` | Rejected: L3 activation comparison is not implemented |
 | `--json` | Output results as JSON |
 | `--l1-only` | Only run L1 comparison |
 | `--l2-only` | Only run L2 comparison |
@@ -118,7 +123,7 @@ Golden fixtures are described by a `manifest.json` (produced by
 - **Asset identity**: schema `4`, product `v0.2.0`, golden tag
   `goldens-v0.2`, and the SHA-256 identity of `goldens-v0.2.tar.gz`
 
-The release contains exactly `manifest.json` and `goldens-v0.2.tar.gz`; it does
+The historical golden contract requires exactly `manifest.json` and `goldens-v0.2.tar.gz`; it does
 not contain individual fixture assets. The downloader requires the requested
 tag to equal the manifest golden version, verifies the complete archive before
 exposure, and installs to
@@ -143,7 +148,8 @@ The report includes exact `expected`, `discovered`, `generated`, `compared`,
 fail-closed: the set must be non-empty, every expected fixture must reach its
 declared comparison, and missing/unexpected/skipped/failed must all be zero.
 Malformed manifests, unmatched identifiers, unsupported fixture shapes, and
-empty comparison sets exit non-zero. `--l1-only` or `--l2-only` is exploratory
+empty comparison sets exit non-zero. L2 refuses empty/inconsistent tensor and
+token geometry or invalid tolerances; non-finite compared values cannot pass. `--l1-only` or `--l2-only` is exploratory
 when it omits a declared comparison and therefore cannot satisfy the release
 gate. Before this comparator can run, its approval gate independently verifies
 the observation SHA, mechanical proposal, runtime/kernel identity, and sealed
@@ -191,14 +197,15 @@ host transfer occurs only for this explicitly configured diagnostic path.
 
 ### L3: Per-layer activations (debug)
 
-Skeleton in v0.2.0. A future model-introspection contract may compare per-layer
-hidden states to localise divergence sources.
+Per-layer comparison is not implemented. The maintained shared comparator
+returns an error, so the CLI rejects `--debug` rather than printing a synthetic
+PASS. A future implementation would need its own validated contract.
 
 ## Release Gate vs CI Gate
 
 | | CI (every push) | Release gate (pre-release) |
 |---|---|---|
-| **When** | Every push to any branch | Manual, before tagging a release |
+| **When** | Pull requests and pushes to `main` | Manual, before tagging a release |
 | **Where** | CPU-only (`cargo test`) | GPU (requires sm_89+) |
 | **What** | Property tests | Numerical validation against goldens |
 | **Result** | "CI green" | "Numerically validated" |
@@ -214,7 +221,7 @@ crates/vllm-oxide-test/
 ├── Cargo.toml
 ├── README.md
 └── src/
-    ├── lib.rs         # Public API
+    ├── lib.rs         # Workspace validation helpers; unsupported application API
     ├── main.rs        # CLI entrypoint
     ├── capture.rs     # private fail-closed raw-logit artifact consumer
     ├── types.rs       # Manifest schema types (matches Python schema.py)
@@ -223,7 +230,7 @@ crates/vllm-oxide-test/
     ├── download.rs    # exact-two download + verified atomic archive installation
     ├── l1.rs          # L1: token reference match + explicit near-tie classification
     ├── l2.rs          # L2: same-prefix logits comparison (absolute tolerance)
-    ├── l3.rs          # L3: per-layer activations (debug-only, skeleton)
+    ├── l3.rs          # Explicit error for unavailable per-layer comparison
     └── report.rs      # Comparison report generation
 ```
 
@@ -231,8 +238,8 @@ crates/vllm-oxide-test/
 
 ```bash
 # Run unit tests (CPU-only, no GPU required)
-cargo test -p vllm_oxide_test
+cargo test --locked -p vllm_oxide_test
 
 # Run full workspace tests
-cargo test
+cargo test --locked --workspace
 ```

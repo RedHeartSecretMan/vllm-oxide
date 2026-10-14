@@ -6,6 +6,11 @@ Version-specific maintenance is applied to the three existing release source
 snapshots at the user's request. It covers sampling numeric boundaries, model
 configuration validation, fixture output confinement, unaligned tensor reads,
 early EOS handling, and the research prototype's workspace and safety checks.
+The follow-up review additionally covers input/token bounds, Qwen3 configuration
+semantics, cached/indexed checkpoint discovery, CLI preflight, degenerate sampling
+and fixture publication. Version-specific comparator and CPU workflow fixes are
+detailed in the maintenance record. These changes do not relabel original model
+acceptance or performance measurements.
 Original measurements, budgets and historical verdicts retain their source
 identities. See [source maintenance](docs/version-doc-update.md) for scope and
 validation records.
@@ -17,7 +22,7 @@ Historical implementation entries are retained below. The source tree belongs to
 
 ## Documentation maintenance after v0.2.0 publication
 
-Refreshed bilingual overview, user/developer guides, research/prototype detail, tools/diagnostic instructions and release presentation. Executable implementation, locks, model inputs, budgets, measurements and original assets remain unchanged. See [the update record](docs/version-doc-update.md). The final [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) uses its own later implementation and acceptance.
+The initial documentation refresh aligned the bilingual overview, user/developer guides, research/prototype detail, tools/diagnostic instructions and release presentation without changing implementation. Subsequent source fixes are recorded separately above; locks, model inputs, budgets, measurements and original assets retain their original identities. See [the update record](docs/version-doc-update.md). The final [v0.2.0](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) uses its own later implementation and acceptance.
 
 ## v0.2.0.rc.1 — 2026-09-10
 

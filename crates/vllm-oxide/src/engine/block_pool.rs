@@ -10,8 +10,8 @@
 //! `BlockPool` is the middle leaf — below `KVCacheManager` (the only
 //! scheduler-facing seam) and above the physical `PagedKVCache`. The
 //! scheduler never imports `BlockPool` directly; it goes through
-//! `KVCacheManager`. This file contains `BlockPool` and `Block`, which
-//! are `pub(crate)` — the full `pub` lift happens in `lib.rs`.
+//! `KVCacheManager`. `BlockPool` and `Block` remain internal implementation
+//! details; `lib.rs` defines the supported crate-root API.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher;

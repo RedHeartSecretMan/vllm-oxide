@@ -7,7 +7,7 @@ pull requests.
 Follow the [community standards](CODE_OF_CONDUCT.md) in discussions and reviews.
 
 Start with the [documentation index](docs/README.md) and the
-[current release scope](docs/releases/v0.2.0-rc.1.en.md). For usage questions, see
+[historical RC scope](docs/releases/v0.2.0-rc.1.en.md). For usage questions, see
 [SUPPORT.md](SUPPORT.md); report vulnerabilities privately through
 [SECURITY.md](SECURITY.md).
 
@@ -31,7 +31,7 @@ The [development guide](docs/development.md) covers Rust 1.94.0, local CPU check
 the locked Python environments, code conventions and the distinction between
 CPU CI and GPU validation. It also explains which checks apply to each change.
 
-This historical checkout has automatic CPU-only Rust and dependency checks. Modern contributions should target `main`, which has the current test and documentation automation. No runner setup,
+This maintained RC has a CPU-only Rust 1.94.0/stable matrix, default/internal-golden tests and native dependency auditing. Modern contributions should target `main`, which also has Python and documentation automation. No runner setup,
 CUDA Toolkit or model download is needed for Rust and documentation checks.
 Contributors changing inference behavior should report any relevant local GPU
 validation and any checks they could not run.

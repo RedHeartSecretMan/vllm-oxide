@@ -88,7 +88,7 @@ The supported public types are `LLM`, `EngineOptions`, `Prompt`, `SamplingParams
 
 ## Validation and performance
 
-RC1 remains an experimental historical candidate: 487 capture items, 153 groups, seven operator profiles and 22 public behavior checks were checked, but **18 numerical cases failed**. No complete performance result or production accuracy guarantee is claimed. Read the [original result and provenance](docs/releases/v0.2.0-rc.1.en.md#validation-and-performance). This documentation update keeps implementation, numerical budgets, evidence identities and verdicts unchanged; see the [maintenance record](docs/version-doc-update.md).
+RC1 remains an experimental historical candidate: 487 capture items, 153 groups, seven operator profiles and 22 public behavior checks were checked, but **18 numerical cases failed**. No complete performance result or production accuracy guarantee is claimed. Read the [original result and provenance](docs/releases/v0.2.0-rc.1.en.md#validation-and-performance). The source maintenance includes focused code fixes; original numerical budgets, evidence identities and verdicts remain unchanged; see the [maintenance record](docs/version-doc-update.md).
 
 ## Development and validation
 
@@ -99,7 +99,7 @@ cargo build --locked --workspace
 cargo test --locked --workspace
 ```
 
-A CPU build supports development and tests; **actual inference requires `--features cuda` and a GPU**. This checkout's automatic GitHub CI checks formatting, Clippy, Rust tests and dependencies on CPU. Python tooling has its own local CPU tests. Current `main` has newer CI; this source snapshot does not claim those later jobs. Numerical accuracy, CUDA API/CLI behavior, and performance are validated separately on a local GPU. CI success alone does not establish model accuracy.
+A CPU build supports development and tests; **actual inference requires `--features cuda` and a GPU**. The maintained CPU CI checks formatting, Clippy, default and internal-golden tests on Rust 1.94.0 and stable, plus native dependency auditing. Python tooling has separate local CPU tests; this RC does not include main's Python or documentation jobs. Numerical accuracy, CUDA API/CLI behavior, and performance are validated separately on a local GPU. CI success alone does not establish model accuracy.
 
 For contribution setup and complete checks, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [development guide](docs/development.md). The [architecture overview](docs/architecture.md) maps a generation call to the current implementation, and the [validation guide](docs/validation/README.md) separates routine CI from real-model checks.
 

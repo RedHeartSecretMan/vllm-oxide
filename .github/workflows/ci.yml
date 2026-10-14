@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -11,32 +15,39 @@ concurrency:
 
 jobs:
   ci:
+    name: Rust ${{ matrix.toolchain }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.94.0", "stable"]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
-          cache: cargo
-
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rc-cpu-${{ matrix.toolchain }}
       - name: Check formatting
-        run: cargo fmt --check
-
+        run: cargo +${{ matrix.toolchain }} fmt --all --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test
+        run: cargo +${{ matrix.toolchain }} clippy --locked --workspace --all-targets --features internal-golden -- -D warnings
+      - name: Default tests and doc tests
+        run: cargo +${{ matrix.toolchain }} test --locked --workspace
+      - name: Internal release-tooling tests
+        run: cargo +${{ matrix.toolchain }} test --locked --workspace --features internal-golden
 
   deps:
     name: Dependency audit (cargo-deny)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      # Supply-chain gate: vulnerabilities, licenses, duplicate crates, allowed
-      # sources — policy lives in deny.toml. A newly-published RUSTSEC advisory
-      # fails this job; that is the intended early-warning behaviour.
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install pinned native audit tool
+        run: cargo install --locked --version 0.20.2 cargo-deny
+      - name: Check all production dependencies
+        run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
