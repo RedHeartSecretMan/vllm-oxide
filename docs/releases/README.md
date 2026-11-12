@@ -19,7 +19,7 @@ The RC Git tag is `v0.2.0-rc.1`, matching its Cargo package version and document
 ## Prepare the release
 
 1. Choose the supported model, dtype, hardware and public API scope. Keep user-visible changes in [CHANGELOG.md](../../CHANGELOG.md), including migration instructions for breaking changes.
-2. Align the workspace version in `Cargo.toml`, workspace packages in `Cargo.lock`, README examples, release notes and tag. New release tags use `vMAJOR.MINOR.PATCH`; new prereleases use `vMAJOR.MINOR.PATCH-rc.N`. Historical tag names stay unchanged.
+2. Align the workspace version in `Cargo.toml`, workspace packages in `Cargo.lock`, README examples, release notes and tag. New release tags use `vMAJOR.MINOR.PATCH`; new prereleases use `vMAJOR.MINOR.PATCH-rc.N`. Historical tag names stay unchanged, except the RC tag renamed on 2026-11-12 (see above).
 3. Run the applicable checks and record their actual source identity:
 
    | Change | Validation |

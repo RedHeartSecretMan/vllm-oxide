@@ -107,8 +107,8 @@ transitive external signature types, not new crate-root re-exports.
 - A source-bound verification report and checksum file. Historical numerical
   failures and incomplete checks remain documented in the [RC1 notes](docs/releases/v0.2.0-rc.1.en.md).
 
-The original Git tag is `v0.2.0-rc.1`; the hyphenated heading follows the Cargo
-package version. This candidate was superseded by v0.2.0.
+The Git tag is `v0.2.0-rc.1`, matching the Cargo package version. The tag was renamed
+from `v0.2.0.rc.1` on 2026-11-12 to restore SemVer compliance. This candidate was superseded by v0.2.0.
 
 ## [0.1.0] - 2026-07-26
 
