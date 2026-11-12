@@ -107,7 +107,7 @@ transitive external signature types, not new crate-root re-exports.
 - A source-bound verification report and checksum file. Historical numerical
   failures and incomplete checks remain documented in the [RC1 notes](docs/releases/v0.2.0-rc.1.en.md).
 
-The original Git tag is `v0.2.0.rc.1`; the hyphenated heading follows the Cargo
+The original Git tag is `v0.2.0-rc.1`; the hyphenated heading follows the Cargo
 package version. This candidate was superseded by v0.2.0.
 
 ## [0.1.0] - 2026-07-26
@@ -135,5 +135,5 @@ package version. This candidate was superseded by v0.2.0.
 
 [Unreleased]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/RedHeartSecretMan/vllm-oxide/compare/v0.1.0...v0.2.0
-[0.2.0-rc.1]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1
+[0.2.0-rc.1]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0-rc.1
 [0.1.0]: https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0

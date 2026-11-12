@@ -9,12 +9,12 @@ Use **v0.2.0** for the currently supported single-GPU Qwen3-0.6B/BF16 offline ge
 | Version | Published date | Status and validation | Release notes |
 |---|---|---|---|
 | [`v0.2.0`](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0) | 2026-10-13 | Current release; numerical, public CUDA functionality and performance validation passed | [English](v0.2.0.en.md) · [中文](v0.2.0.md) |
-| [`v0.2.0.rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0.rc.1) | 2026-09-10 | Historical experimental prerelease; 18 numerical failures, incomplete performance/minimum-toolchain verification | [English](v0.2.0-rc.1.en.md) · [中文](v0.2.0-rc.1.md) |
+| [`v0.2.0-rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.2.0-rc.1) | 2026-09-10 | Historical experimental prerelease; 18 numerical failures, incomplete performance/minimum-toolchain verification | [English](v0.2.0-rc.1.en.md) · [中文](v0.2.0-rc.1.md) |
 | [`v0.1.0`](https://github.com/RedHeartSecretMan/vllm-oxide/releases/tag/v0.1.0) | 2026-07-26 | Historical experimental release; four of eight full-output token checks differed, with skipped regression positions | [English](v0.1.0.en.md) · [中文](v0.1.0.md) |
 
 All three versions provide source archives. v0.1.0 also retains its original fixture archive and manifest; RC1 retains its original verification report and checksum file. v0.2.0 has no attached binary, model or raw-evidence assets. See the version's notes for exact download links and original asset digests.
 
-The historical RC Git tag is `v0.2.0.rc.1`; its Cargo package version and documentation filenames use `0.2.0-rc.1`. Do not substitute the filename spelling into a checkout or Release URL.
+The RC Git tag is `v0.2.0-rc.1`, matching its Cargo package version and documentation filenames.
 
 ## Prepare the release
 
@@ -127,7 +127,7 @@ documentation PR lands:
 | Tag | English source |
 |---|---|
 | `v0.1.0` | `docs/releases/v0.1.0.en.md` |
-| `v0.2.0.rc.1` | `docs/releases/v0.2.0-rc.1.en.md` |
+| `v0.2.0-rc.1` | `docs/releases/v0.2.0-rc.1.en.md` |
 | `v0.2.0` | `docs/releases/v0.2.0.en.md` |
 
 Select the intended tag and prepared file, then update the existing description:
@@ -172,7 +172,7 @@ every linked repository-local historical source commit is reachable from `origin
 
 ```bash
 git fetch origin main
-for RELEASE_TAG in v0.1.0 v0.2.0.rc.1 v0.2.0; do
+for RELEASE_TAG in v0.1.0 v0.2.0-rc.1 v0.2.0; do
   git merge-base --is-ancestor "$RELEASE_TAG^{commit}" origin/main || exit 1
 done
 ```

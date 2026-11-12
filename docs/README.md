@@ -42,7 +42,7 @@ Ordinary GitHub CI runs on CPU. Real CUDA API/CLI behavior, numerical accuracy, 
 |---|---|
 | [Release index and maintainer guide](releases/README.md) | All published versions, shared release format, and publication checks |
 | v0.2.0: [English](releases/v0.2.0.en.md) / [中文](releases/v0.2.0.md) | Current supported scope, compatibility, validation, and installation |
-| v0.2.0.rc.1: [English](releases/v0.2.0-rc.1.en.md) / [中文](releases/v0.2.0-rc.1.md) | Earlier candidate and its recorded validation limits; filenames retain the Cargo version spelling |
+| v0.2.0-rc.1: [English](releases/v0.2.0-rc.1.en.md) / [中文](releases/v0.2.0-rc.1.md) | Earlier candidate and its recorded validation limits; filenames retain the Cargo version spelling |
 | v0.1.0: [English](releases/v0.1.0.en.md) / [中文](releases/v0.1.0.md) | Initial release and historical API scope |
 | [Changelog](../CHANGELOG.md) | Changes grouped by version |
 | [GitHub Releases](https://github.com/RedHeartSecretMan/vllm-oxide/releases) | Source tags, archives, and published descriptions |

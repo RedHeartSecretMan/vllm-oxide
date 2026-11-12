@@ -9,7 +9,7 @@ original implementation.
 | Version | Original implementation | Maintained source |
 |---|---|---|
 | `v0.1.0` | [`5203749`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/52037493b38c2d01c4c07a98d2d8f22ca68f2509) | [`v0.1.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/v0.1.0) |
-| `v0.2.0.rc.1` | [`21cd848`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/21cd848fb1256dd908a29d4f3b08596fe1dd39fc) | [`v0.2.0.rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/v0.2.0.rc.1) |
+| `v0.2.0-rc.1` | [`21cd848`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/21cd848fb1256dd908a29d4f3b08596fe1dd39fc) | [`v0.2.0-rc.1`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/v0.2.0-rc.1) |
 | `v0.2.0` | [`289cb65`](https://github.com/RedHeartSecretMan/vllm-oxide/commit/289cb65b475bb472b5c31db2615c3a5d4cbba0db) | [`v0.2.0`](https://github.com/RedHeartSecretMan/vllm-oxide/tree/v0.2.0) |
 
 ## Scope
